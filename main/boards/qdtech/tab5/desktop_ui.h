@@ -1,0 +1,1040 @@
+#pragma once
+
+#include "sdkconfig.h"
+#include "lvgl.h"
+#include "shake_detector.h"
+#include "shake_recommendation_service.h"
+#include "divination_service.h"
+#if defined(CONFIG_QDTECH_EXPERIMENT_PSEUDO3D_DICE) && \
+    CONFIG_QDTECH_EXPERIMENT_PSEUDO3D_DICE
+#include "dice_theme_asset.h"
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH) && \
+    CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH
+#include "wooden_fish_asset.h"
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_CALENDAR_ZODIAC) && \
+    CONFIG_QDTECH_EXPERIMENT_CALENDAR_ZODIAC
+#include "zodiac_service.h"
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_PUZZLE_ARCADE) && \
+    CONFIG_QDTECH_EXPERIMENT_PUZZLE_ARCADE
+#include "freecell_game.h"
+#include "number_slide_logic.h"
+#include "puzzle_arcade_service.h"
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_MD_DUAL_MODE) && \
+    CONFIG_QDTECH_EXPERIMENT_MD_DUAL_MODE
+#include "md_catalog_service.h"
+#endif
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <string>
+
+#if defined(CONFIG_QDTECH_EXPERIMENT_2048_STABLE_RENDERER) && \
+    CONFIG_QDTECH_EXPERIMENT_2048_STABLE_RENDERER
+class Puzzle2048CanvasRenderer;
+#endif
+
+enum class DesktopPage {
+    MAIN,
+    APPS,
+    PHOTO,
+    FC,
+#if defined(CONFIG_QDTECH_EXPERIMENT_MD_DUAL_MODE) && \
+    CONFIG_QDTECH_EXPERIMENT_MD_DUAL_MODE
+    MD_LIBRARY,
+#endif
+    CALENDAR,
+#if defined(CONFIG_QDTECH_EXPERIMENT_CALENDAR_BONE_WEIGHT) && \
+    CONFIG_QDTECH_EXPERIMENT_CALENDAR_BONE_WEIGHT
+    BONE_WEIGHT,
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_CALENDAR_ZODIAC) && \
+    CONFIG_QDTECH_EXPERIMENT_CALENDAR_ZODIAC
+    ZODIAC,
+#endif
+    RADIO,
+    MUSIC,
+    MEDIA,
+    PODCAST,
+    FOCUS,
+    HOURGLASS,
+    SHAKE_LAB,
+#if defined(CONFIG_QDTECH_EXPERIMENT_PUZZLE_ARCADE) && \
+    CONFIG_QDTECH_EXPERIMENT_PUZZLE_ARCADE
+    PUZZLE_ARCADE,
+#endif
+    XIAOZHI,
+    NETWORK,
+    SETTINGS,
+    DIAGNOSTICS,
+};
+
+class DesktopUI {
+public:
+    void Create();
+    void ShowPage(DesktopPage page);
+    void NavigateBack();
+    void HandleTouchRelease(uint16_t start_x, uint16_t start_y, uint16_t end_x, uint16_t end_y,
+                            int64_t duration_ms);
+    void HandleTouchState(uint16_t x, uint16_t y, bool pressed);
+    void HandleTouchPoints(const uint16_t* xs, const uint16_t* ys, size_t count);
+    void HandleSwipe(int16_t dx, int16_t dy);
+    void HandleTap(uint16_t x, uint16_t y);
+
+    // API for updating content
+    void SetTime(int hour, int minute, int year, int month, int day, const char* weekday);
+    void SetWeather(const char* temperature, const char* summary, int weather_code);
+    void SetDailyQuote(const char* quote);
+    void SetDailyCard(const char* date, const char* title, const char* body);
+    void SetNetworkStatus(const char* status);
+    void SetBatteryStatus(int level, bool charging, bool valid);
+    void SetDefaultNetwork(size_t index);
+    void SetFirmwareUpdateStatus(const char* status, bool update_available, bool busy, int progress,
+                                 size_t asset_size = 0, size_t partition_size = 0);
+    void CycleTheme();
+    void SetRadioActions(std::function<void()> play_pause, std::function<void()> stop,
+                         std::function<void()> next, std::function<void()> prev);
+#if defined(CONFIG_QDTECH_EXPERIMENT_RADIO_DIRECTORY) && \
+    CONFIG_QDTECH_EXPERIMENT_RADIO_DIRECTORY
+    void SetRadioDirectoryActions(std::function<int()> station_count,
+                                  std::function<const char*(int)> station_name,
+                                  std::function<int(int)> station_category,
+                                  std::function<void(int, int)> select_station);
+#endif
+    void SetMusicActions(std::function<void()> play, std::function<void()> pause,
+                         std::function<void()> next);
+    void SetRadioState(const char* station, const char* state, const char* meta);
+    void SetPodcastActions(std::function<void()> play_pause, std::function<void()> stop,
+                           std::function<void()> next, std::function<void()> prev,
+                           std::function<void()> up, std::function<void()> down,
+                           std::function<void(int)> seek);
+    void ShowPodcastDetail(bool detail);
+    void SetPodcastState(const char* title, const char* state, const char* meta,
+                         const char* summary, const char* list);
+    void SetPodcastCover(const lv_img_dsc_t* image);
+    void SetPodcastProgress(int percent);
+    void HandlePodcastSeekEvent(lv_event_t* event);
+    void SetXiaozhiState(const char* state, const char* message, const char* emotion);
+    bool ShowQrCode(const char* content, const char* title, const char* hint);
+    void HideQrCode();
+    void SetMusicLyric(const char* title, const char* artist, const char* line);
+    void RememberMusicTrack(const char* title, const char* artist, const char* url,
+                            const char* lyrics_json = nullptr);
+    void ClearMusicLyric();
+    void StartMusicAsk();
+    void SetXiaozhiEmotion(const char* emotion);
+    void AdjustCalendarMonth(int delta);
+    void ShowTodayCalendar();
+    void ToggleFocusTimer();
+    void StartFocusTimer(bool rotate_180 = false);
+    void ResetFocusTimer();
+    void SetFocusMode(bool work_mode);
+    void EnterHourglassMode();
+    void ExitHourglassMode();
+    bool IsHourglassPage() const { return current_page_ == DesktopPage::HOURGLASS; }
+    void SetShakeLabSamplingCallback(std::function<void(bool)> callback);
+#if defined(CONFIG_QDTECH_EXPERIMENT_PSEUDO3D_DICE) && \
+    CONFIG_QDTECH_EXPERIMENT_PSEUDO3D_DICE
+    void SetShakeLabDiceAutoRevealCallback(std::function<void(bool)> callback);
+#endif
+    void UpdateShakeLabDetector(const ShakeDetector::Result& result);
+#if defined(CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH) && \
+    CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH
+    void SetWoodenFishSamplingCallback(std::function<void(bool)> callback);
+    void UpdateWoodenFishTap(uint16_t impulse);
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_PUZZLE_ARCADE) && \
+    CONFIG_QDTECH_EXPERIMENT_PUZZLE_ARCADE
+    void SetPuzzleMazeSamplingCallback(std::function<void(bool)> callback);
+    void UpdatePuzzleMazeMotion(int16_t accel_y, int16_t accel_z, int64_t sample_ms);
+    void UpdatePuzzleRevolverMotion(int16_t accel_x, int16_t accel_y, int16_t accel_z,
+                                    int16_t gyro_x, int16_t gyro_y, int16_t gyro_z,
+                                    int64_t sample_ms);
+#endif
+    void SetSystemBrightness(int value);
+    void SetSystemVolume(int value);
+    void OpenPhoneWeb();
+    void ReconfigureWifi();
+    void SetPhoneWebAction(std::function<void()> callback);
+    void SetWifiConfigStatus(const char* status);
+    void SetBluetoothConfigStatus(const char* status);
+    void ReloadUserProfile();
+    void RefreshSettingsControls();
+    void SetMainPageCallback(std::function<void()> callback);
+    void SetFocusRotationCallback(std::function<void(bool)> callback);
+    void SetPhotoActiveCallback(std::function<void(bool)> callback);
+    void SetPhotoRefreshCallback(std::function<void()> callback);
+    void SetPhotoState(const char* title, const char* detail);
+    void SetPhotoFrame(const lv_img_dsc_t* image, const lv_img_dsc_t* background,
+                       const char* title, const char* detail);
+    void RequestPhotoRefresh();
+    void SetFcActiveCallback(std::function<void(bool)> callback);
+    void SetFcExitCallback(std::function<void()> callback);
+    void SetFcActions(std::function<void()> play_pause, std::function<void()> stop,
+                      std::function<void()> next, std::function<void()> prev);
+    void SetFcState(const char* title, const char* detail, const char* rom_list);
+    void SetFcMode(bool playing);
+    void SetFcFrame(const lv_img_dsc_t* image);
+    void SetFcControllerCallback(std::function<void(uint8_t)> callback);
+    bool IsFcPlayingView() const { return fc_playing_view_; }
+#if defined(CONFIG_QDTECH_EXPERIMENT_MD_DUAL_MODE) && \
+    CONFIG_QDTECH_EXPERIMENT_MD_DUAL_MODE
+    void SetMdLaunchCallback(
+        std::function<void(const std::string&, bool, uint8_t)> callback);
+    void OpenMdLibrary();
+    void ChangeMdCatalogPage(int delta);
+    void SelectMdCatalogRow(size_t row);
+    void ToggleMdLaunchMode();
+    void CycleMdSaveSlot();
+    void RequestMdLaunch();
+#endif
+    bool IsPhotoPage() const { return current_page_ == DesktopPage::PHOTO; }
+    void SetMusicReplayCallback(std::function<void(const std::string& title,
+                                                   const std::string& artist,
+                                                   const std::string& url,
+                                                   const std::string& lyrics_json)> callback);
+    bool TryAcceptMusicControlTap();
+    void ReplayNextMusicRecent();
+    void ReplayMusicRecent(size_t index);
+    void RemoveMusicRecent(size_t index);
+    void ClearMusicRecent();
+
+    // Radio actions (public for LVGL callbacks)
+    std::function<void()> radio_play_pause_;
+    std::function<void()> radio_stop_;
+    std::function<void()> radio_next_;
+    std::function<void()> radio_prev_;
+#if defined(CONFIG_QDTECH_EXPERIMENT_RADIO_DIRECTORY) && \
+    CONFIG_QDTECH_EXPERIMENT_RADIO_DIRECTORY
+    std::function<int()> radio_station_count_;
+    std::function<const char*(int)> radio_station_name_;
+    std::function<int(int)> radio_station_category_;
+    std::function<void(int, int)> radio_select_station_;
+#endif
+    std::function<void()> music_play_;
+    std::function<void()> music_pause_;
+    std::function<void()> music_next_;
+    std::function<void()> podcast_play_pause_;
+    std::function<void()> podcast_stop_;
+    std::function<void()> podcast_next_;
+    std::function<void()> podcast_prev_;
+    std::function<void()> podcast_up_;
+    std::function<void()> podcast_down_;
+    std::function<void(int)> podcast_seek_;
+    std::function<void()> podcast_activate_;
+    std::function<void()> podcast_stop_other_media_;
+    std::function<void()> fc_play_pause_;
+    std::function<void()> fc_stop_;
+    std::function<void()> fc_next_;
+    std::function<void()> fc_prev_;
+    std::function<void()> phone_web_start_;
+    std::function<void(uint8_t)> fc_controller_cb_;
+    std::function<void()> fc_stop_other_media_;
+    std::function<void(const std::string& title, const std::string& artist,
+                       const std::string& url, const std::string& lyrics_json)> music_replay_cb_;
+
+    // Radio animation (public for timer callback)
+    lv_obj_t* radio_bars_[16] = {};  // 音量动态柱
+    bool radio_playing_ = false;
+
+    // Face animation
+    void UpdateFaceAnimation();
+
+private:
+    // Pages
+    lv_obj_t* main_page_ = nullptr;
+    lv_obj_t* apps_page_ = nullptr;
+    lv_obj_t* photo_page_ = nullptr;
+    lv_obj_t* fc_page_ = nullptr;
+    lv_obj_t* calendar_page_ = nullptr;
+#if defined(CONFIG_QDTECH_EXPERIMENT_CALENDAR_BONE_WEIGHT) && \
+    CONFIG_QDTECH_EXPERIMENT_CALENDAR_BONE_WEIGHT
+    lv_obj_t* bone_weight_page_ = nullptr;
+    lv_obj_t* bone_weight_reader_group_ = nullptr;
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_CALENDAR_ZODIAC) && \
+    CONFIG_QDTECH_EXPERIMENT_CALENDAR_ZODIAC
+    lv_obj_t* zodiac_page_ = nullptr;
+    lv_obj_t* zodiac_reader_group_ = nullptr;
+#endif
+    lv_obj_t* radio_page_ = nullptr;
+    lv_obj_t* music_page_ = nullptr;
+    lv_obj_t* media_page_ = nullptr;
+    lv_obj_t* podcast_page_ = nullptr;
+    lv_obj_t* xiaozhi_page_ = nullptr;
+    lv_obj_t* network_page_ = nullptr;
+    lv_obj_t* settings_page_ = nullptr;
+    lv_obj_t* diagnostics_page_ = nullptr;
+#if defined(CONFIG_QDTECH_EXPERIMENT_PUZZLE_ARCADE) && \
+    CONFIG_QDTECH_EXPERIMENT_PUZZLE_ARCADE
+    lv_obj_t* puzzle_arcade_page_ = nullptr;
+    lv_obj_t* puzzle_arcade_home_group_ = nullptr;
+    lv_obj_t* puzzle_arcade_game_group_ = nullptr;
+    lv_obj_t* puzzle_arcade_cover_ = nullptr;
+    lv_obj_t* puzzle_arcade_cover_status_ = nullptr;
+    lv_obj_t* puzzle_arcade_title_ = nullptr;
+    lv_obj_t* puzzle_arcade_status_ = nullptr;
+    lv_obj_t* puzzle_arcade_board_ = nullptr;
+    lv_obj_t* puzzle_arcade_game_cards_[8]{};
+    lv_obj_t* puzzle_arcade_game_labels_[8]{};
+    lv_obj_t* puzzle_arcade_game_tags_[8]{};
+    enum class PuzzleArcadeView : uint8_t {
+        HOME, SUDOKU, CODE_LOCK, SOKOBAN, MATCH3, MOTION_MAZE, TILE_2048, FREECELL,
+#if defined(CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE) && \
+    CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE
+        NUMBER_SLIDE
+#else
+        LUCKY_REVOLVER
+#endif
+    };
+    PuzzleArcadeView puzzle_arcade_view_ = PuzzleArcadeView::HOME;
+    QdPuzzleArcade::Game puzzle_arcade_selected_ = QdPuzzleArcade::Game::SUDOKU;
+    QdPuzzleArcade::ImageFrame puzzle_arcade_cover_frame_{};
+    std::atomic<uint32_t> puzzle_arcade_cover_request_id_{0};
+    QdPuzzleArcade::SudokuPuzzle puzzle_sudoku_{};
+    char puzzle_sudoku_values_[81]{};
+    int8_t puzzle_sudoku_selected_cell_ = -1;
+    QdPuzzleArcade::LockChallenge puzzle_lock_{};
+    char puzzle_lock_input_[5]{};
+    uint8_t puzzle_lock_input_len_ = 0;
+    char puzzle_lock_guesses_[8][5]{};
+    uint8_t puzzle_lock_exact_[8]{};
+    uint8_t puzzle_lock_misplaced_[8]{};
+    uint8_t puzzle_lock_guess_count_ = 0;
+    QdPuzzleArcade::SokobanLevel puzzle_sokoban_{};
+    char puzzle_sokoban_cells_[QdPuzzleArcade::kSokobanMaxWidth *
+                               QdPuzzleArcade::kSokobanMaxHeight]{};
+    uint16_t puzzle_sokoban_level_index_ = 0;
+    uint16_t puzzle_sokoban_level_count_ = 0;
+    uint16_t puzzle_sokoban_moves_ = 0;
+    uint16_t puzzle_sokoban_pushes_ = 0;
+    QdPuzzleArcade::Match3Level puzzle_match3_{};
+    uint8_t puzzle_match3_cells_[64]{};
+    int8_t puzzle_match3_selected_ = -1;
+    uint16_t puzzle_match3_score_ = 0;
+    uint8_t puzzle_match3_moves_left_ = 0;
+    uint32_t puzzle_2048_cells_[16]{};
+    uint32_t puzzle_2048_score_ = 0;
+    uint32_t puzzle_2048_best_tile_ = 0;
+    uint32_t puzzle_2048_high_score_ = 0;
+    bool puzzle_2048_high_score_loaded_ = false;
+    bool puzzle_2048_high_score_dirty_ = false;
+    bool puzzle_2048_won_ = false;
+    bool puzzle_2048_game_over_ = false;
+#if defined(CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE) && \
+    CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE
+    uint8_t puzzle_number_slide_cells_[QdNumberSlide::kCellCount]{};
+    uint16_t puzzle_number_slide_moves_ = 0;
+    bool puzzle_number_slide_won_ = false;
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_2048_STABLE_RENDERER) && \
+    CONFIG_QDTECH_EXPERIMENT_2048_STABLE_RENDERER
+    Puzzle2048CanvasRenderer* puzzle_2048_renderer_ = nullptr;
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_2048_INPUT_HARDENING) && \
+    CONFIG_QDTECH_EXPERIMENT_2048_INPUT_HARDENING
+    lv_timer_t* puzzle_2048_input_timer_ = nullptr;
+    int8_t puzzle_2048_pending_dx_ = 0;
+    int8_t puzzle_2048_pending_dy_ = 0;
+#endif
+    QdFreecell::Game* puzzle_freecell_game_ = nullptr;
+    QdPuzzleArcade::MazeLevel puzzle_maze_{};
+    uint16_t puzzle_maze_level_index_ = 0;
+    uint16_t puzzle_maze_level_count_ = 0;
+    uint16_t puzzle_maze_moves_ = 0;
+    int8_t puzzle_maze_player_x_ = 0;
+    int8_t puzzle_maze_player_y_ = 0;
+    int16_t puzzle_maze_baseline_y_ = 0;
+    int16_t puzzle_maze_baseline_z_ = 0;
+    int16_t puzzle_maze_filtered_y_ = 0;
+    int16_t puzzle_maze_filtered_z_ = 0;
+    uint8_t puzzle_maze_calibration_samples_ = 0;
+    int64_t puzzle_maze_last_move_ms_ = 0;
+    bool puzzle_maze_won_ = false;
+    enum class PuzzleRevolverState : uint8_t {
+        SELECT, ARMED, SPINNING, READY, LUCKY, HIT
+    };
+    PuzzleRevolverState puzzle_revolver_state_ = PuzzleRevolverState::SELECT;
+    ShakeDetector puzzle_revolver_detector_{};
+    uint8_t puzzle_revolver_bullets_ = 1;
+    uint8_t puzzle_revolver_bullet_mask_ = 0;
+    uint8_t puzzle_revolver_chamber_ = 0;
+    uint16_t puzzle_revolver_spin_angle_ = 0;
+    uint8_t puzzle_revolver_intensity_ = 0;
+    uint16_t puzzle_revolver_rounds_ = 0;
+    uint16_t puzzle_revolver_lucky_count_ = 0;
+    std::function<void(bool)> puzzle_maze_sampling_callback_;
+#endif
+    DesktopPage current_page_ = DesktopPage::MAIN;
+
+    // Main page elements
+    lv_obj_t* clock_hour_label_ = nullptr;
+    lv_obj_t* clock_minute_label_ = nullptr;
+    lv_obj_t* clock_colon_dots_[2] = {};
+    lv_obj_t* date_label_ = nullptr;
+    lv_obj_t* week_label_ = nullptr;
+    lv_obj_t* weather_glow_ = nullptr;
+    lv_obj_t* weather_sun_ = nullptr;
+    lv_obj_t* weather_rays_[6] = {};
+    lv_obj_t* weather_cloud_shadow_ = nullptr;
+    lv_obj_t* weather_cloud_[3] = {};
+    lv_obj_t* weather_rain_[6] = {};
+    lv_obj_t* weather_snow_[6] = {};
+    lv_obj_t* weather_storm_[4] = {};
+    lv_obj_t* weather_scene_gif_ = nullptr;
+    lv_obj_t* weather_horizon_ = nullptr;
+    lv_obj_t* weather_temp_label_ = nullptr;
+    lv_obj_t* weather_meta_label_ = nullptr;
+    lv_obj_t* brand_earth_gif_ = nullptr;
+    lv_obj_t* brand_logo_labels_[8] = {};
+    lv_obj_t* brand_owner_labels_[8] = {};
+    size_t brand_label_count_ = 0;
+    lv_obj_t* daily_card_date_label_ = nullptr;
+    lv_obj_t* daily_card_title_label_ = nullptr;
+    lv_obj_t* quote_label_ = nullptr;
+    lv_obj_t* network_status_label_ = nullptr;
+    lv_obj_t* status_bar_time_labels_[4] = {};
+    lv_obj_t* status_bar_battery_labels_[6] = {};
+    int battery_level_ = -1;
+    bool battery_charging_ = false;
+    lv_obj_t* app_status_labels_[10] = {};
+    lv_obj_t* app_status_dots_[10] = {};
+    lv_obj_t* calendar_app_status_label_ = nullptr;
+    std::function<void()> main_page_callback_;
+    int current_hour_ = -1;
+    int current_minute_ = -1;
+    void RegisterBrandLabels(lv_obj_t* logo, lv_obj_t* owner);
+    void RefreshBrandLabels();
+    
+    // Animation elements
+    lv_obj_t* daily_card_panel_ = nullptr;
+    lv_timer_t* weather_particle_timer_ = nullptr;
+    int current_weather_code_ = -1;
+    int current_weather_scene_ = -1;
+
+    // Photo page elements
+    lv_obj_t* photo_bg_a_ = nullptr;
+    lv_obj_t* photo_bg_b_ = nullptr;
+    lv_obj_t* photo_image_a_ = nullptr;
+    lv_obj_t* photo_image_b_ = nullptr;
+    lv_obj_t* photo_title_label_ = nullptr;
+    lv_obj_t* photo_detail_label_ = nullptr;
+    lv_obj_t* photo_refresh_label_ = nullptr;
+    bool photo_show_a_ = true;
+    std::string photo_app_status_ = "SD Slideshow";
+    lv_color_t photo_app_color_ = {};
+    std::function<void(bool)> photo_active_callback_;
+    std::function<void()> photo_refresh_callback_;
+    bool photo_segment_swipe_active_ = false;
+    uint16_t photo_segment_start_x_ = 0;
+    uint16_t photo_segment_start_y_ = 0;
+    uint16_t photo_segment_min_x_ = 0;
+    uint16_t photo_segment_max_x_ = 0;
+    int64_t photo_segment_last_ms_ = 0;
+
+    // FC emulator page elements
+    lv_obj_t* fc_list_group_ = nullptr;
+    lv_obj_t* fc_game_group_ = nullptr;
+    lv_obj_t* fc_screen_image_ = nullptr;
+    lv_obj_t* fc_title_label_ = nullptr;
+    lv_obj_t* fc_detail_label_ = nullptr;
+    lv_obj_t* fc_list_label_ = nullptr;
+    bool fc_playing_view_ = false;
+    bool fc_list_touch_latched_ = false;
+    std::string fc_app_status_ = "SD ROMs";
+    lv_color_t fc_app_color_ = {};
+    std::function<void(bool)> fc_active_callback_;
+    std::function<void()> fc_exit_callback_;
+#if defined(CONFIG_QDTECH_EXPERIMENT_MD_DUAL_MODE) && \
+    CONFIG_QDTECH_EXPERIMENT_MD_DUAL_MODE
+    static constexpr size_t kMdRowsPerPage = 5;
+    lv_obj_t* md_library_page_ = nullptr;
+    lv_obj_t* md_count_label_ = nullptr;
+    lv_obj_t* md_status_label_ = nullptr;
+    lv_obj_t* md_page_label_ = nullptr;
+    lv_obj_t* md_mode_label_ = nullptr;
+    lv_obj_t* md_slot_label_ = nullptr;
+    lv_obj_t* md_row_panels_[kMdRowsPerPage]{};
+    lv_obj_t* md_row_title_labels_[kMdRowsPerPage]{};
+    lv_obj_t* md_row_category_labels_[kMdRowsPerPage]{};
+    MdCatalogService md_catalog_{};
+    size_t md_catalog_page_ = 0;
+    size_t md_selected_index_ = 0;
+    bool md_resume_mode_ = false;
+    uint8_t md_save_slot_ = 0;
+    bool md_emulator_available_ = false;
+    std::function<void(const std::string&, bool, uint8_t)> md_launch_callback_;
+#endif
+
+    // Calendar page elements
+    lv_obj_t* calendar_title_label_ = nullptr;
+    lv_obj_t* calendar_today_label_ = nullptr;
+    lv_obj_t* calendar_card_day_label_ = nullptr;
+    lv_obj_t* calendar_card_weekday_label_ = nullptr;
+    lv_obj_t* calendar_card_date_label_ = nullptr;
+    lv_obj_t* calendar_day_labels_[42] = {};
+    lv_obj_t* calendar_day_cells_[42] = {};
+    int current_year_ = 0;
+    int current_month_ = 0;
+    int current_day_ = 0;
+    int calendar_year_ = 0;
+    int calendar_month_ = 0;
+    bool calendar_follow_today_ = true;
+#if defined(CONFIG_QDTECH_EXPERIMENT_CALENDAR_BONE_WEIGHT) && \
+    CONFIG_QDTECH_EXPERIMENT_CALENDAR_BONE_WEIGHT
+    lv_obj_t* bone_weight_year_label_ = nullptr;
+    lv_obj_t* bone_weight_month_label_ = nullptr;
+    lv_obj_t* bone_weight_day_label_ = nullptr;
+    lv_obj_t* bone_weight_hour_label_ = nullptr;
+    lv_obj_t* bone_weight_action_label_ = nullptr;
+    lv_obj_t* bone_weight_result_label_ = nullptr;
+    lv_obj_t* bone_weight_song_label_ = nullptr;
+    lv_obj_t* bone_weight_reader_summary_label_ = nullptr;
+    lv_obj_t* bone_weight_reader_section_label_ = nullptr;
+    lv_obj_t* bone_weight_reader_text_label_ = nullptr;
+    lv_obj_t* bone_weight_reader_page_label_ = nullptr;
+    int bone_weight_year_ = 1990;
+    int bone_weight_month_ = 1;
+    int bone_weight_day_ = 1;
+    int bone_weight_hour_ = 12;
+    uint8_t bone_weight_total_ = 0;
+    bool bone_weight_initialized_ = false;
+    bool bone_weight_has_result_ = false;
+    bool bone_weight_reader_visible_ = false;
+    uint8_t bone_weight_reader_page_ = 0;
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_CALENDAR_ZODIAC) && \
+    CONFIG_QDTECH_EXPERIMENT_CALENDAR_ZODIAC
+    lv_obj_t* zodiac_year_label_ = nullptr;
+    lv_obj_t* zodiac_month_label_ = nullptr;
+    lv_obj_t* zodiac_day_label_ = nullptr;
+    lv_obj_t* zodiac_action_label_ = nullptr;
+    lv_obj_t* zodiac_result_label_ = nullptr;
+    lv_obj_t* zodiac_hint_label_ = nullptr;
+    lv_obj_t* zodiac_reader_image_ = nullptr;
+    lv_obj_t* zodiac_reader_image_status_ = nullptr;
+    lv_obj_t* zodiac_reader_summary_label_ = nullptr;
+    lv_obj_t* zodiac_reader_section_label_ = nullptr;
+    lv_obj_t* zodiac_reader_text_label_ = nullptr;
+    lv_obj_t* zodiac_reader_page_label_ = nullptr;
+    int zodiac_year_ = 1990;
+    int zodiac_month_ = 1;
+    int zodiac_day_ = 1;
+    QdZodiac::Sign zodiac_sign_ = QdZodiac::Sign::ARIES;
+    QdZodiac::ImageFrame zodiac_image_frame_{};
+    std::atomic<uint32_t> zodiac_load_request_id_{0};
+    bool zodiac_initialized_ = false;
+    bool zodiac_has_result_ = false;
+    bool zodiac_reader_visible_ = false;
+    uint8_t zodiac_reader_page_ = 0;
+#endif
+
+    // Radio page elements
+    lv_obj_t* radio_station_label_ = nullptr;
+    lv_obj_t* radio_state_label_ = nullptr;
+    lv_obj_t* radio_meta_label_ = nullptr;
+    lv_timer_t* radio_anim_timer_ = nullptr;
+#if defined(CONFIG_QDTECH_EXPERIMENT_RADIO_DIRECTORY) && \
+    CONFIG_QDTECH_EXPERIMENT_RADIO_DIRECTORY
+    lv_obj_t* radio_directory_overlay_ = nullptr;
+    bool radio_directory_showing_stations_ = false;
+    int radio_directory_category_ = -1;
+    int radio_directory_page_ = 0;
+#endif
+
+    // Music request page elements
+    lv_obj_t* music_title_label_ = nullptr;
+    lv_obj_t* music_artist_label_ = nullptr;
+    lv_obj_t* music_line_label_ = nullptr;
+    lv_obj_t* music_side_lyric_label_ = nullptr;
+    lv_obj_t* music_cover_disc_ = nullptr;
+    lv_obj_t* music_cover_note_ = nullptr;
+    lv_obj_t* music_cover_bars_[4] = {};
+    lv_timer_t* music_cover_timer_ = nullptr;
+    uint8_t music_cover_phase_ = 0;
+    lv_obj_t* music_hint_label_ = nullptr;
+    lv_obj_t* music_recent_clear_button_ = nullptr;
+    static constexpr size_t kMusicRecentCount = 3;
+    struct MusicRecentTrack {
+        std::string title;
+        std::string artist;
+        std::string url;
+        std::string lyrics_json;
+    };
+    MusicRecentTrack music_recent_[kMusicRecentCount];
+    lv_obj_t* music_recent_buttons_[kMusicRecentCount] = {};
+    lv_obj_t* music_recent_labels_[kMusicRecentCount] = {};
+    size_t music_recent_pending_index_ = kMusicRecentCount;
+    std::string music_recent_pending_title_;
+    size_t music_recent_failed_index_ = kMusicRecentCount;
+    std::string music_recent_failed_reason_;
+    int64_t music_control_last_ms_ = 0;
+    std::string music_title_ = "No song yet";
+    std::string music_artist_ = "Ask XiaoZhi to play NetEase music";
+    std::string music_line_ = "Tap Ask and say a song name.";
+
+    // Podcast page elements
+    lv_obj_t* podcast_list_group_ = nullptr;
+    lv_obj_t* podcast_detail_group_ = nullptr;
+    lv_obj_t* podcast_cover_image_ = nullptr;
+    lv_obj_t* podcast_title_label_ = nullptr;
+    lv_obj_t* podcast_state_label_ = nullptr;
+    lv_obj_t* podcast_meta_label_ = nullptr;
+    lv_obj_t* podcast_summary_label_ = nullptr;
+    lv_obj_t* podcast_list_label_ = nullptr;
+    lv_obj_t* podcast_progress_slider_ = nullptr;
+    lv_obj_t* podcast_progress_label_ = nullptr;
+    bool podcast_detail_view_ = false;
+    bool podcast_progress_dragging_ = false;
+    std::string podcast_app_status_ = "Episodes";
+    lv_color_t podcast_app_color_ = {};
+
+    // Focus timer page elements
+    lv_obj_t* focus_page_ = nullptr;
+    lv_obj_t* focus_arc_ = nullptr;
+    lv_obj_t* focus_time_label_ = nullptr;
+    lv_obj_t* focus_state_label_ = nullptr;
+    lv_obj_t* focus_mode_label_ = nullptr;
+    lv_obj_t* focus_start_label_ = nullptr;
+    lv_obj_t* focus_completed_label_ = nullptr;
+    lv_timer_t* focus_timer_ = nullptr;
+    bool focus_running_ = false;
+    bool focus_is_work_ = true;
+    uint32_t focus_remaining_sec_ = 25 * 60;
+    uint32_t focus_total_sec_ = 25 * 60;
+    uint16_t focus_completed_count_ = 0;
+    uint32_t focus_count_date_ = 0;
+    bool focus_auto_rotated_ = false;
+    std::function<void(bool)> focus_rotation_callback_;
+
+    // Hourglass timer page elements
+    lv_obj_t* hourglass_page_ = nullptr;
+    lv_obj_t* hourglass_portrait_ = nullptr;
+    lv_obj_t* hourglass_time_label_ = nullptr;
+    lv_obj_t* hourglass_status_label_ = nullptr;
+    lv_obj_t* hourglass_top_sand_ = nullptr;
+    lv_obj_t* hourglass_bottom_sand_ = nullptr;
+    lv_obj_t* hourglass_preset_buttons_[4] = {};
+    lv_obj_t* hourglass_preset_labels_[4] = {};
+    lv_timer_t* hourglass_tick_timer_ = nullptr;
+    lv_timer_t* hourglass_anim_timer_ = nullptr;
+    DesktopPage hourglass_return_page_ = DesktopPage::MAIN;
+    bool hourglass_running_ = false;
+    bool hourglass_done_ = false;
+    bool hourglass_alarm_played_ = false;
+    bool hourglass_motion_active_ = false;
+    uint8_t hourglass_selected_index_ = 2;
+    uint8_t hourglass_anim_tick_ = 0;
+    uint32_t hourglass_total_sec_ = 15 * 60;
+    uint32_t hourglass_remaining_sec_ = 15 * 60;
+
+    enum class ShakeLabMode : uint8_t {
+        HOME,
+        ASK_BALL,
+        DICE,
+        FORTUNE,
+        DIVINATION,
+        MOVIE,
+        BOOK,
+#if defined(CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE) && \
+    CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE
+        LUCKY_REVOLVER,
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH) && \
+    CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH
+        WOODEN_FISH,
+#endif
+    };
+    lv_obj_t* shake_lab_page_ = nullptr;
+    lv_obj_t* shake_lab_home_group_ = nullptr;
+    lv_obj_t* shake_lab_mode_group_ = nullptr;
+    lv_obj_t* shake_lab_ask_group_ = nullptr;
+    lv_obj_t* shake_lab_dice_group_ = nullptr;
+    lv_obj_t* shake_lab_fortune_group_ = nullptr;
+    lv_obj_t* shake_lab_divination_group_ = nullptr;
+    lv_obj_t* shake_lab_recommendation_group_ = nullptr;
+#if defined(CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE) && \
+    CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE
+    lv_obj_t* shake_lab_revolver_group_ = nullptr;
+    lv_obj_t* shake_lab_revolver_board_ = nullptr;
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH) && \
+    CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH
+    lv_obj_t* wooden_fish_group_ = nullptr;
+    lv_obj_t* wooden_fish_image_ = nullptr;
+    lv_obj_t* wooden_fish_image_status_ = nullptr;
+    lv_obj_t* wooden_fish_glow_ = nullptr;
+    lv_obj_t* wooden_fish_body_ = nullptr;
+    lv_obj_t* wooden_fish_mallet_ = nullptr;
+    lv_obj_t* wooden_fish_merit_label_ = nullptr;
+    lv_obj_t* wooden_fish_float_label_ = nullptr;
+    lv_obj_t* wooden_fish_hint_label_ = nullptr;
+    lv_obj_t* wooden_fish_particles_[8] = {};
+    std::function<void(bool)> wooden_fish_sampling_callback_;
+    QdWoodenFish::ImageFrame wooden_fish_image_frame_{};
+    std::atomic<uint32_t> wooden_fish_image_load_request_id_{0};
+    uint32_t wooden_fish_merit_count_ = 0;
+    uint8_t wooden_fish_hit_anim_ = 0;
+#if defined(CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH_AUDIO) && \
+    CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH_AUDIO
+    int64_t wooden_fish_last_sound_ms_ = 0;
+#endif
+#endif
+    lv_obj_t* shake_lab_ball_ = nullptr;
+    lv_obj_t* shake_lab_glow_[2] = {};
+    lv_obj_t* shake_lab_particles_[10] = {};
+    lv_obj_t* shake_lab_answer_label_ = nullptr;
+    lv_obj_t* shake_lab_hint_label_ = nullptr;
+    lv_obj_t* shake_lab_mode_title_ = nullptr;
+#if defined(CONFIG_QDTECH_EXPERIMENT_SHAKE_LAB_FULLSCREEN) && \
+    CONFIG_QDTECH_EXPERIMENT_SHAKE_LAB_FULLSCREEN
+    lv_obj_t* shake_lab_mode_back_button_ = nullptr;
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_PSEUDO3D_DICE) && \
+    CONFIG_QDTECH_EXPERIMENT_PSEUDO3D_DICE
+    lv_obj_t* shake_lab_dice_stage_background_ = nullptr;
+    lv_obj_t* shake_lab_dice_images_[6] = {};
+    QdDiceTheme::ImageFrame shake_lab_dice_stage_frame_{};
+    QdDiceTheme::RollAtlas shake_lab_dice_roll_atlas_{};
+    QdDiceTheme::LandingAtlas shake_lab_dice_landing_atlas_{};
+    bool shake_lab_dice_sprites_ready_ = false;
+    bool shake_lab_dice_result_revealed_ = false;
+    uint8_t shake_lab_dice_motion_seed_[6] = {17, 53, 91, 127, 169, 211};
+#endif
+    lv_obj_t* shake_lab_dice_boxes_[6] = {};
+    lv_obj_t* shake_lab_dice_values_[6] = {};
+    lv_obj_t* shake_lab_dice_dots_[6][7] = {};
+    lv_obj_t* shake_lab_dice_count_label_ = nullptr;
+    lv_obj_t* shake_lab_dice_total_label_ = nullptr;
+    lv_obj_t* shake_lab_dice_lucky_label_ = nullptr;
+    lv_obj_t* shake_lab_fortune_number_label_ = nullptr;
+    lv_obj_t* shake_lab_fortune_poem_label_ = nullptr;
+    lv_obj_t* shake_lab_fortune_explain_label_ = nullptr;
+    lv_obj_t* shake_lab_fortune_hint_label_ = nullptr;
+    lv_obj_t* shake_lab_divination_image_ = nullptr;
+    lv_obj_t* shake_lab_divination_image_status_ = nullptr;
+    lv_obj_t* shake_lab_divination_name_label_ = nullptr;
+    lv_obj_t* shake_lab_divination_judgment_label_ = nullptr;
+    lv_obj_t* shake_lab_divination_guidance_label_ = nullptr;
+    lv_obj_t* shake_lab_divination_hint_label_ = nullptr;
+    lv_obj_t* shake_lab_divination_coins_[3] = {};
+    lv_obj_t* shake_lab_divination_lines_[6][2] = {};
+    lv_obj_t* shake_lab_recommendation_image_ = nullptr;
+    lv_obj_t* shake_lab_recommendation_image_status_ = nullptr;
+    lv_obj_t* shake_lab_recommendation_text_panel_ = nullptr;
+    lv_obj_t* shake_lab_recommendation_title_ = nullptr;
+    lv_obj_t* shake_lab_recommendation_primary_ = nullptr;
+    lv_obj_t* shake_lab_recommendation_secondary_ = nullptr;
+    lv_obj_t* shake_lab_recommendation_meta_ = nullptr;
+    lv_obj_t* shake_lab_recommendation_summary_ = nullptr;
+    lv_obj_t* shake_lab_recommendation_rating_ = nullptr;
+    lv_obj_t* shake_lab_recommendation_hint_ = nullptr;
+    QdDivination::ImageFrame shake_lab_divination_image_frame_{};
+    QdDivination::Reading shake_lab_divination_reading_{};
+    std::atomic<uint32_t> shake_lab_divination_load_request_id_{0};
+    QdShakeRecommendation::Record shake_lab_recommendation_record_{};
+    QdShakeRecommendation::ImageFrame shake_lab_recommendation_image_frame_{};
+    std::atomic<uint32_t> shake_lab_recommendation_load_request_id_{0};
+    lv_timer_t* shake_lab_anim_timer_ = nullptr;
+    std::function<void(bool)> shake_lab_sampling_callback_;
+#if defined(CONFIG_QDTECH_EXPERIMENT_PSEUDO3D_DICE) && \
+    CONFIG_QDTECH_EXPERIMENT_PSEUDO3D_DICE
+    std::function<void(bool)> shake_lab_dice_auto_reveal_callback_;
+#endif
+    ShakeLabMode shake_lab_mode_ = ShakeLabMode::HOME;
+    ShakeDetector::State shake_lab_detector_state_ = ShakeDetector::State::IDLE;
+    uint8_t shake_lab_intensity_ = 0;
+    uint8_t shake_lab_dice_count_ = 1;
+    uint8_t shake_lab_dice_values_state_[6] = {1, 1, 1, 1, 1, 1};
+    uint16_t shake_lab_anim_tick_ = 0;
+    uint8_t shake_lab_divination_revealed_lines_ = 0;
+    bool shake_lab_divination_sequence_active_ = false;
+    bool shake_lab_sampling_active_ = false;
+
+    lv_obj_t* apps_primary_group_ = nullptr;
+    lv_obj_t* apps_more_group_ = nullptr;
+    lv_obj_t* apps_more_button_ = nullptr;
+    bool apps_showing_more_ = false;
+
+    // Settings page elements
+    lv_obj_t* settings_brightness_slider_ = nullptr;
+    lv_obj_t* settings_brightness_value_ = nullptr;
+    lv_obj_t* settings_volume_slider_ = nullptr;
+    lv_obj_t* settings_volume_value_ = nullptr;
+    lv_obj_t* settings_content_ = nullptr;
+    lv_obj_t* settings_firmware_version_label_ = nullptr;
+    lv_obj_t* settings_firmware_status_label_ = nullptr;
+    lv_obj_t* settings_firmware_button_ = nullptr;
+    lv_obj_t* settings_firmware_button_label_ = nullptr;
+    lv_obj_t* settings_theme_value_ = nullptr;
+    lv_obj_t* settings_theme_button_ = nullptr;
+    lv_obj_t* settings_theme_button_label_ = nullptr;
+    lv_obj_t* settings_profile_logo_value_ = nullptr;
+    lv_obj_t* settings_profile_owner_value_ = nullptr;
+    lv_obj_t* settings_weather_value_ = nullptr;
+    lv_obj_t* settings_phone_web_button_ = nullptr;
+    lv_obj_t* settings_phone_web_button_label_ = nullptr;
+    lv_obj_t* settings_reconfigure_wifi_button_ = nullptr;
+    lv_obj_t* settings_reconfigure_wifi_button_label_ = nullptr;
+    lv_obj_t* settings_wifi_config_status_label_ = nullptr;
+    lv_obj_t* settings_ble_status_label_ = nullptr;
+    std::string settings_wifi_config_status_ = "WiFi config idle";
+    std::string settings_ble_status_ = "BLE idle";
+    std::string firmware_update_status_ = "Not checked";
+    int64_t phone_web_click_lock_until_ms_ = 0;
+    bool firmware_update_available_ = false;
+    bool firmware_update_busy_ = false;
+    int firmware_update_progress_ = -1;
+    size_t firmware_update_asset_size_ = 0;
+    size_t firmware_update_partition_size_ = 0;
+    std::string network_app_status_ = "WiFi Hub";
+    lv_color_t network_app_color_ = {};
+
+    // Network page elements
+    lv_obj_t* network_list_container_ = nullptr;
+    lv_obj_t* network_saved_count_label_ = nullptr;
+    lv_obj_t* network_detail_label_ = nullptr;
+
+    // Diagnostics page elements
+    lv_obj_t* diagnostics_labels_[10] = {};
+
+    // Xiaozhi page elements
+    lv_obj_t* face_container_ = nullptr;
+    lv_obj_t* eye_left_ = nullptr;
+    lv_obj_t* eye_right_ = nullptr;
+    lv_obj_t* pupil_left_ = nullptr;
+    lv_obj_t* pupil_right_ = nullptr;
+    lv_obj_t* highlight_left_ = nullptr;
+    lv_obj_t* highlight_right_ = nullptr;
+    lv_obj_t* eyebrow_left_ = nullptr;
+    lv_obj_t* eyebrow_right_ = nullptr;
+    lv_obj_t* mouth_ = nullptr;
+    lv_obj_t* blush_left_ = nullptr;
+    lv_obj_t* blush_right_ = nullptr;
+    lv_obj_t* themed_face_gif_ = nullptr;
+    const lv_image_dsc_t* themed_face_src_ = nullptr;
+    lv_obj_t* cat_nose_ = nullptr;
+    lv_obj_t* cat_status_mark_1_ = nullptr;
+    lv_obj_t* cat_status_mark_2_ = nullptr;
+    lv_obj_t* cat_status_mark_3_ = nullptr;
+    lv_obj_t* xiaozhi_state_label_ = nullptr;
+    lv_obj_t* xiaozhi_message_label_ = nullptr;
+    lv_obj_t* xiaozhi_hint_label_ = nullptr;
+    lv_obj_t* music_lyric_panel_ = nullptr;
+    lv_obj_t* music_lyric_label_ = nullptr;
+    lv_obj_t* qr_overlay_ = nullptr;
+    lv_obj_t* qr_title_label_ = nullptr;
+    lv_obj_t* qr_hint_label_ = nullptr;
+    lv_obj_t* qr_code_ = nullptr;
+
+    // Animation state
+    std::string emotion_ = "neutral";
+    uint32_t anim_tick_ = 0;
+    float pupil_offset_x_ = 0;
+    float pupil_offset_y_ = 0;
+    float pupil_target_x_ = 0;
+    float pupil_target_y_ = 0;
+    uint8_t blush_alpha_ = 0;
+    bool blush_increasing_ = true;
+    int64_t music_lyric_hold_until_ms_ = 0;
+    // Internal methods
+    void CreateMainPage(lv_obj_t* root);
+    void CreateAppsPage(lv_obj_t* root);
+    void CreatePhotoPage(lv_obj_t* root);
+    void CreateFcPage(lv_obj_t* root);
+#if defined(CONFIG_QDTECH_EXPERIMENT_MD_DUAL_MODE) && \
+    CONFIG_QDTECH_EXPERIMENT_MD_DUAL_MODE
+    void CreateMdLibraryPage(lv_obj_t* root);
+    void ReleaseMdLibraryPage();
+    void LoadMdCatalog();
+    void RefreshMdCatalog();
+#endif
+    void CreateCalendarPage(lv_obj_t* root);
+#if defined(CONFIG_QDTECH_EXPERIMENT_CALENDAR_BONE_WEIGHT) && \
+    CONFIG_QDTECH_EXPERIMENT_CALENDAR_BONE_WEIGHT
+    void CreateBoneWeightPage(lv_obj_t* root);
+    void ReleaseBoneWeightPage();
+    void RefreshBoneWeightInput();
+    void AdjustBoneWeightInput(int action);
+    void CalculateBoneWeight();
+    void ShowBoneWeightReader();
+    void HideBoneWeightReader();
+    void ChangeBoneWeightReaderPage(int delta);
+    void RefreshBoneWeightReader();
+    bool HandleBoneWeightTap(uint16_t x, uint16_t y);
+#endif
+#if defined(CONFIG_QDTECH_EXPERIMENT_CALENDAR_ZODIAC) && \
+    CONFIG_QDTECH_EXPERIMENT_CALENDAR_ZODIAC
+    void CreateZodiacPage(lv_obj_t* root);
+    void ReleaseZodiacPage();
+    void RefreshZodiacInput();
+    void AdjustZodiacInput(int action);
+    void CalculateZodiac();
+    void ShowZodiacReader();
+    void HideZodiacReader();
+    void ChangeZodiacReaderPage(int delta);
+    void RefreshZodiacReader(bool load_image = false);
+    bool HandleZodiacTap(uint16_t x, uint16_t y);
+#endif
+    void CreateRadioPage(lv_obj_t* root);
+#if defined(CONFIG_QDTECH_EXPERIMENT_RADIO_DIRECTORY) && \
+    CONFIG_QDTECH_EXPERIMENT_RADIO_DIRECTORY
+    void OpenRadioDirectory();
+    void CloseRadioDirectory();
+    void RefreshRadioDirectory();
+    int FindRadioDirectoryStation(int ordinal) const;
+    int GetRadioDirectoryStationCount() const;
+    int GetRadioDirectoryVisibleCategoryCount() const;
+    int GetRadioDirectoryVisibleCategory(int ordinal) const;
+#endif
+    void CreateMusicPage(lv_obj_t* root);
+    void CreateMediaPage(lv_obj_t* root);
+    void CreatePodcastPage(lv_obj_t* root);
+    void CreateFocusPage(lv_obj_t* root);
+    void CreateHourglassPage(lv_obj_t* root);
+    void CreateShakeLabPage(lv_obj_t* root);
+#if defined(CONFIG_QDTECH_EXPERIMENT_PUZZLE_ARCADE) && \
+    CONFIG_QDTECH_EXPERIMENT_PUZZLE_ARCADE
+    void CreatePuzzleArcadePage(lv_obj_t* root);
+    void ReleasePuzzleArcadePage();
+    bool HandlePuzzleArcadeTap(uint16_t x, uint16_t y);
+    void ShowPuzzleArcadeHome();
+    void SelectPuzzleArcadeGame(QdPuzzleArcade::Game game);
+    void EnterPuzzleArcadeGame();
+    void LoadPuzzleArcadeCover();
+    void LoadPuzzleSudoku();
+    void LoadPuzzleLock();
+    void LoadPuzzleSokoban(int delta);
+    void MovePuzzleSokoban(int dx, int dy);
+    void LoadPuzzleMatch3();
+    bool ResolvePuzzleMatch3();
+    void ResetPuzzle2048();
+    bool MovePuzzle2048(int dx, int dy);
+#if defined(CONFIG_QDTECH_EXPERIMENT_2048_INPUT_HARDENING) && \
+    CONFIG_QDTECH_EXPERIMENT_2048_INPUT_HARDENING
+    void QueuePuzzle2048Input(int dx, int dy);
+    void StopPuzzle2048InputTimer();
+    static void Puzzle2048InputTimerCb(lv_timer_t* timer);
+#endif
+    void SpawnPuzzle2048Tile();
+    bool CanMovePuzzle2048() const;
+#if defined(CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE) && \
+    CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE
+    void ResetPuzzleNumberSlide();
+    bool MovePuzzleNumberSlide(uint8_t tile_index);
+#endif
+    void LoadPuzzle2048HighScore();
+    void SavePuzzle2048HighScore();
+#if defined(CONFIG_QDTECH_EXPERIMENT_2048_STABLE_RENDERER) && \
+    CONFIG_QDTECH_EXPERIMENT_2048_STABLE_RENDERER
+    bool EnsurePuzzle2048Renderer();
+    void ReleasePuzzle2048Renderer();
+#endif
+    void ResetPuzzleFreecell();
+    bool EnsurePuzzleFreecellGame();
+    bool MovePuzzleFreecellToColumn(uint8_t destination);
+    bool MovePuzzleFreecellToCell(uint8_t destination);
+    bool MovePuzzleFreecellToFoundation(uint8_t destination);
+    void UndoPuzzleFreecell();
+    void SetPuzzleFreecellStatus(const char* message);
+    void SetPuzzleFreecellMoveError(QdFreecell::MoveResult result);
+    int PuzzleFreecellCardGap(uint8_t column) const;
+    void LoadPuzzleMaze(int delta);
+    void MovePuzzleMaze(int dx, int dy);
+    void ResetPuzzleRevolver();
+    void ArmPuzzleRevolver();
+    void FirePuzzleRevolver();
+    void SetPuzzleMazeSampling(bool active);
+    void RefreshPuzzleArcadeBoard();
+    static void PuzzleArcadeDrawCb(lv_event_t* event);
+#if defined(CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE) && \
+    CONFIG_QDTECH_EXPERIMENT_SHAKE_REVOLVER_NUMBER_SLIDE
+    static void ShakeLabRevolverDrawCb(lv_event_t* event);
+#endif
+#endif
+    void CreateXiaozhiPage(lv_obj_t* root);
+    void CreateNetworkPage(lv_obj_t* root);
+    void CreateSettingsPage(lv_obj_t* root);
+    void CreateDiagnosticsPage(lv_obj_t* root);
+    void CreateStatusBar(lv_obj_t* parent);
+    void CreateBigTime(lv_obj_t* parent);
+    void CreateWeatherPanel(lv_obj_t* parent);
+    void CreateQuotePanel(lv_obj_t* parent);
+    lv_obj_t* CreateAppTile(lv_obj_t* parent, uint8_t index, const char* cn, const char* en, const char* status, lv_color_t color);
+    void CreateFaceUI(lv_obj_t* parent);
+    void CreateQrOverlay(lv_obj_t* root);
+    void EnsureThemedFaceGif();
+    void ReleaseThemedFaceGif();
+    lv_obj_t* CreateButton(lv_obj_t* parent, const char* text, lv_event_cb_t cb);
+    lv_obj_t* CreatePanel(lv_obj_t* parent, int16_t w, int16_t h, int16_t x, int16_t y);
+    void UpdateWifiList();
+    void RefreshDiagnostics();
+    void SetAppTileStatus(uint8_t index, const char* status, lv_color_t color);
+    void RefreshAppTileStatuses();
+    void LoadMusicRecent();
+    void SaveMusicRecent();
+    void RefreshMusicRecent();
+    bool HandleSettingsSliderRelease(uint16_t start_x, uint16_t start_y, uint16_t end_x);
+    void RenderCalendar();
+    void ApplyWeatherVisual(int weather_code);
+    void SelectHourglassPreset(uint8_t index);
+    void ResetHourglassToDefault();
+    void UpdateHourglassUI();
+    void UpdateHourglassButtons();
+    bool HandleHourglassTap(uint16_t x, uint16_t y);
+    bool HandleShakeLabTap(uint16_t x, uint16_t y);
+    void SetAppsMoreVisible(bool visible);
+    void EnterShakeLabMode(ShakeLabMode mode);
+    void LeaveShakeLabMode();
+    void ReleaseShakeLabPage();
+    void UpdateShakeLabVisuals();
+    void UpdateShakeLabDice();
+#if defined(CONFIG_QDTECH_EXPERIMENT_PSEUDO3D_DICE) && \
+    CONFIG_QDTECH_EXPERIMENT_PSEUDO3D_DICE
+    void LoadShakeLabDiceAssets();
+    void ResetShakeLabDiceAssets();
+#endif
+    void UpdateShakeLabDivinationVisuals();
+    void StartShakeLabDivinationSequence();
+    void FinishShakeLabDivinationSequence();
+    void ResetShakeLabRecommendationView();
+    void StartShakeLabRecommendationLoad();
+    void RevealShakeLabResult();
+#if defined(CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH) && \
+    CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH
+    void UpdateWoodenFishVisuals();
+    void LoadWoodenFishBackgroundAsync();
+    void ResetWoodenFishBackground();
+#if defined(CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH_AUDIO) && \
+    CONFIG_QDTECH_EXPERIMENT_WOODEN_FISH_AUDIO
+    void RequestWoodenFishSound();
+#endif
+#endif
+    void UpdateFocusUI();
+    uint32_t CurrentFocusDateKey() const;
+    void ReconcileFocusDate(bool persist);
+
+    void RenderBigTime(int hour, int minute, bool animate);
+    void FlipDigit(uint8_t index, uint8_t digit, bool animate);
+    void SetFacePart(lv_obj_t* obj, int x, int y, int w, int h, int radius);
+    bool IsMusicLyricActive(int64_t now_ms) const;
+
+    static void ObjOpaCb(void* obj, int32_t value);
+    static void ObjXCb(void* obj, int32_t value);
+    static void ObjYCb(void* obj, int32_t value);
+    static void ColonTimerCb(lv_timer_t* timer);
+    static void FaceTimerCb(lv_timer_t* timer);
+    static void FocusTimerCb(lv_timer_t* timer);
+    static void HourglassTickCb(lv_timer_t* timer);
+    static void HourglassAnimCb(lv_timer_t* timer);
+    static void HourglassSandDrawCb(lv_event_t* event);
+    static void ShakeLabAnimCb(lv_timer_t* timer);
+    static void DailyCardBreathCb(lv_timer_t* timer);
+    static void ClockShadowCb(lv_timer_t* timer);
+    static void WeatherParticleCb(lv_timer_t* timer);
+    static void MusicCoverTimerCb(lv_timer_t* timer);
+};
