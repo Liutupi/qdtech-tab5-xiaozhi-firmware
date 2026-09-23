@@ -8,6 +8,7 @@
 - 开发机为 Windows PowerShell + `C:\Espressif\esp-idf-v6.0.2`。当前工程目录 `D:\tab5\qdtech-tab5-firmware`，原产品只读对照目录 `D:\tab5\qdtech-source`。路径只是本机记录，新电脑按需替换。
 - 实机为 ESP32-P4 rev 1.3、16 MB flash、32 MB PSRAM、ST7121/触控固件 1、ESP32-C6 Wi‑Fi、插有 SD 卡，串口当时是 COM5。`qdtech-tab5` 构建变体适用于此机；其他机器必须重新核对芯片/面板。
 - 设备原始 16 MB 完整备份仅保留在旧电脑的 `D:\tab5\backups\tab5-original-2026-09-23.bin`，**不上传 GitHub**，因为可能包含网络凭据、设备身份等个人数据。若需要恢复，须由设备所有者安全地从旧电脑复制。
+- 当前编译产物已放在 [v0.1.0 开发预发布页](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v0.1.0-checkpoint)，供换电脑时对照；它没有刷入或实测 FC，也没有解决屏幕与文字问题。
 
 ## 新电脑的构建步骤
 

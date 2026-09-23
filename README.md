@@ -21,6 +21,8 @@ python scripts/build.py qdtech/tab5 --name qdtech-tab5
 
 烧录前阅读 [交接本的刷机与数据保护部分](HANDOFF.md#刷机与数据保护)。本次阶段存档的 FC 模拟器尚未在设备上验证；电台和播客也尚待播放实测。
 
+编译产物保存在 [v0.1.0 阶段预发布页](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v0.1.0-checkpoint)，包含应用、资源、bootloader、分区表和 SHA-256 清单。它是 **P4 rev 1.x 的未刷机开发快照**，存在上述显示问题；继续开发请以源码为准。
+
 ## 文档
 
 - [HANDOFF.md](HANDOFF.md)：环境、代码入口、构建、已验证结果、继续工作的顺序。
