@@ -399,6 +399,11 @@ void nes_emulate(void)
          nes_renderframe(true);
          system_video(true);
       }
+      else
+      {
+         /* nothing due yet: yield instead of spinning */
+         osd_idle();
+      }
    }
 }
 

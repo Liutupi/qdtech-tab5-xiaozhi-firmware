@@ -97,8 +97,11 @@ void Tab5AudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio
     i2s_chan_config_t chan_cfg = {
         .id = I2S_NUM_0,
         .role = I2S_ROLE_MASTER,
-        .dma_desc_num = 6,
-        .dma_frame_num = 240,
+        // 8x256 ≈ 85 ms at 24 kHz. Larger values steal scarce internal SRAM
+        // from TLS/MQTT and caused panics when DMA hit the buffer-size cap
+        // (driver silently reduced 512 -> 504 and heap dropped ~20 KB).
+        .dma_desc_num = 8,
+        .dma_frame_num = 256,
         .auto_clear_after_cb = true,
         .auto_clear_before_cb = false,
         .intr_priority = 0,
@@ -187,6 +190,7 @@ void Tab5AudioCodec::SetOutputVolume(int volume) {
 }
 
 void Tab5AudioCodec::EnableInput(bool enable) {
+    std::lock_guard<std::mutex> lock(codec_mutex_);
     if (enable == input_enabled_) {
         return;
     }
@@ -201,36 +205,105 @@ void Tab5AudioCodec::EnableInput(bool enable) {
         if (input_reference_) {
             fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
         }
-        ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), input_gain_));
+        if (esp_codec_dev_open(input_dev_, &fs) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to open input device");
+            return;
+        }
+        if (esp_codec_dev_set_in_channel_gain(input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), input_gain_) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set input gain");
+        }
     } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
+        if (esp_codec_dev_close(input_dev_) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to close input device");
+        }
     }
     AudioCodec::EnableInput(enable);
+    // Mic power-off reconfigures shared duplex I2S and can leave TX disabled.
+    // Skip the expensive reopen when radio/music already claimed external
+    // playback and output is healthy — a mid-stream ReopenOutput is an audible
+    // stutter. Only restore when TX might have been parked (voice path).
+    if (output_enabled_ && !external_playback_.load(std::memory_order_relaxed)) {
+        ESP_LOGI(TAG, "Restoring TX after input %s", enable ? "on" : "off");
+        ReopenOutputLocked();
+    }
+}
+
+void Tab5AudioCodec::ReopenOutputLocked() {
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel = 1,
+        .channel_mask = 0,
+        .sample_rate = (uint32_t)output_sample_rate_,
+        .mclk_multiple = 0,
+    };
+    // Reconfiguring TX while RX is open leaves I2S with "Pending out channel
+    // for in channel running" and playback goes silent while output_enabled_
+    // stays true. Close mic first, restore TX, then put the mic back.
+    const bool restore_input = input_enabled_;
+    if (restore_input) {
+        esp_codec_dev_close(input_dev_);
+        AudioCodec::EnableInput(false);
+    }
+    esp_codec_dev_close(output_dev_);
+    if (esp_codec_dev_open(output_dev_, &fs) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to reopen output device");
+        AudioCodec::EnableOutput(false);
+    } else {
+        if (esp_codec_dev_set_out_vol(output_dev_, output_volume_) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set output volume");
+        }
+        AudioCodec::EnableOutput(true);
+        ESP_LOGI(TAG, "TX device reopened");
+    }
+    if (restore_input) {
+        esp_codec_dev_sample_info_t in_fs = {
+            .bits_per_sample = 16,
+            .channel = 4,
+            .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
+            .sample_rate = (uint32_t)output_sample_rate_,
+            .mclk_multiple = 0,
+        };
+        if (input_reference_) {
+            in_fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
+        }
+        if (esp_codec_dev_open(input_dev_, &in_fs) == ESP_OK) {
+            esp_codec_dev_set_in_channel_gain(input_dev_,
+                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), input_gain_);
+            AudioCodec::EnableInput(true);
+        } else {
+            ESP_LOGE(TAG, "Failed to restore input after output reopen");
+        }
+    }
+}
+
+void Tab5AudioCodec::ReopenOutput() {
+    std::lock_guard<std::mutex> lock(codec_mutex_);
+    if (!output_enabled_) {
+        // fall through to open path below without recursion
+    } else {
+        ReopenOutputLocked();
+        return;
+    }
+    ReopenOutputLocked();
 }
 
 void Tab5AudioCodec::EnableOutput(bool enable) {
+    std::lock_guard<std::mutex> lock(codec_mutex_);
     if (enable == output_enabled_) {
         return;
     }
     if (enable) {
-        // Play 16bit 1 channel
-        esp_codec_dev_sample_info_t fs = {
-            .bits_per_sample = 16,
-            .channel = 1,
-            .channel_mask = 0,
-            .sample_rate = (uint32_t)output_sample_rate_,
-            .mclk_multiple = 0,
-        };
-        ESP_ERROR_CHECK(esp_codec_dev_open(output_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
+        ReopenOutputLocked();
     } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
+        if (esp_codec_dev_close(output_dev_) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to close output device");
+        }
+        AudioCodec::EnableOutput(false);
     }
-    AudioCodec::EnableOutput(enable);
 }
 
 int Tab5AudioCodec::Read(int16_t* dest, int samples) {
+    std::lock_guard<std::mutex> lock(codec_mutex_);
     if (input_enabled_) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(input_dev_, (void*)dest, samples * sizeof(int16_t)));
     }
@@ -238,8 +311,23 @@ int Tab5AudioCodec::Read(int16_t* dest, int samples) {
 }
 
 int Tab5AudioCodec::Write(const int16_t* data, int samples) {
+    std::lock_guard<std::mutex> lock(codec_mutex_);
     if (output_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(output_dev_, (void*)data, samples * sizeof(int16_t)));
+        int err = esp_codec_dev_write(output_dev_, (void*)data, samples * sizeof(int16_t));
+        if (err != 0) {
+            ++write_failures_;
+            if (write_failures_ == 1 || (write_failures_ % 32) == 0) {
+                ESP_LOGW(TAG, "output write failed err=%d count=%u", err,
+                         static_cast<unsigned>(write_failures_));
+            }
+            if (write_failures_ >= 4) {
+                write_failures_ = 0;
+                ESP_LOGW(TAG, "output write failing; reopening TX");
+                ReopenOutputLocked();
+            }
+        } else {
+            write_failures_ = 0;
+        }
     }
     return samples;
 }

@@ -572,8 +572,10 @@ void gui_frame(bool draw)
    if (option_showoam)
       gui_updateoam();
 
+#ifndef QD_NOFRENDO_NO_GUI_MSG
    if (msg.ttl)
       gui_updatemsg();
+#endif
 
    if (option_showgui)
    {

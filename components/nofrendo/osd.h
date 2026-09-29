@@ -90,6 +90,7 @@ extern char *osd_newextension(char *string, char *ext);
 
 /* input */
 extern void osd_getinput(void);
+extern void osd_idle(void);
 extern void osd_getmouse(int *x, int *y, int *button);
 
 /* build a filename for a snapshot, return -ve for error */

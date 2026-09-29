@@ -1,0 +1,20 @@
+{
+  "stations": [
+    {
+      "name": "示例电台",
+      "url": "https://lhttp.qtfm.cn/live/15318317/64k.mp3",
+      "url2": "https://lhttp-hw.qtfm.cn/live/15318317/64k.mp3",
+      "url3": "http://lhttp.qingting.fm/live/15318317/64k.mp3",
+      "codec": "MP3",
+      "bitrate": 64,
+      "category": "national"
+    },
+    {
+      "name": "My Music",
+      "url": "https://ice1.somafm.com/groovesalad-128-mp3",
+      "codec": "MP3",
+      "bitrate": 128,
+      "category": "music"
+    }
+  ]
+}

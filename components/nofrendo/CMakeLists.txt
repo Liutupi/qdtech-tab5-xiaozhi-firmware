@@ -21,10 +21,13 @@ idf_component_register(
         "nes"
         "sndhrdw"
         "libsnss"
-    REQUIRES esp_timer
+    REQUIRES esp_timer freertos
 )
 
+# The project builds with -Os; the 6502/PPU/APU inner loops need -O2 to hold 60 fps.
 target_compile_options(${COMPONENT_LIB} PRIVATE
+    -O2
+    -DQD_NOFRENDO_NO_GUI_MSG=1
     -Wno-error
     -Wno-int-to-pointer-cast
     -Wno-pointer-to-int-cast

@@ -11,6 +11,7 @@
 #include "system_info.h"
 #include "text_glyph_payload.h"
 #include "websocket_protocol.h"
+#include "wifi_manager.h"
 
 #include <driver/gpio.h>
 #include <esp_log.h>
@@ -371,14 +372,14 @@ void Application::ActivationTask() {
     // Create OTA object for activation process
     ota_ = std::make_unique<Ota>();
 
-    // Check for new assets version
-    CheckAssetsVersion();
-
-    // Check for new firmware version
-    CheckNewVersion();
-
-    // Initialize the protocol
+    // Initialize the protocol FIRST so voice/chat works even when the
+    // version check cannot reach the server (TLS / low-memory failures).
     InitializeProtocol();
+
+    // Check for new assets / firmware in the background path after the
+    // protocol is ready. Failures must not block conversation.
+    CheckAssetsVersion();
+    CheckNewVersion();
 
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
@@ -445,9 +446,9 @@ void Application::CheckAssetsVersion() {
 }
 
 void Application::CheckNewVersion() {
-    const int MAX_RETRY = 10;
+    const int MAX_RETRY = 3;
     int retry_count = 0;
-    int retry_delay = 10;  // Initial retry delay in seconds
+    int retry_delay = 5;  // Initial retry delay in seconds
 
     auto& board = Board::GetInstance();
     while (true) {
@@ -457,8 +458,14 @@ void Application::CheckNewVersion() {
         auto check = ota_->CheckVersion();
         if (!check) {
             retry_count++;
+            // Stop early if the user is already talking — never block chat.
+            if (GetDeviceState() != kDeviceStateIdle) {
+                ESP_LOGW(TAG, "Skip version check retries while device is busy");
+                return;
+            }
             if (retry_count >= MAX_RETRY) {
                 ESP_LOGE(TAG, "Too many retries, exit version check");
+                display->SetStatus(Lang::Strings::STANDBY);
                 return;
             }
 
@@ -479,21 +486,24 @@ void Application::CheckNewVersion() {
                 alert_message_length >= static_cast<int>(sizeof(buffer))) {
                 snprintf(buffer, sizeof(buffer), "%s", err.Message());
             }
-            Alert(Lang::Strings::ERROR, buffer, "cloud_off", Lang::Sounds::OGG_EXCLAMATION);
+            // Only alert on the first failure so the UI is not stuck on this message.
+            if (retry_count == 1) {
+                Alert(Lang::Strings::ERROR, buffer, "cloud_off", Lang::Sounds::OGG_EXCLAMATION);
+            }
 
             ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d)", retry_delay,
                      retry_count, MAX_RETRY);
             for (int i = 0; i < retry_delay; i++) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
-                if (GetDeviceState() == kDeviceStateIdle) {
-                    break;
+                if (GetDeviceState() != kDeviceStateIdle) {
+                    return;
                 }
             }
             retry_delay *= 2;  // Double the retry delay
             continue;
         }
         retry_count = 0;
-        retry_delay = 10;  // Reset retry delay
+        retry_delay = 5;  // Reset retry delay
 
         if (ota_->HasNewVersion()) {
             if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
@@ -505,6 +515,7 @@ void Application::CheckNewVersion() {
         // No new version, mark the current version as valid
         ota_->MarkCurrentVersionValid();
         if (!ota_->HasActivationCode() && !ota_->HasActivationChallenge()) {
+            display->SetStatus(Lang::Strings::STANDBY);
             // Exit the loop if done checking new version
             break;
         }
@@ -830,20 +841,32 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
         return;
     }
 
-    // Switch to performance mode before connecting to reduce latency
-    auto& board = Board::GetInstance();
-    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-
-    if (!protocol_->IsAudioChannelOpened()) {
-        if (!protocol_->OpenAudioChannel()) {
-            // Return to idle so the device is not stuck in the connecting
-            // state (not every failure path reports a network error)
-            SetDeviceState(kDeviceStateIdle);
+    // OpenAudioChannel() is a blocking TLS/MQTT connect. Run it on a worker so
+    // the main event loop keeps processing Schedule/UI/MCP while the network
+    // stack is busy or the cloud is unreachable.
+    auto open = [this, mode]() {
+        if (GetDeviceState() != kDeviceStateConnecting) {
             return;
         }
+        auto& board = Board::GetInstance();
+        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        board.PrepareForNetwork();
+        if (auto* camera = board.GetCamera()) {
+            camera->PauseStream();
+        }
+        if (!protocol_->IsAudioChannelOpened()) {
+            if (!protocol_->OpenAudioChannel()) {
+                SetDeviceState(kDeviceStateIdle);
+                return;
+            }
+        }
+        SetListeningMode(mode);
+    };
+    if (auto* background = GetBackgroundTask()) {
+        background->Schedule(open);
+        return;
     }
-
-    SetListeningMode(mode);
+    open();
 }
 
 void Application::HandleStartListeningEvent() {
@@ -970,31 +993,37 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
-    if (!protocol_->IsAudioChannelOpened()) {
-        if (!protocol_->OpenAudioChannel()) {
-            // Return to idle so the device is not stuck in the connecting
-            // state (not every failure path reports a network error), and
-            // wake word detection is re-enabled by the idle state handler.
-            SetDeviceState(kDeviceStateIdle);
+    auto after_open = [this, wake_word]() {
+        ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
+#if CONFIG_SEND_WAKE_WORD_DATA
+        while (auto packet = audio_service_.PopWakeWordPacket()) {
+            protocol_->SendAudio(std::move(packet));
+        }
+        protocol_->SendWakeWordDetected(wake_word);
+        SetListeningMode(GetDefaultListeningMode());
+#else
+        play_popup_on_listening_ = true;
+        SetListeningMode(GetDefaultListeningMode());
+#endif
+    };
+
+    auto open_and_continue = [this, after_open]() {
+        if (GetDeviceState() != kDeviceStateConnecting) {
             return;
         }
+        if (!protocol_->IsAudioChannelOpened()) {
+            if (!protocol_->OpenAudioChannel()) {
+                SetDeviceState(kDeviceStateIdle);
+                return;
+            }
+        }
+        after_open();
+    };
+    if (auto* background = GetBackgroundTask()) {
+        background->Schedule(open_and_continue);
+        return;
     }
-
-    ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
-#if CONFIG_SEND_WAKE_WORD_DATA
-    // Encode and send the wake word data to the server
-    while (auto packet = audio_service_.PopWakeWordPacket()) {
-        protocol_->SendAudio(std::move(packet));
-    }
-    // Set the chat state to wake word detected
-    protocol_->SendWakeWordDetected(wake_word);
-    SetListeningMode(GetDefaultListeningMode());
-#else
-    // Set flag to play popup sound after state changes to listening
-    // (PlaySound here would be cleared by ResetDecoder in EnableVoiceProcessing)
-    play_popup_on_listening_ = true;
-    SetListeningMode(GetDefaultListeningMode());
-#endif
+    open_and_continue();
 }
 
 void Application::HandleStateChangedEvent() {
@@ -1212,6 +1241,14 @@ void Application::Reboot() {
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version,
                                   const std::string& expected_sha256) {
+#ifdef CONFIG_BOARD_TYPE_QDTECH_TAB5
+    // The Tab5 has a single 12 MB firmware slot; only the SD-staged updater (Settings ->
+    // 固件升级) may replace it. Cloud-pushed or MCP-requested upgrades are refused.
+    ESP_LOGW(TAG, "Cloud firmware upgrade is disabled on Tab5 (url=%s)", url.c_str());
+    (void)version;
+    (void)expected_sha256;
+    return false;
+#endif
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
 
@@ -1372,16 +1409,50 @@ void Application::RegisterDeviceStateCallback(
 }
 
 void Application::SetExternalAudioActive(bool active) {
+    // Peak current of speaker PA + LCD + Wi-Fi TX has triggered BOD reboots on
+    // USB power. Dim the backlight only — never touch the user's volume.
+    static int saved_brightness = -1;
+    constexpr int kExtAudioMaxBrightness = 40;
+
     const bool previous = external_audio_active_.exchange(active);
+    audio_service_.SetExternalPlaybackActive(active);
+    if (auto* codec = Board::GetInstance().GetAudioCodec()) {
+        codec->SetExternalPlaybackActive(active);
+    }
     if (active && !previous) {
         audio_service_.EnableVoiceProcessing(false);
         audio_service_.EnableWakeWordDetection(false);
         audio_service_.ResetDecoder();
-    } else if (!active && previous) {
-        Schedule([this]() {
-            if (!external_audio_active_.load() && GetDeviceState() == kDeviceStateIdle) {
-                audio_service_.EnableWakeWordDetection(true);
+        // BALANCED cuts Wi-Fi latency without the extra current of PERFORMANCE.
+        // PERFORMANCE + speaker PA has triggered BOD (brownout) reboots on USB.
+        WifiManager::GetInstance().SetPowerSaveLevel(WifiPowerSaveLevel::BALANCED);
+        if (auto* backlight = Board::GetInstance().GetBacklight()) {
+            saved_brightness = backlight->brightness();
+            if (saved_brightness > kExtAudioMaxBrightness) {
+                ESP_LOGI(TAG, "external audio: dim backlight %d -> %d", saved_brightness,
+                         kExtAudioMaxBrightness);
+                backlight->SetBrightness(kExtAudioMaxBrightness, false);
+            } else {
+                saved_brightness = -1;
             }
+        }
+    } else if (!active && previous) {
+        WifiManager::GetInstance().SetPowerSaveLevel(WifiPowerSaveLevel::LOW_POWER);
+        if (saved_brightness >= 0) {
+            if (auto* backlight = Board::GetInstance().GetBacklight()) {
+                if (backlight->brightness() == kExtAudioMaxBrightness) {
+                    backlight->SetBrightness(saved_brightness, false);
+                }
+            }
+            saved_brightness = -1;
+        }
+        // Defer mic bring-up. A stream reconnect can briefly clear the flag;
+        // re-enabling the mic reconfigures shared duplex I2S and can kill TX.
+        Schedule([this]() {
+            if (external_audio_active_.load() || GetDeviceState() != kDeviceStateIdle) {
+                return;
+            }
+            audio_service_.EnableWakeWordDetection(true);
         });
     }
 }

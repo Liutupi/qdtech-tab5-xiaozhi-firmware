@@ -1,6 +1,12 @@
 # 小智桌面固件：QDTech S3 → M5Stack Tab5 移植
 
-这是一个**开发中的公开阶段存档**。Tab5 已能启动小智桌面、连接 Wi‑Fi、进行语音对话，并访问天气与 SD 卡。当前界面只是把原项目的 480 × 320 桌面放大、旋转后显示在 Tab5 屏幕上；**没有完成原生高分辨率横屏布局**。实机反馈：屏幕比例和清晰度不合适，文字、数字和时间有缺失。请先看 [交接本](HANDOFF.md) 和 [问题与计划](PORTING_STATUS.md)，不要把此版本当成完成品。
+这是一个**开发中的公开阶段存档**。Tab5 已能启动小智、连接 Wi‑Fi、进行语音对话并初始化摄像头。用户实测确认：把原 480 × 320 桌面双线性放大到全屏会让刷新和触摸明显变慢，因此该实验已撤回。`qdtech-tab5-native` 变体直接按 1280 × 720 绘制 Nabo 主界面与时分秒时钟，并加入第二页的配网、亮度、音量和网络电台。原 `qdtech-tab5` 变体仍可回退到 480 × 320 桌面。主界面铺满屏幕、触摸、对话、人体感应与时间日期已经在设备上验证；新应用页和电台声音仍需实测。详见 [交接本](HANDOFF.md) 和 [问题与计划](PORTING_STATUS.md)。
+
+## v1.0.0 与在线升级
+
+v1.0.0 是当前烧录在开发机上的进度快照，包含 `qdtech-tab5-native` 原生 1280 × 720 主界面、Nabo 形象与对话、天气/日期、网络电台与音乐歌词、FC 红白机与 USB 手柄、红外遥控、ICU 计算器、摄像头人体感应等模块；各模块的实机验证程度以 [PORTING_STATUS.md](PORTING_STATUS.md) 为准。设置页新增 **固件升级**：检查 GitHub 最新 Release，把安装包下载到 SD 卡并校验 SHA-256，然后由 `ota_0` 里的小型升级程序改写主固件，断电可重试，Wi‑Fi 等设置不受影响。原理与限制见 [HANDOFF.md](HANDOFF.md#v1002026-09-30与在线升级-ota)。
+
+首次从旧版本升级到 v1.0.0 需要一次 USB 刷写（新分区表 + 主固件 + `updater/`）；之后可以直接在设备上升级。
 
 ## 来源与硬件
 
@@ -14,7 +20,7 @@
 安装 **ESP-IDF 6.0.2**（包含 ESP32-P4 工具链），克隆本仓库后在已激活 IDF 的终端运行：
 
 ```sh
-python scripts/build.py qdtech/tab5 --name qdtech-tab5
+python scripts/build.py qdtech/tab5 --name qdtech-tab5-native
 ```
 
 `qdtech-tab5` 面向 P4 rev 1.x；`qdtech-tab5-p4x` 面向 rev 3 或更新芯片。先运行 `esptool.py --chip esp32p4 --port <串口> chip_id` 确认硬件版本。构建脚本使用 `main/boards/qdtech/tab5/config.json`、`sdkconfig.defaults*` 和 `partitions/qdtech_tab5.csv`。第一次构建需联网下载组件。不要将本地 `sdkconfig`、`build/`、设备备份、Wi‑Fi 凭据或 NVS 数据加入公开仓库。

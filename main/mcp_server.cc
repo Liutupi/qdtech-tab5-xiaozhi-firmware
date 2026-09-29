@@ -611,10 +611,11 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         }
     }
 
-    // Use main thread to call the tool
-    auto& app = Application::GetInstance();
-    app.Schedule([this, id, tool, arguments = std::move(arguments),
-                  response_sender = std::move(response_sender)]() {
+    // Run tools off the main event loop. A blocking tool (radio start, TLS,
+    // SD I/O) must not freeze chat / UI Schedule callbacks. UI helpers inside
+    // tools take DisplayLock themselves.
+    auto job = [this, id, tool, arguments = std::move(arguments),
+                response_sender = std::move(response_sender)]() {
         auto result = tool->Call(arguments);
         if (!result) {
             ESP_LOGE(TAG, "tools/call: %s", result.error().c_str());
@@ -622,5 +623,11 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             return;
         }
         ReplyResult(id, *result, response_sender);
-    });
+    };
+    auto& app = Application::GetInstance();
+    if (auto* background = app.GetBackgroundTask()) {
+        background->Schedule(std::move(job));
+    } else {
+        app.Schedule(std::move(job));
+    }
 }

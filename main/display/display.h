@@ -119,6 +119,7 @@ public:
     DisplayLockGuard& operator=(const DisplayLockGuard&) = delete;
 
     explicit operator bool() const { return locked_; }
+    bool locked() const { return locked_; }
 
 private:
     Display* display_;

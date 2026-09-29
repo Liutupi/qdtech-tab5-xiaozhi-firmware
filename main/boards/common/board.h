@@ -80,6 +80,9 @@ public:
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging);
     virtual std::string GetSystemInfoJson();
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
+    // Free heavyweight peripherals (camera, emulator, …) before a network
+    // connection that needs extra internal SRAM (TLS / MQTT).
+    virtual void PrepareForNetwork() {}
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
 };

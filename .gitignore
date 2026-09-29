@@ -14,8 +14,18 @@ releases/
 main/assets/lang_config.h
 main/mmap_generate_emoji.h
 .DS_Store
+._*
 .cache
 *.pyc
 *.bin
 mmap_generate_*.h
 .clangd
+
+# Local logs, backups and the updater's build output
+logs/
+updater/build/
+updater/sdkconfig
+updater/sdkconfig.old
+updater/managed_components/
+updater/dependencies.lock
+*.command

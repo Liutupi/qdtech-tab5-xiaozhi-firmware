@@ -2,8 +2,10 @@
 #define _TAB5_AUDIO_CODEC_H
 
 #include "audio_codec.h"
+#include <atomic>
 #include <esp_codec_dev.h>
 #include <esp_codec_dev_defaults.h>
+#include <mutex>
 
 
 class Tab5AudioCodec : public AudioCodec {
@@ -17,8 +19,12 @@ private:
 
     esp_codec_dev_handle_t output_dev_ = nullptr;
     esp_codec_dev_handle_t input_dev_ = nullptr;
+    unsigned write_failures_ = 0;
+    std::mutex codec_mutex_;
+    std::atomic<bool> external_playback_{false};
 
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din);
+    void ReopenOutputLocked();
 
     virtual int Read(int16_t* dest, int samples) override;
     virtual int Write(const int16_t* data, int samples) override;
@@ -32,6 +38,11 @@ public:
     virtual void SetOutputVolume(int volume) override;
     virtual void EnableInput(bool enable) override;
     virtual void EnableOutput(bool enable) override;
+    virtual void SetExternalPlaybackActive(bool active) override {
+        external_playback_.store(active, std::memory_order_relaxed);
+    }
+    // Force a TX device reopen after duplex I2S reconfiguration.
+    void ReopenOutput();
 };
 
 #endif // _TAB5_AUDIO_CODEC_H

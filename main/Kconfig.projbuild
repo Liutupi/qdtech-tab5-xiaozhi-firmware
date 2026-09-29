@@ -350,9 +350,6 @@ choice BOARD_TYPE
     config BOARD_TYPE_M5STACK_CORE_TAB5
         bool "M5Stack Tab5"
         depends on IDF_TARGET_ESP32P4
-    config BOARD_TYPE_QDTECH_TAB5
-        bool "QDTech firmware on M5Stack Tab5"
-        depends on IDF_TARGET_ESP32P4
     config BOARD_TYPE_MAGICLICK_S3_2P4
         bool "Magiclick 2.4 (神奇按钮)"
         depends on IDF_TARGET_ESP32S3
@@ -416,6 +413,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_OTTO_ROBOT
         bool "Otto Robot"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_QDTECH_TAB5
+        bool "QDTech firmware on M5Stack Tab5"
+        depends on IDF_TARGET_ESP32P4
     config BOARD_TYPE_QUANDONG_S3_DEV
         bool "Quandong ESP32-S3 Development Board (全动)"
         depends on IDF_TARGET_ESP32S3
@@ -1119,6 +1119,14 @@ menu "Camera Configuration"
         endchoice
     endif
 endmenu
+
+config QDTECH_TAB5_NATIVE_UI
+    bool "Tab5 native-resolution XiaoZhi interface"
+    depends on BOARD_TYPE_QDTECH_TAB5
+    default n
+    help
+        Render directly at 1280x720 and run the focused XiaoZhi interface.
+        The legacy 480x320 desktop and its optional services are omitted.
 
 menu "TAIJIPAI_S3_CONFIG"
     depends on BOARD_TYPE_TAIJI_PI_S3

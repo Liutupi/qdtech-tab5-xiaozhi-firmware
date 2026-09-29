@@ -27,7 +27,12 @@
 #include "freertos/task.h"
 #include "mp3dec.h"
 #include "settings.h"
+#include "tab5_audio_codec.h"
 #include "wifi_manager.h"
+
+#include <esp_timer.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 static const char* TAG = "RadioService";
 
@@ -35,15 +40,23 @@ static const char* TAG = "RadioService";
 // A 320 kbps stream consumes about 40 KB/s, so the steady-state target below
 // provides roughly 600 ms of headroom without spending scarce internal SRAM.
 static constexpr int kReadBufferSize = 48 * 1024;
-static constexpr int kRadioReadTargetBytes = 16 * 1024;
-static constexpr int kMusicReadTargetBytes = 24 * 1024;
-static constexpr int kInitialReadTargetBytes = 8 * 1024;
+static constexpr int kRadioReadTargetBytes = 32 * 1024;
+static constexpr int kMusicReadTargetBytes = 32 * 1024;
+static constexpr int kInitialReadTargetBytes = 12 * 1024;
 static constexpr int kReadChunkBytes = 4096;
 static constexpr int kPcmMaxSamples = MAX_NCHAN * MAX_NGRAN * MAX_NSAMP;
 static constexpr int kPcmOutputMaxSamples = kPcmMaxSamples * 3;
 static constexpr TickType_t kCustomUrlSpeakingGraceTicks = pdMS_TO_TICKS(4000);
-static constexpr int kRadioEmptyReadLimit = 200;
-static constexpr int kCustomUrlEmptyReadLimit = 1200;
+static constexpr int kRadioEmptyReadLimit = 80;
+static constexpr int kCustomUrlEmptyReadLimit = 400;
+// Live streams can hang inside esp_http_client_read (TLS half-open) and never
+// return; this watchdog closes the client so PlayUrl can reconnect.
+// 15s: shorter windows kill healthy-but-jittery links (phone hotspots) and
+// cause the audible stutter from constant reconnects.
+static constexpr int64_t kReadStallTimeoutUs = 25LL * 1000000;
+static std::atomic<esp_http_client_handle_t> g_active_stream_client{nullptr};
+static std::atomic<int64_t> g_last_stream_progress_us{0};
+static esp_timer_handle_t g_stream_stall_timer = nullptr;
 static constexpr int kCustomUrlMaxReconnectAttempts = 3;
 static constexpr int kMinimumCustomMusicBytes = 1024 * 1024;
 
@@ -106,7 +119,7 @@ static RadioCategory ParseCategory(const char* cat) {
 
 static void LoadBuiltinStations() {
     if (!kStations.empty()) return;
-    
+
     struct BuiltinStation {
         const char* name;
         const char* urls[3];
@@ -114,47 +127,56 @@ static void LoadBuiltinStations() {
         int bitrate_kbps;
         RadioCategory category;
     };
-    
+
+    // Probed 2026-09 with GET → Content-Type audio/mpeg. Dual CN mirrors where
+    // available. Station names avoid CJK outside font_symbols.txt. International
+    // channels use ASCII so the LXGW subset can render them.
     static const BuiltinStation builtin[] = {
-        {"CNR China Voice", {"https://lhttp.qtfm.cn/live/15318317/64k.mp3", "https://lhttp-hw.qtfm.cn/live/15318317/64k.mp3", nullptr}, "MP3", 64, RadioCategory::NATIONAL},
-        {"CNR Economic", {"https://lhttp.qingting.fm/live/15318569/64k.mp3", "https://lhttp.qtfm.cn/live/15318569/64k.mp3", nullptr}, "MP3", 64, RadioCategory::NATIONAL},
-        {"CNR Music", {"https://lhttp.qtfm.cn/live/15318497/64k.mp3", "https://lhttp-hw.qtfm.cn/live/15318497/64k.mp3", nullptr}, "MP3", 64, RadioCategory::NATIONAL},
-        {"CNR Traffic", {"https://lhttp.qtfm.cn/live/15318641/64k.mp3", "https://lhttp-hw.qtfm.cn/live/15318641/64k.mp3", nullptr}, "MP3", 64, RadioCategory::NATIONAL},
-        {"CNR Literature", {"https://lhttp.qtfm.cn/live/15318785/64k.mp3", "https://lhttp-hw.qtfm.cn/live/15318785/64k.mp3", nullptr}, "MP3", 64, RadioCategory::NATIONAL},
-        {"CNR Senior", {"https://lhttp.qtfm.cn/live/15318857/64k.mp3", "https://lhttp-hw.qtfm.cn/live/15318857/64k.mp3", nullptr}, "MP3", 64, RadioCategory::NATIONAL},
-        {"Beijing News", {"https://lhttp.qtfm.cn/live/4848/64k.mp3", "https://lhttp-hw.qtfm.cn/live/4848/64k.mp3", nullptr}, "MP3", 64, RadioCategory::BEIJING},
-        {"Beijing Traffic", {"https://lhttp.qtfm.cn/live/4955/64k.mp3", "https://lhttp-hw.qtfm.cn/live/4955/64k.mp3", nullptr}, "MP3", 64, RadioCategory::BEIJING},
-        {"Beijing Music", {"https://lhttp.qtfm.cn/live/4938/64k.mp3", "https://lhttp-hw.qtfm.cn/live/4938/64k.mp3", nullptr}, "MP3", 64, RadioCategory::BEIJING},
-        {"Shanghai News", {"https://lhttp.qtfm.cn/live/1259/64k.mp3", "https://lhttp-hw.qtfm.cn/live/1259/64k.mp3", nullptr}, "MP3", 64, RadioCategory::SHANGHAI},
-        {"Shanghai Traffic", {"https://lhttp.qtfm.cn/live/1260/64k.mp3", "https://lhttp-hw.qtfm.cn/live/1260/64k.mp3", nullptr}, "MP3", 64, RadioCategory::SHANGHAI},
-        {"Shanghai Music", {"https://lhttp.qtfm.cn/live/1271/64k.mp3", "https://lhttp-hw.qtfm.cn/live/1271/64k.mp3", nullptr}, "MP3", 64, RadioCategory::SHANGHAI},
-        {"Guangzhou News", {"http://lhttp.qingting.fm/live/4848/64k.mp3", "https://lhttp.qtfm.cn/live/4848/64k.mp3", nullptr}, "MP3", 64, RadioCategory::GUANGDONG},
-        {"Guangzhou Traffic", {"http://lhttp.qingting.fm/live/4955/64k.mp3", "https://lhttp.qtfm.cn/live/4955/64k.mp3", nullptr}, "MP3", 64, RadioCategory::GUANGDONG},
-        {"Pearl River FM", {"http://lhttp.qingting.fm/live/1259/64k.mp3", "https://lhttp.qtfm.cn/live/1259/64k.mp3", nullptr}, "MP3", 64, RadioCategory::GUANGDONG},
-        {"Guangdong Music", {"http://lhttp.qingting.fm/live/1260/64k.mp3", "https://lhttp.qtfm.cn/live/1260/64k.mp3", nullptr}, "MP3", 64, RadioCategory::GUANGDONG},
-        {"Guangdong News", {"https://lhttp.qtfm.cn/live/471/64k.mp3", "https://lhttp-hw.qtfm.cn/live/471/64k.mp3", nullptr}, "MP3", 64, RadioCategory::GUANGDONG},
-        {"Shenzhen FM971", {"http://lhttp.qingting.fm/live/1271/64k.mp3", "https://lhttp.qtfm.cn/live/1271/64k.mp3", nullptr}, "MP3", 64, RadioCategory::GUANGDONG},
-        {"Zhejiang Voice", {"https://lhttp.qtfm.cn/live/1223/64k.mp3", "https://lhttp-hw.qtfm.cn/live/1223/64k.mp3", nullptr}, "MP3", 64, RadioCategory::ZHEJIANG},
-        {"Zhejiang Traffic", {"https://lhttp.qtfm.cn/live/5021381/64k.mp3", "https://lhttp-hw.qtfm.cn/live/5021381/64k.mp3", nullptr}, "MP3", 64, RadioCategory::ZHEJIANG},
-        {"Zhejiang Music", {"https://lhttp.qtfm.cn/live/5022107/64k.mp3", "https://lhttp-hw.qtfm.cn/live/5022107/64k.mp3", nullptr}, "MP3", 64, RadioCategory::ZHEJIANG},
-        {"Jiangsu News", {"https://lhttp.qtfm.cn/live/5022308/64k.mp3", "https://lhttp-hw.qtfm.cn/live/5022308/64k.mp3", nullptr}, "MP3", 64, RadioCategory::JIANGSU},
-        {"Jiangsu Traffic", {"https://lhttp.qtfm.cn/live/4915/64k.mp3", "https://lhttp-hw.qtfm.cn/live/4915/64k.mp3", nullptr}, "MP3", 64, RadioCategory::JIANGSU},
-        {"Sichuan News", {"https://lhttp.qtfm.cn/live/4848/64k.mp3", "https://lhttp-hw.qtfm.cn/live/4848/64k.mp3", nullptr}, "MP3", 64, RadioCategory::SICHUAN},
-        {"Sichuan Traffic", {"https://lhttp.qtfm.cn/live/4955/64k.mp3", "https://lhttp-hw.qtfm.cn/live/4955/64k.mp3", nullptr}, "MP3", 64, RadioCategory::SICHUAN},
-        {"Hunan News", {"https://lhttp.qtfm.cn/live/1259/64k.mp3", "https://lhttp-hw.qtfm.cn/live/1259/64k.mp3", nullptr}, "MP3", 64, RadioCategory::HUNAN},
-        {"Hunan Traffic", {"https://lhttp.qtfm.cn/live/1260/64k.mp3", "https://lhttp-hw.qtfm.cn/live/1260/64k.mp3", nullptr}, "MP3", 64, RadioCategory::HUNAN},
-        {"Hubei News", {"https://lhttp.qtfm.cn/live/1271/64k.mp3", "https://lhttp-hw.qtfm.cn/live/1271/64k.mp3", nullptr}, "MP3", 64, RadioCategory::HUBEI},
-        {"Hubei Traffic", {"https://lhttp.qtfm.cn/live/5021381/64k.mp3", "https://lhttp-hw.qtfm.cn/live/5021381/64k.mp3", nullptr}, "MP3", 64, RadioCategory::HUBEI},
-        {"Shandong News", {"https://lhttp.qtfm.cn/live/5022107/64k.mp3", "https://lhttp-hw.qtfm.cn/live/5022107/64k.mp3", nullptr}, "MP3", 64, RadioCategory::SHANDONG},
-        {"Shandong Traffic", {"https://lhttp.qtfm.cn/live/5022308/64k.mp3", "https://lhttp-hw.qtfm.cn/live/5022308/64k.mp3", nullptr}, "MP3", 64, RadioCategory::SHANDONG},
-        {"Music Radio", {"http://lhttp.qingting.fm/live/5022107/64k.mp3", "https://lhttp.qtfm.cn/live/5022107/64k.mp3", nullptr}, "MP3", 64, RadioCategory::MUSIC},
-        {"Music FM", {"http://lhttp.qingting.fm/live/4938/64k.mp3", "https://lhttp.qtfm.cn/live/4938/64k.mp3", nullptr}, "MP3", 64, RadioCategory::MUSIC},
-        {"West Lake Voice", {"http://lhttp.qingting.fm/live/1223/64k.mp3", "https://lhttp.qtfm.cn/live/1223/64k.mp3", nullptr}, "MP3", 64, RadioCategory::MUSIC},
-        {"Traffic 959", {"http://lhttp.qingting.fm/live/5021381/64k.mp3", "https://lhttp.qtfm.cn/live/5021381/64k.mp3", nullptr}, "MP3", 64, RadioCategory::TRAFFIC},
-        {"Business Radio", {"https://lhttp.qtfm.cn/live/5022308/64k.mp3", "https://lhttp-hw.qtfm.cn/live/5022308/64k.mp3", nullptr}, "MP3", 64, RadioCategory::TRAFFIC},
-        {"Night Radio", {"http://lhttp.qingting.fm/live/4915/64k.mp3", "https://lhttp.qtfm.cn/live/4915/64k.mp3", nullptr}, "MP3", 64, RadioCategory::OTHER},
+        // —— 全国 / 新闻 ——
+        {"中国之声", {"https://lhttp.qtfm.cn/live/15318317/64k.mp3", "https://lhttp-hw.qtfm.cn/live/15318317/64k.mp3", "http://lhttp.qingting.fm/live/15318317/64k.mp3"}, "MP3", 64, RadioCategory::NATIONAL},
+        {"财经之声", {"https://lhttp.qtfm.cn/live/15318569/64k.mp3", "https://lhttp-hw.qtfm.cn/live/15318569/64k.mp3", "http://lhttp.qingting.fm/live/15318569/64k.mp3"}, "MP3", 64, RadioCategory::NATIONAL},
+        // —— 北京 ——
+        {"北京新闻广播", {"https://lhttp.qtfm.cn/live/339/64k.mp3", "https://lhttp.qingting.fm/live/339/64k.mp3", nullptr}, "MP3", 64, RadioCategory::BEIJING},
+        {"北京交通广播", {"https://lhttp.qtfm.cn/live/336/64k.mp3", "https://lhttp.qingting.fm/live/336/64k.mp3", nullptr}, "MP3", 64, RadioCategory::BEIJING},
+        {"北京音乐广播", {"https://lhttp.qtfm.cn/live/4938/64k.mp3", "https://lhttp.qingting.fm/live/4938/64k.mp3", nullptr}, "MP3", 64, RadioCategory::BEIJING},
+        // —— 上海 ——
+        {"上海新闻广播", {"https://lhttp.qtfm.cn/live/1259/64k.mp3", "https://lhttp.qingting.fm/live/1259/64k.mp3", nullptr}, "MP3", 64, RadioCategory::SHANGHAI},
+        {"上海交通广播", {"https://lhttp.qtfm.cn/live/1260/64k.mp3", "https://lhttp.qingting.fm/live/1260/64k.mp3", nullptr}, "MP3", 64, RadioCategory::SHANGHAI},
+        {"上海动感音乐", {"https://lhttp.qtfm.cn/live/1271/64k.mp3", "https://lhttp.qingting.fm/live/1271/64k.mp3", nullptr}, "MP3", 64, RadioCategory::SHANGHAI},
+        // —— 广东 ——
+        {"广州新闻台", {"https://lhttp.qtfm.cn/live/4848/64k.mp3", "https://lhttp.qingting.fm/live/4848/64k.mp3", nullptr}, "MP3", 64, RadioCategory::GUANGDONG},
+        {"广州交通电台", {"https://lhttp.qtfm.cn/live/4955/64k.mp3", "https://lhttp.qingting.fm/live/4955/64k.mp3", nullptr}, "MP3", 64, RadioCategory::GUANGDONG},
+        {"广东新闻广播", {"https://lhttp.qtfm.cn/live/1254/64k.mp3", "https://lhttp.qingting.fm/live/1254/64k.mp3", nullptr}, "MP3", 64, RadioCategory::GUANGDONG},
+        {"广东交通之声", {"https://lhttp.qtfm.cn/live/1262/64k.mp3", "https://lhttp.qingting.fm/live/1262/64k.mp3", nullptr}, "MP3", 64, RadioCategory::GUANGDONG},
+        {"广东文体广播", {"https://lhttp.qtfm.cn/live/471/64k.mp3", "https://lhttp.qingting.fm/live/471/64k.mp3", nullptr}, "MP3", 64, RadioCategory::GUANGDONG},
+        // —— 浙江 / 江苏 / 西南 / 华中 ——
+        {"浙江之声", {"https://lhttp.qtfm.cn/live/1223/64k.mp3", "https://lhttp.qingting.fm/live/1223/64k.mp3", nullptr}, "MP3", 64, RadioCategory::ZHEJIANG},
+        {"浙江交通广播", {"https://lhttp.qtfm.cn/live/5021381/64k.mp3", "https://lhttp.qingting.fm/live/5021381/64k.mp3", nullptr}, "MP3", 64, RadioCategory::ZHEJIANG},
+        {"浙江音乐广播", {"https://lhttp.qtfm.cn/live/5022107/64k.mp3", "https://lhttp.qingting.fm/live/5022107/64k.mp3", nullptr}, "MP3", 64, RadioCategory::ZHEJIANG},
+        {"江苏新闻广播", {"https://lhttp.qtfm.cn/live/5022308/64k.mp3", "https://lhttp.qingting.fm/live/5022308/64k.mp3", nullptr}, "MP3", 64, RadioCategory::JIANGSU},
+        {"江苏交通广播", {"https://lhttp.qtfm.cn/live/4915/64k.mp3", "https://lhttp.qingting.fm/live/4915/64k.mp3", nullptr}, "MP3", 64, RadioCategory::JIANGSU},
+        {"四川新闻广播", {"https://lhttp.qtfm.cn/live/1225/64k.mp3", "https://lhttp.qingting.fm/live/1225/64k.mp3", nullptr}, "MP3", 64, RadioCategory::SICHUAN},
+        {"楚天交通广播", {"https://lhttp.qtfm.cn/live/1233/64k.mp3", "https://lhttp.qingting.fm/live/1233/64k.mp3", nullptr}, "MP3", 64, RadioCategory::HUBEI},
+        {"动听音乐台", {"https://lhttp.qtfm.cn/live/5022107/64k.mp3", "https://lhttp.qingting.fm/live/5022107/64k.mp3", nullptr}, "MP3", 64, RadioCategory::MUSIC},
+        // —— 海外 MP3 直播（128kbps，需外网）——
+        {"SomaFM GrooveSalad", {"https://ice1.somafm.com/groovesalad-128-mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"SomaFM IndiePop", {"https://ice1.somafm.com/indiepop-128-mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"SomaFM SecretAgent", {"https://ice1.somafm.com/secretagent-128-mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"SomaFM SpaceStation", {"https://ice1.somafm.com/spacestation-128-mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"SomaFM Fluid", {"https://ice1.somafm.com/fluid-128-mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"SomaFM Metal", {"https://ice1.somafm.com/metal-128-mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"FIP France Music", {"https://icecast.radiofrance.fr/fip-midfi.mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"France Info", {"https://icecast.radiofrance.fr/franceinfo-midfi.mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::NATIONAL},
+        {"WNYC New York", {"https://fm939.wnyc.org/wnycfm", nullptr, nullptr}, "MP3", 128, RadioCategory::OTHER},
+        {"KEXP Seattle", {"https://kexp-mp3-128.streamguys1.com/kexp128.mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"KUSC Classic", {"https://playerservices.streamtheworld.com/api/livestream-redirect/KUSCMP128.mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"Swiss Jazz", {"https://stream.srg-ssr.ch/m/rsj/mp3_128", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"Swiss Classic", {"https://stream.srg-ssr.ch/m/rsc_de/mp3_128", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"Swiss Pop", {"https://stream.srg-ssr.ch/m/rsp/mp3_128", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
+        {"DLF News", {"https://st01.sslstream.dlf.de/dlf/01/128/mp3/stream.mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::NATIONAL},
+        {"DLF Nova", {"https://st03.sslstream.dlf.de/dlf/03/128/mp3/stream.mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
     };
-    
+
     for (const auto& s : builtin) {
         RadioStation station;
         station.name = s.name;
@@ -167,6 +189,7 @@ static void LoadBuiltinStations() {
         station.favorite = false;
         kStations.push_back(station);
     }
+    ESP_LOGI(TAG, "Loaded %d builtin stations", static_cast<int>(kStations.size()));
 }
 
 static bool EnsureSdCardMounted() {
@@ -316,8 +339,9 @@ static int16_t Clamp16(int value) {
     return static_cast<int16_t>(value);
 }
 
-void RadioService::Start(DesktopUI* desktop_ui) {
+void RadioService::Start(DesktopUI* desktop_ui, StateCallback callback) {
     desktop_ui_ = desktop_ui;
+    state_callback_ = std::move(callback);
     if (started_) {
         return;
     }
@@ -328,7 +352,7 @@ void RadioService::Start(DesktopUI* desktop_ui) {
     
     last_success_url_.resize(count, -1);
     audio_focus_blocked_.store(IsXiaozhiAudioState(), std::memory_order_relaxed);
-    queue_ = xQueueCreate(8, sizeof(Command));
+    queue_ = xQueueCreate(16, sizeof(Command));
     if (!queue_) {
         ESP_LOGE(TAG, "radio queue create failed free_internal=%u largest_internal=%u",
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
@@ -421,7 +445,11 @@ void RadioService::LoadStationIndex() {
 
 void RadioService::SaveStationIndex() {
     if (!task_stack_internal_ && xTaskGetCurrentTaskHandle() == task_handle_) {
-        ESP_LOGW(TAG, "skip station index save from radio task on PSRAM stack");
+        const int index = station_index_;
+        Application::GetInstance().Schedule([index] {
+            Settings settings("radio_st", true);
+            settings.SetInt("last", index);
+        });
         return;
     }
     Settings settings("radio_st", true);
@@ -570,6 +598,7 @@ std::string RadioService::SelectStation(const std::string& station) {
             // Keep that behavior independent from an earlier on-device filter.
             active_category_filter_ = -1;
             station_index_ = i;
+            SaveStationIndex();
             play_requested_ = true;
             stop_requested_ = false;
             SetUi("Connecting", "Selected station");
@@ -730,6 +759,7 @@ void RadioService::Task() {
             } else {
                 SetUi("Reconnecting", "Stream ended");
             }
+            // Still claiming playback: do not hand the mic/I2S back between retries.
             vTaskDelay(pdMS_TO_TICKS(delay_ms));
         }
     }
@@ -818,6 +848,7 @@ void RadioService::HandleCommand(Command command) {
             }
             playing_custom_url_ = false;
             station_index_ = requested;
+            SaveStationIndex();
             active_category_filter_ = requested_category_filter_.load(std::memory_order_relaxed);
             play_requested_ = true;
             stop_requested_ = false;
@@ -853,7 +884,11 @@ void RadioService::PlayCurrentStation(uint32_t stream_generation) {
         SetUi("Error", "No station");
         return;
     }
-    
+
+    // Hold external audio across all URL fallbacks so the duplex I2S is not
+    // reconfigured (mic on/TX off) between attempts.
+    Application::GetInstance().SetExternalAudioActive(true);
+
     const auto station_urls = kStations[station_index_].urls;
     bool tried_any = false;
     int attempted_sources = 0;
@@ -904,8 +939,12 @@ void RadioService::PlayCurrentStation(uint32_t stream_generation) {
                  failed_station.c_str(), kStations[station_index_].name.c_str(), attempted_sources);
         return;
     }
-    if (play_requested_) {
+    if (play_requested_ && !stop_requested_) {
         SetUi("Error", tried_any ? "All sources failed" : "No source");
+    }
+    if (!play_requested_.load(std::memory_order_relaxed) ||
+        stop_requested_.load(std::memory_order_relaxed)) {
+        Application::GetInstance().SetExternalAudioActive(false);
     }
 }
 
@@ -921,7 +960,10 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
 
     esp_http_client_config_t config = {};
     config.url = url.c_str();
-    config.timeout_ms = playing_custom_url_ ? 5000 : 2500;
+    // TLS handshake to qtfm/qingting can take several seconds on slower WAN
+    // links (e.g. phone hotspots). Keep connect/read timeout generous; mid-stream
+    // hangs are still cut by the 5s stall watchdog after data starts flowing.
+    config.timeout_ms = playing_custom_url_ ? 10000 : 8000;
     // esp_http_client keeps this buffer in scarce internal SRAM.  Compressed
     // stream headroom lives in the 48 KB PSRAM buffer below, so a larger HTTP
     // scratch buffer only increases the risk of TLS/MQTT allocation failures.
@@ -940,6 +982,9 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     esp_http_client_set_header(client, "User-Agent", "Mozilla/5.0 ESP32 Radio");
     esp_http_client_set_header(client, "Accept", "audio/mpeg,*/*");
     esp_http_client_set_header(client, "Icy-MetaData", "0");
+    // Live streams through qtfm/qingting drop the connection after a few
+    // minutes; close each response so reconnect starts clean.
+    esp_http_client_set_header(client, "Connection", "close");
     if (IsNetEaseMusicUrl(url)) {
         esp_http_client_set_header(client, "User-Agent",
                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -958,12 +1003,54 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         return false;
     }
 
+    if (!g_stream_stall_timer) {
+        esp_timer_create_args_t stall_args = {
+            .callback = [](void*) {
+                auto* client = g_active_stream_client.load();
+                const int64_t last = g_last_stream_progress_us.load();
+                if (!client || !last) return;
+                const int64_t age = esp_timer_get_time() - last;
+                if (age > kReadStallTimeoutUs) {
+                    ESP_LOGE(TAG, "stream read stalled for %lld ms; shutting down socket",
+                             static_cast<long long>(age / 1000));
+                    g_last_stream_progress_us.store(0);
+                    // Only shutdown the TCP socket so the blocked read returns.
+                    // Never esp_http_client_close here: the radio task still owns
+                    // the handle and a cross-thread close causes a store fault.
+                    const int sock = esp_http_client_get_socket(client);
+                    if (sock >= 0) {
+                        ::shutdown(sock, SHUT_RDWR);
+                    }
+                }
+            },
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "radio_stall",
+            .skip_unhandled_events = true,
+        };
+        if (esp_timer_create(&stall_args, &g_stream_stall_timer) == ESP_OK) {
+            esp_timer_start_periodic(g_stream_stall_timer, 1000000);
+        }
+    }
+    g_active_stream_client.store(client);
+    g_last_stream_progress_us.store(esp_timer_get_time());
+
+    auto release_client = [client]() {
+        // Single owner close/cleanup. The stall timer only shutdown()s the
+        // socket; freeing the handle here races with a blocked read otherwise.
+        if (g_active_stream_client.exchange(nullptr) != client) {
+            // Already detached; still free this local handle once.
+        }
+        g_last_stream_progress_us.store(0);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+    };
+
     int content_length = esp_http_client_fetch_headers(client);
     int status = esp_http_client_get_status_code(client);
     if (stream_generation != stream_generation_.load(std::memory_order_relaxed)) {
         ESP_LOGI(TAG, "discard stale stream response station=%s url_index=%d", station_name.c_str(), url_index);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
+        release_client();
         return false;
     }
     if (status < 200 || status >= 400) {
@@ -981,12 +1068,11 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
             Application::GetInstance().SetExternalAudioActive(false);
             SetUi("Error", status == 403 ? "Music URL rejected" : "Music URL unavailable");
         }
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
+        release_client();
         return false;
     }
 
-    if (playing_custom_url_ && content_length > 0 && content_length < kMinimumCustomMusicBytes) {
+    if (playing_custom_url_ && content_length > 0 && content_length < 256 * 1024) {
         ESP_LOGW(TAG, "music url rejected as short preview len=%d station=%s", content_length,
                  station_name.c_str());
         custom_url_fatal_error_ = true;
@@ -995,13 +1081,15 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         playback_release_pending_.store(true, std::memory_order_relaxed);
         Application::GetInstance().SetExternalAudioActive(false);
         SetUi("Error", "Need full song URL");
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
+        release_client();
         return false;
     }
 
     ESP_LOGI(TAG, "stream open station=%s url_index=%d status=%d len=%d url=%s",
              station_name.c_str(), url_index, status, content_length, url.c_str());
+    if (playing_custom_url_) {
+        ESP_LOGI(TAG, "music url open ok len=%d url=%s", content_length, url.c_str());
+    }
     SetUi("Buffering", "Filling buffer");
 
     HMP3Decoder decoder = MP3InitDecoder();
@@ -1009,18 +1097,26 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     auto* pcm_buffer = static_cast<int16_t*>(heap_caps_malloc(kPcmMaxSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     auto* mono_buffer = static_cast<int16_t*>(heap_caps_malloc(kPcmMaxSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     auto* output_buffer = static_cast<int16_t*>(heap_caps_malloc(kPcmOutputMaxSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    // Pointers must be unique heap blocks: a smashed/double free here asserts
+    // ("free() target pointer is outside heap areas") and reboots the device.
+    auto safe_free = [](auto*& p) {
+        if (p) {
+            heap_caps_free(p);
+            p = nullptr;
+        }
+    };
     if (!decoder || !read_buffer || !pcm_buffer || !mono_buffer || !output_buffer) {
         ESP_LOGE(TAG, "decoder alloc failed");
         SetUi("Error", "No decoder memory");
         if (decoder) {
             MP3FreeDecoder(decoder);
+            decoder = nullptr;
         }
-        heap_caps_free(read_buffer);
-        heap_caps_free(pcm_buffer);
-        heap_caps_free(mono_buffer);
-        heap_caps_free(output_buffer);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
+        safe_free(read_buffer);
+        safe_free(pcm_buffer);
+        safe_free(mono_buffer);
+        safe_free(output_buffer);
+        release_client();
         return false;
     }
 
@@ -1033,6 +1129,13 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     bool stream_failed = false;
     bool stream_completed = false;
     Application::GetInstance().SetExternalAudioActive(true);
+    // Reopen TX only when output is missing. Reopening on every URL while the
+    // mic is still active parks I2S in "Pending out channel" and mutes us.
+    if (auto* tab5_codec = static_cast<Tab5AudioCodec*>(Board::GetInstance().GetAudioCodec())) {
+        if (!Board::GetInstance().GetAudioCodec()->output_enabled()) {
+            tab5_codec->ReopenOutput();
+        }
+    }
 
     while (play_requested_ && !stop_requested_ && WifiManager::GetInstance().IsConnected() &&
            stream_generation == stream_generation_.load(std::memory_order_relaxed)) {
@@ -1066,6 +1169,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
                stream_generation == stream_generation_.load(std::memory_order_relaxed)) {
             int room = std::min(kReadChunkBytes, kReadBufferSize - bytes_left);
             int read = esp_http_client_read(client, reinterpret_cast<char*>(read_buffer + bytes_left), room);
+            g_last_stream_progress_us.store(esp_timer_get_time());
             if (read > 0) {
                 empty_reads = 0;
                 bytes_left += read;
@@ -1146,7 +1250,19 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         if (mp3_err != ERR_MP3_NONE) {
             ++decode_errors;
             ESP_LOGW(TAG, "mp3 decode failed station=%s url_index=%d err=%d count=%d", station_name.c_str(), url_index, mp3_err, decode_errors);
-            if (decode_errors > 20) {
+            // Sustained INVALID_FRAMEHEADER on a live stream usually means the
+            // decoder state is already desynced. Recycle it before internal
+            // pointers go bad and FreeBuffers asserts.
+            if (decode_errors == 4) {
+                ESP_LOGW(TAG, "recycling mp3 decoder after repeated errors");
+                MP3FreeDecoder(decoder);
+                decoder = MP3InitDecoder();
+                if (!decoder) {
+                    ESP_LOGE(TAG, "decoder reinit failed");
+                    break;
+                }
+            }
+            if (decode_errors > 8) {
                 SetUi(playing_custom_url_ ? "Reconnecting" : "Reconnecting",
                       playing_custom_url_ ? "Music decode retry" : "Decode errors");
                 stream_failed = true;
@@ -1185,14 +1301,23 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         }
     }
 
-    Application::GetInstance().SetExternalAudioActive(false);
-    MP3FreeDecoder(decoder);
-    heap_caps_free(read_buffer);
-    heap_caps_free(pcm_buffer);
-    heap_caps_free(mono_buffer);
-    heap_caps_free(output_buffer);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
+    if (decoder) {
+        MP3FreeDecoder(decoder);
+        decoder = nullptr;
+    }
+    safe_free(read_buffer);
+    safe_free(pcm_buffer);
+    safe_free(mono_buffer);
+    safe_free(output_buffer);
+    release_client();
+    // Keep external audio claimed while PlayCurrentStation may still try the
+    // next URL. Releasing here re-enables the mic and reconfigures the shared
+    // full-duplex I2S, which can leave TX disabled ("channel has not been
+    // enabled yet") so later frames log "playing" with no sound.
+    if (!play_requested_.load(std::memory_order_relaxed) ||
+        stop_requested_.load(std::memory_order_relaxed)) {
+        Application::GetInstance().SetExternalAudioActive(false);
+    }
     return decoded_frames > 0 && play_requested_ && !stop_requested_ && !stream_failed && !stream_completed &&
            stream_generation == stream_generation_.load(std::memory_order_relaxed) &&
            !audio_focus_blocked_.load(std::memory_order_relaxed);
@@ -1291,16 +1416,20 @@ void RadioService::NextStation(int delta) {
 }
 
 void RadioService::SetUi(const char* state, const char* detail) {
-    if (!desktop_ui_) {
-        return;
-    }
+    if (!desktop_ui_ && !state_callback_) return;
     const auto& station = kStations[station_index_];
     char meta[96];
     snprintf(meta, sizeof(meta), "%s %d kbps  %s", station.codec.c_str(), station.bitrate_kbps, detail ? detail : "");
+    if (state_callback_) {
+        state_callback_(station.name.c_str(), state, meta);
+        return;
+    }
+#if !CONFIG_QDTECH_TAB5_NATIVE_UI
     if (lvgl_port_lock(100)) {
         desktop_ui_->SetRadioState(station.name.c_str(), state, meta);
         lvgl_port_unlock();
     }
+#endif
 }
 
 void RadioService::WritePcm(const int16_t* pcm, int samples, int channels, int sample_rate,
@@ -1354,6 +1483,9 @@ void RadioService::WritePcm(const int16_t* pcm, int samples, int channels, int s
         codec->EnableOutput(true);
     }
     codec->OutputData(output_buffer, out_frames);
+    // Radio bypasses AudioOutputTask; keep the power manager from treating
+    // the speaker as idle and closing it mid-stream.
+    Application::GetInstance().GetAudioService().NoteOutputActivity();
 }
 
 void RadioService::ResetAudioLeveler() {
@@ -1375,6 +1507,7 @@ void RadioService::ApplyAudioLeveler(int16_t* pcm, int samples) {
     }
 
     const int avg_abs = static_cast<int>(abs_sum / static_cast<int64_t>(samples));
+    audio_level_.store(std::clamp(avg_abs / 90, 0, 100), std::memory_order_relaxed);
     if (avg_abs <= 0 || peak <= 0) {
         return;
     }

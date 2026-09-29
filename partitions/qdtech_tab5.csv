@@ -1,9 +1,12 @@
-# M5Stack Tab5 16 MB: dual OTA with room for the QDTech desktop.
-# Assets are capped at 3 MB; large photos, games, and theme files live on SD.
+# M5Stack Tab5 16 MB.
+# `factory` (12 MB) holds the main firmware and stays at 0x20000, so `idf.py app-flash` still works.
+# `ota_0` (1 MB) holds the small SD-card updater (updater/). The main firmware downloads a release
+# to the SD card, verifies SHA-256, then reboots into the updater, which rewrites `factory` and
+# boots it again. NVS (Wi-Fi, settings) and the assets partition are never touched by an update.
 # Name,   Type, SubType, Offset,    Size,       Flags
 nvs,      data, nvs,     0x9000,    0x4000,
 otadata,  data, ota,     0xd000,    0x2000,
 phy_init, data, phy,     0xf000,    0x1000,
-ota_0,    app,  ota_0,   0x20000,   0x680000,
-ota_1,    app,  ota_1,   0x6a0000,  0x680000,
+factory,  app,  factory, 0x20000,   0xc00000,
+ota_0,    app,  ota_0,   0xc20000,  0x100000,
 assets,   data, spiffs,  0xd20000,  0x2e0000,

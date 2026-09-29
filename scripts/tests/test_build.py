@@ -1600,6 +1600,97 @@ class CliTests(unittest.TestCase):
 
 
 class BoardSourceTests(unittest.TestCase):
+    def test_qdtech_tab5_enables_decoder_for_its_compressed_fonts(self):
+        board_dir = ROOT / "main/boards/qdtech/tab5"
+        for font_name in (
+            "qd_font_clock_72.c",
+            "qd_font_lxgw_16.c",
+            "qd_font_lxgw_20.c",
+            "qd_font_lxgw_28.c",
+            "qd_font_lxgw_36.c",
+        ):
+            font_source = (board_dir / font_name).read_text(encoding="utf-8")
+            self.assertIn(".bitmap_format = 1", font_source, msg=font_name)
+
+        config = json.loads((board_dir / "config.json").read_text(encoding="utf-8"))
+        for build_config in config["builds"]:
+            self.assertIn(
+                "CONFIG_LV_USE_FONT_COMPRESSED=y",
+                build_config["sdkconfig_append"],
+                msg=build_config["name"],
+            )
+
+    def test_qdtech_tab5_rev1_disables_incompatible_isp_pipeline(self):
+        config = json.loads(
+            (ROOT / "main/boards/qdtech/tab5/config.json").read_text(encoding="utf-8")
+        )
+        rev1 = next(build for build in config["builds"] if build["name"] == "qdtech-tab5")
+        self.assertIn(
+            "CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=n",
+            rev1["sdkconfig_append"],
+        )
+
+    def test_qdtech_tab5_font_subsets_cover_desktop_labels(self):
+        board_dir = ROOT / "main/boards/qdtech/tab5"
+        ui_source = (board_dir / "desktop_ui.cc").read_text(encoding="utf-8")
+        label_chars = {
+            char
+            for literal in re.findall(r'"(?:\\.|[^"\\])*"', ui_source)
+            for char in literal
+            if "\u4e00" <= char <= "\u9fff"
+        }
+        locale_text = (ROOT / "main/assets/locales/zh-CN/language.json").read_text(
+            encoding="utf-8"
+        )
+        label_chars.update(
+            char for char in locale_text if "\u4e00" <= char <= "\u9fff"
+        )
+        self.assertIn("智", label_chars)
+        for size in (16, 20, 28):
+            font_source = (board_dir / f"qd_font_lxgw_{size}.c").read_text(encoding="utf-8")
+            unicode_list = re.search(
+                r"static const uint16_t unicode_list_1\[\] =\s*\{(.*?)\};",
+                font_source,
+                re.S,
+            )
+            self.assertIsNotNone(unicode_list)
+            native_cmap = re.search(
+                r"\{\s*\.range_start = (\d+),[^}]*\.unicode_list = unicode_list_1",
+                font_source,
+                re.S,
+            )
+            self.assertIsNotNone(native_cmap)
+            range_start = int(native_cmap.group(1))
+            glyphs = {
+                chr(range_start + int(offset, 16))
+                for offset in re.findall(r"0x([0-9a-fA-F]+)", unicode_list.group(1))
+            }
+            self.assertFalse(label_chars - glyphs, msg=f"{size}px: {label_chars - glyphs}")
+
+    def test_qdtech_tab5_native_title_font_covers_visible_labels(self):
+        font_source = (
+            ROOT / "main/boards/qdtech/tab5/qd_font_lxgw_36.c"
+        ).read_text(encoding="utf-8")
+        unicode_list = re.search(
+            r"static const uint16_t unicode_list_1\[\] =\s*\{(.*?)\};",
+            font_source,
+            re.S,
+        )
+        self.assertIsNotNone(unicode_list)
+        native_cmap = re.search(
+            r"\{\s*\.range_start = (\d+),[^}]*\.unicode_list = unicode_list_1",
+            font_source,
+            re.S,
+        )
+        self.assertIsNotNone(native_cmap)
+        range_start = int(native_cmap.group(1))
+        glyphs = {
+            chr(range_start + int(offset, 16))
+            for offset in re.findall(r"0x([0-9a-fA-F]+)", unicode_list.group(1))
+        }
+        labels = "小智你好，我是小智轻触开始对话开始对话"
+        self.assertFalse(set(labels) - glyphs, msg=set(labels) - glyphs)
+
     def test_relative_board_includes_exist(self):
         missing = []
         boards_dir = ROOT / "main/boards"

@@ -1,5 +1,9 @@
 # Tab5 板级目录
 
-此目录在 XiaoZhi ESP32-P4 底座上加入原 QDTech S3 项目的桌面与服务。硬件入口是 `m5stack_tab5.cc`；配置由 `config.json` 选出两个 P4 芯片版本。屏幕驱动支持 ILI9881C、ST7121、ST7123，触摸支持 GT911/ST712x。音频为 ES8388 + ES7210；SD 卡须在 C6 Wi‑Fi 的 SDIO host 初始化后使用 slot 0，不能让照片、播客或模拟器重新初始化整个 host。
+此目录在 XiaoZhi ESP32-P4 底座上加入原 QDTech S3 项目的桌面与服务，同时提供 Tab5 原生分辨率主界面。硬件入口是 `m5stack_tab5.cc`；`config.json` 包含 P4 rev 1.x 的旧桌面和原生版、P4 rev 3+ 的旧桌面。屏幕驱动支持 ILI9881C、ST7121、ST7123，触摸支持 GT911/ST712x。音频为 ES8388 + ES7210；SD 卡须在 C6 Wi‑Fi 的 SDIO host 初始化后使用 slot 0。
 
-当前的 `QdtechTab5Display` 仅把原项目 480 × 320 画面经软件放大旋转到 Tab5 物理 720 × 1280 屏。用户已经确认实际效果不合适，且文字、数字、时间缺失。请先按仓库根目录的 [PORTING_STATUS.md](../../../../PORTING_STATUS.md) 解决这些 P0 问题，再扩展功能。
+旧 `qdtech-tab5` 变体将 480 × 320 桌面以最近邻方式放在横屏中央，两侧留边。双线性全屏实验因刷新和触摸迟滞已从源码撤回。新 `qdtech-tab5-native` 变体在 `tab5_native_display.h` 里用 LVGL 原生 1280 × 720 坐标绘制 Nabo 桌面、对话和触摸按钮；局部刷新由 `esp_lvgl_port` 处理。点击主界面的“应用与设置”进入同一屏幕上的第二页，可重新配网、调节并保存亮度和音量、选择及播放网络电台；语音说“我要听广播”会打开电台页并请求播放。内置电台列表只保留经核对的不同频道，也可用 SD 卡根目录的 `radio.json` 替换。原生版“应用与设置”里现有红白机入口：将 iNES 格式的 `.nes` 文件放在 FAT 格式 SD 卡的 `/nes`、`/FC` 或 `/roms` 目录，打开游戏页后可浏览列表、启动游戏并使用屏幕按键。旧天气、相册、播客服务仍未接入原生版。中文子集由 LXGW WenKai 生成，重建脚本和 OFL 许可证见本目录及 `scripts/generate_tab5_fonts.py`。P4 rev 1.x 关闭了会在该芯片上触发非法指令的自动 ISP 管线控制器，相机设备本身仍能初始化取帧。后续按仓库根目录的 [PORTING_STATUS.md](../../../../PORTING_STATUS.md) 验收电台与其他应用。
+
+Nabo 原画及生成说明见 [assets/nabo/README.md](../../../../assets/nabo/README.md)。固件内置主立绘、眨眼眼部覆盖图与三帧挥手姿态，SD 卡不是开机显示和日常动画的前提。图片按原尺寸呈现；待机眨眼、说话嘴型、人物周围的小光点和睡姿浮动文字只刷新局部。主页右侧上方在每日一句、历史上的今天和节日提醒之间轮播；节日、历史事件与短句共用 `tab5_daily_content.cc` 的离线数据。历史事件只显示已收录的日期，其他日期明确提示暂无收录；节日提醒支持当前日期和下一个节日倒计时。新增更多大幅动作时，先测量实机帧时间与触摸延迟，再考虑从 SD 卡加载可选动作包。
+
+原生应用页的 ICU 数值工具及 Nabo 语音计算入口见 [ICU_CALCULATORS.md](ICU_CALCULATORS.md)。静脉泵输入中的 50 mL 指配好后的最终总液量；公式、单位与临床使用边界在该文档中列明。

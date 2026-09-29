@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 
 #include "esp_imgfx_color_convert.h"
 #include "esp_video_device.h"
@@ -189,10 +190,8 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
 
     struct v4l2_format setformat = {};
     setformat.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-#ifdef CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
     sensor_width_ = format.fmt.pix.width;
     sensor_height_ = format.fmt.pix.height;
-#endif  // CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
     setformat.fmt.pix.width = format.fmt.pix.width;
     setformat.fmt.pix.height = format.fmt.pix.height;
 
@@ -298,6 +297,8 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
     frame_.width = setformat.fmt.pix.width;
     frame_.height = setformat.fmt.pix.height;
 #endif
+    ESP_LOGI(TAG, "Camera stream %ux%u fourcc=0x%08lx", sensor_width_, sensor_height_,
+             static_cast<unsigned long>(sensor_format_));
 
     // 申请缓冲并mmap
     struct v4l2_requestbuffers req = {};
@@ -412,13 +413,14 @@ void EspVideo::SetExplainUrl(const std::string& url, const std::string& token) {
 }
 
 bool EspVideo::Capture() {
+    std::lock_guard<std::mutex> capture_lock(capture_mutex_);
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
     }
 
     if (!streaming_on_ || video_fd_ < 0) {
         ESP_LOGE(TAG, "Capture failed: camera did not initialize (streaming_on_=%d, video_fd_=%d)",
-                 streaming_on_, video_fd_);
+                 streaming_on_.load(), video_fd_);
         return false;
     }
 
@@ -885,6 +887,157 @@ bool EspVideo::Capture() {
             std::make_unique<LvglAllocatedImage>(data, lvgl_image_size, w, h, stride, color_format);
         display->SetPreviewImage(std::move(image));
     }
+    return true;
+}
+
+bool EspVideo::CaptureVisionFrame(uint8_t* rgb, size_t capacity,
+                                  uint16_t& width, uint16_t& height) {
+    constexpr uint16_t kWidth = 320;
+    constexpr uint16_t kHeight = 240;
+    if (!rgb || capacity < size_t(kWidth) * kHeight * 3 ||
+        !streaming_on_ || video_fd_ < 0) return false;
+    std::lock_guard<std::mutex> capture_lock(capture_mutex_);
+    struct v4l2_buffer buf = {};
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) != 0) return false;
+    bool ok = false;
+    const uint16_t sw = sensor_width_;
+    const uint16_t sh = sensor_height_;
+    if (buf.index < mmap_buffers_.size() && sw && sh) {
+        const auto* src = static_cast<const uint8_t*>(mmap_buffers_[buf.index].start);
+        size_t bytes_per_pixel = sensor_format_ == V4L2_PIX_FMT_RGB24 ? 3 : 2;
+        if (buf.bytesused >= size_t(sw) * sh * bytes_per_pixel) {
+            // The Tab5 camera is upright in the physical landscape position.
+            // Keep that orientation and crop the wide sensor frame to 4:3.
+            const uint16_t crop_width = std::min<uint32_t>(
+                sw, uint32_t(sh) * kWidth / kHeight);
+            const uint16_t crop_left = (sw - crop_width) / 2;
+            for (uint16_t y = 0; y < kHeight; ++y) {
+                for (uint16_t x = 0; x < kWidth; ++x) {
+                    uint16_t sx = crop_left + uint32_t(x) * crop_width / kWidth;
+                    uint16_t sy = uint32_t(y) * sh / kHeight;
+                    size_t pos = size_t(sy) * sw + sx;
+                    uint8_t* dst = rgb + (size_t(y) * kWidth + x) * 3;
+                    if (sensor_format_ == V4L2_PIX_FMT_RGB24) {
+                        const uint8_t* p = src + pos * 3;
+                        dst[0] = p[0]; dst[1] = p[1]; dst[2] = p[2];
+                        ok = true;
+                    } else if (sensor_format_ == V4L2_PIX_FMT_RGB565) {
+                        uint16_t p = reinterpret_cast<const uint16_t*>(src)[pos];
+                        dst[0] = ((p >> 11) & 31) * 255 / 31;
+                        dst[1] = ((p >> 5) & 63) * 255 / 63;
+                        dst[2] = (p & 31) * 255 / 31;
+                        ok = true;
+                    } else if (sensor_format_ == V4L2_PIX_FMT_YUYV ||
+                               sensor_format_ == V4L2_PIX_FMT_UYVY ||
+                               sensor_format_ == V4L2_PIX_FMT_YUV422P) {
+                        const uint8_t* p = src + (pos & ~size_t(1)) * 2;
+                        bool uyvy = sensor_format_ == V4L2_PIX_FMT_UYVY;
+                        int luma = uyvy ? p[(pos & 1) ? 3 : 1] : p[(pos & 1) ? 2 : 0];
+                        int u = int(p[uyvy ? 0 : 1]) - 128;
+                        int v = int(p[uyvy ? 2 : 3]) - 128;
+                        int c = std::max(0, luma - 16) * 298;
+                        dst[0] = std::clamp((c + 409 * v + 128) >> 8, 0, 255);
+                        dst[1] = std::clamp((c - 100 * u - 208 * v + 128) >> 8, 0, 255);
+                        dst[2] = std::clamp((c + 516 * u + 128) >> 8, 0, 255);
+                        ok = true;
+                    }
+                }
+            }
+        }
+    }
+    if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) ok = false;
+    if (ok) { width = kWidth; height = kHeight; }
+    return ok;
+}
+
+bool EspVideo::ConfigureVisionLowLight() {
+    if (video_fd_ < 0) return false;
+    std::lock_guard<std::mutex> capture_lock(capture_mutex_);
+    auto set_control = [this](uint32_t id, int64_t requested) {
+        struct v4l2_query_ext_ctrl query = {};
+        query.id = id;
+        if (ioctl(video_fd_, VIDIOC_QUERY_EXT_CTRL, &query) != 0) {
+            ESP_LOGW(TAG, "Camera control 0x%08lx unavailable", static_cast<unsigned long>(id));
+            return false;
+        }
+        struct v4l2_ext_control control = {};
+        control.id = id;
+        control.value = static_cast<int32_t>(std::clamp(requested, query.minimum, query.maximum));
+        struct v4l2_ext_controls controls = {};
+        controls.ctrl_class = V4L2_CTRL_CLASS_USER;
+        controls.count = 1;
+        controls.controls = &control;
+        if (ioctl(video_fd_, VIDIOC_S_EXT_CTRLS, &controls) != 0) {
+            ESP_LOGW(TAG, "Camera control 0x%08lx set failed: %d", static_cast<unsigned long>(id), errno);
+            return false;
+        }
+        ESP_LOGI(TAG, "Camera control 0x%08lx set to %ld (range %ld..%ld)",
+                 static_cast<unsigned long>(id), static_cast<long>(control.value),
+                 static_cast<long>(query.minimum), static_cast<long>(query.maximum));
+        return true;
+    };
+    // This Tab5 variant has no automatic ISP gain controller. Give its SC202CS
+    // a usable indoor exposure before sending frames to the face detector.
+    return set_control(V4L2_CID_EXPOSURE, INT32_MAX) &&
+           set_control(V4L2_CID_GAIN, 96);  // SC202CS gain menu: index 96 = 8x.
+}
+
+bool EspVideo::SetVisionGainIndex(int index) {
+    if (video_fd_ < 0) return false;
+    std::lock_guard<std::mutex> capture_lock(capture_mutex_);
+    struct v4l2_query_ext_ctrl query = {};
+    query.id = V4L2_CID_GAIN;
+    if (ioctl(video_fd_, VIDIOC_QUERY_EXT_CTRL, &query) != 0) return false;
+    struct v4l2_ext_control control = {};
+    control.id = V4L2_CID_GAIN;
+    control.value = static_cast<int32_t>(std::clamp<int64_t>(index, query.minimum, query.maximum));
+    struct v4l2_ext_controls controls = {};
+    controls.ctrl_class = V4L2_CTRL_CLASS_USER;
+    controls.count = 1;
+    controls.controls = &control;
+    return ioctl(video_fd_, VIDIOC_S_EXT_CTRLS, &controls) == 0;
+}
+
+bool EspVideo::PauseStream() {
+    std::lock_guard<std::mutex> capture_lock(capture_mutex_);
+    if (stream_paused_) return true;
+    if (!streaming_on_ || video_fd_ < 0) return false;
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(video_fd_, VIDIOC_STREAMOFF, &type) != 0) {
+        ESP_LOGW(TAG, "VIDIOC_STREAMOFF failed: %d", errno);
+        return false;
+    }
+    stream_paused_ = true;
+    streaming_on_ = false;
+    ESP_LOGI(TAG, "Camera stream paused");
+    return true;
+}
+
+bool EspVideo::ResumeStream() {
+    std::lock_guard<std::mutex> capture_lock(capture_mutex_);
+    if (!stream_paused_) return streaming_on_.load();
+    if (video_fd_ < 0) return false;
+    // STREAMOFF returns every buffer to the driver; re-queue before STREAMON.
+    for (size_t i = 0; i < mmap_buffers_.size(); ++i) {
+        struct v4l2_buffer buf = {};
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = static_cast<uint32_t>(i);
+        if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+            ESP_LOGE(TAG, "VIDIOC_QBUF failed on resume: %d", errno);
+            return false;
+        }
+    }
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(video_fd_, VIDIOC_STREAMON, &type) != 0) {
+        ESP_LOGE(TAG, "VIDIOC_STREAMON failed on resume: %d", errno);
+        return false;
+    }
+    stream_paused_ = false;
+    streaming_on_ = true;
+    ESP_LOGI(TAG, "Camera stream resumed");
     return true;
 }
 

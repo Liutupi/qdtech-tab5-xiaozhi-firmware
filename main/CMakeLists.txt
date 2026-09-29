@@ -914,6 +914,22 @@ file(GLOB BOARD_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/*.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/*.c
 )
+if(CONFIG_QDTECH_TAB5_NATIVE_UI)
+    # The native interface uses the board hardware and XiaoZhi core, without
+    # compiling the fixed-size desktop, its apps, or their image assets.
+    list(FILTER BOARD_SOURCES EXCLUDE REGEX
+        "/(desktop_ui|divination_service|firmware_update_service|photo_service|podcast_service|radio_service|freecell_game|number_slide_logic|puzzle_2048_logic|qd_user_config)\\.cc$")
+    list(FILTER BOARD_SOURCES EXCLUDE REGEX "/qd_.*\\.c$")
+    list(APPEND BOARD_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_lxgw_28.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_cjk_28.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_lxgw_36.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_clock_72.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/nabo_assets.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/radio_service.cc)
+else()
+    list(FILTER BOARD_SOURCES EXCLUDE REGEX "/(tab5_vision_service|tab5_native_apps|tab5_icu_page|tab5_music_lyrics|icu_calculators)\\.cc$")
+endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
 # Select one audio engine for each chip family
@@ -1097,8 +1113,11 @@ if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD OR CONFIG_BOARD_TYPE_QDTECH_TAB5
         sdmmc
     )
 endif()
+if(CONFIG_QDTECH_TAB5_NATIVE_UI)
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA pedestrian_detect esp-dl)
+endif()
 if(CONFIG_BOARD_TYPE_QDTECH_TAB5 OR CMAKE_BUILD_EARLY_EXPANSION)
-    list(APPEND MAIN_PRIV_REQUIRES_EXTRA nofrendo)
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA nofrendo usb_host_hid)
 endif()
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
@@ -1119,6 +1138,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp_driver_ppa
                         esp_driver_tsens
                         esp_http_client
+                        esp_http_server
                         esp_app_format
                         app_update
                         spi_flash

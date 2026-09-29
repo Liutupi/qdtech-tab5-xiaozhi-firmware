@@ -13,7 +13,9 @@ class DesktopUI;
 
 class RadioService {
 public:
-    void Start(DesktopUI* desktop_ui);
+    using StateCallback = std::function<void(const char*, const char*, const char*)>;
+    void Start(DesktopUI* desktop_ui, StateCallback callback = {});
+    bool IsStarted() const { return started_; }
     void Play();
     void Pause();
     void PlayPause();
@@ -32,6 +34,7 @@ public:
     std::vector<int> GetFavorites() const;
     std::vector<int> GetByCategory(int category) const;
     int GetCurrentIndex() const { return station_index_; }
+    int GetAudioLevel() const { return audio_level_.load(std::memory_order_relaxed); }
     int GetStationCount() const;
     const char* GetStationName(int index) const;
     const char* GetStationCategory(int index) const;
@@ -72,6 +75,7 @@ private:
     void NotifyPlaybackReleased();
 
     DesktopUI* desktop_ui_ = nullptr;
+    StateCallback state_callback_;
     void* queue_ = nullptr;
     TaskHandle_t task_handle_ = nullptr;
     bool task_stack_internal_ = false;
@@ -97,5 +101,6 @@ private:
     int active_category_filter_ = -1;
     TickType_t custom_url_speaking_grace_until_ = 0;
     std::atomic<uint32_t> stream_generation_{0};
+    std::atomic<int> audio_level_{0};
     int32_t audio_gain_q12_ = 4096;
 };

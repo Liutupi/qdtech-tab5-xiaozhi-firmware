@@ -3,6 +3,8 @@
 
 #include <lvgl.h>
 #include <memory>
+#include <mutex>
+#include <atomic>
 #include <thread>
 #include <vector>
 
@@ -28,12 +30,12 @@ private:
         v4l2_pix_fmt_t format = 0;
     } frame_;
     v4l2_pix_fmt_t sensor_format_ = 0;
-#ifdef CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
     uint16_t sensor_width_ = 0;
     uint16_t sensor_height_ = 0;
-#endif  // CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
     int video_fd_ = -1;
-    bool streaming_on_ = false;
+    std::atomic_bool streaming_on_{false};
+    bool stream_paused_ = false;
+    std::mutex capture_mutex_;
     struct MmapBuffer {
         void* start = nullptr;
         size_t length = 0;
@@ -49,6 +51,13 @@ public:
 
     virtual void SetExplainUrl(const std::string& url, const std::string& token);
     virtual bool Capture();
+    // A small landscape RGB frame for local presence and face detection.
+    bool CaptureVisionFrame(uint8_t* rgb, size_t capacity, uint16_t& width, uint16_t& height);
+    bool ConfigureVisionLowLight();
+    bool SetVisionGainIndex(int index);
+    // Stop/start the CSI stream so radio/music is not competing with camera DMA.
+    bool PauseStream();
+    bool ResumeStream();
     // 翻转控制函数
     virtual bool SetHMirror(bool enabled) override;
     virtual bool SetVFlip(bool enabled) override;

@@ -1,7 +1,14 @@
 #include "application.h"
 #include "button.h"
 #include "display/lcd_display.h"
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+#include "icu_calculators.h"
+#include "tab5_music_lyrics.h"
+#include "tab5_native_display.h"
+#include "tab5_vision_service.h"
+#else
 #include "desktop_ui.h"
+#endif
 #include "esp_cam_sensor_xclk.h"
 #include "esp_lcd_ili9881c.h"
 #include "esp_lcd_st7121.h"
@@ -11,33 +18,55 @@
 #include "config.h"
 #include "esp_video.h"
 #include "esp_video_init.h"
+#include "ir_service.h"
+#include "mcp_server.h"
+#include "radio_service.h"
 #include "tab5_audio_codec.h"
 #include "tab5_sd.h"
-#include "time_weather_service.h"
-#include "photo_service.h"
-#include "firmware_update_service.h"
-#include "radio_service.h"
-#include "podcast_service.h"
+#include "tab5_ota.h"
 #include "fc_emulator_service.h"
-#include "mcp_server.h"
+#include "settings.h"
+#include "tab5_nes_video.h"
+#include "usb_gamepad_host.h"
+#if !CONFIG_QDTECH_TAB5_NATIVE_UI
+#include "firmware_update_service.h"
+#include "photo_service.h"
+#include "podcast_service.h"
+#include "time_weather_service.h"
+#endif
+#include "websocket_control_server.h"
+#include <esp_sntp.h>
+#include <nvs.h>
+#include <nvs_flash.h>
 #include "wifi_board.h"
+#include "wifi_manager.h"
 
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
-#include <esp_idf_version.h>
 #include <esp_heap_caps.h>
+#include <esp_idf_version.h>
+#include <esp_system.h>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+#include <vector>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <utility>
 #include "esp_check.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_touch_gt911.h"
 #include "esp_lcd_touch_st7123.h"
-#include "esp_lvgl_port.h"
 #include "esp_ldo_regulator.h"
+#include "esp_lvgl_port.h"
 #include "i2c_device.h"
 
 #define TAG "QdtechTab5Board"
@@ -125,6 +154,7 @@ public:
     void WriteOutSet(uint8_t value) { WriteReg(PI4IO_REG_OUT_SET, value); }
 };
 
+#if !CONFIG_QDTECH_TAB5_NATIVE_UI
 class QdtechTab5Display : public MipiLcdDisplay {
     static constexpr int kLogicalWidth = 480;
     static constexpr int kLogicalHeight = 320;
@@ -229,6 +259,10 @@ public:
 
     DesktopUI* GetDesktopUI() { return &desktop_ui_; }
 };
+#endif
+
+// Parked when a USB gamepad connects so USB endpoints can allocate.
+static EspVideo* g_tab5_camera = nullptr;
 
 class QdtechTab5Board : public WifiBoard {
 private:
@@ -236,14 +270,480 @@ private:
     Button boot_button_;
     LcdDisplay* display_;
     EspVideo* camera_ = nullptr;
+    RadioService radio_service_;
+    WebSocketControlServer* ws_control_server_ = nullptr;
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+    Tab5VisionService vision_service_;
+    std::mutex native_radio_mutex_;
+    std::atomic<bool> native_radio_ready_{false};
+    std::atomic<uint32_t> music_request_generation_{0};
+    bool native_tools_registered_ = false;
+
+    struct MusicLookupRequest {
+        QdtechTab5Board* board;
+        uint32_t generation;
+        std::string title;
+        std::string artist;
+        std::string url;
+        std::string song_id;
+    };
+
+    std::string StartMusicNow(const std::string& title, const std::string& artist,
+                              const std::string& url, const std::string& lyrics) {
+        auto* display = static_cast<QdtechTab5Display*>(display_);
+        display->BeginMusicTrack(title.c_str(), artist.c_str());
+        display->SetMusicInfo(title.c_str(), artist.c_str(), "正在连接音源…");
+        const auto result = radio_service_.PlayUrlFromTool(title, artist, url);
+        if (result.rfind("Music URL was NOT started", 0) == 0) {
+            display->StopMusicTrack();
+            return result;
+        }
+        if (!lyrics.empty())
+            display->SetMusicLyrics(lyrics.c_str(), title.c_str());
+        return result;
+    }
+
+    static void MusicLookupTask(void* arg) {
+        {
+            std::unique_ptr<MusicLookupRequest> request(static_cast<MusicLookupRequest*>(arg));
+            vTaskDelay(pdMS_TO_TICKS(250));
+            auto lyrics =
+                tab5_music_lyrics::Lookup(request->title, request->artist, request->song_id);
+            auto* board = request->board;
+            const auto generation = request->generation;
+            Application::GetInstance().Schedule(
+                [board, generation, title = std::move(request->title),
+                 artist = std::move(request->artist), url = std::move(request->url),
+                 lyrics = std::move(lyrics)] {
+                    if (board->music_request_generation_.load() != generation)
+                        return;
+                    board->StartMusicNow(title, artist, url, lyrics);
+                });
+        }
+        vTaskDelete(nullptr);
+    }
+
+    void EnsureNativeRadio() {
+        std::lock_guard<std::mutex> guard(native_radio_mutex_);
+        if (native_radio_ready_.load())
+            return;
+        auto* native_display = static_cast<QdtechTab5Display*>(display_);
+        radio_service_.Start(
+            nullptr, [native_display](const char* station, const char* state, const char* meta) {
+                native_display->UpdateMusicPlaybackState(station, state);
+                native_display->SetRadioState(station, state, meta);
+            });
+        native_radio_ready_.store(radio_service_.IsStarted());
+        if (native_radio_ready_.load()) {
+            native_display->SetRadioState(
+                radio_service_.GetStationName(radio_service_.GetCurrentIndex()), "Ready",
+                "Tap Play");
+        }
+    }
+
+    void RegisterNativeTools() {
+        if (native_tools_registered_)
+            return;
+        native_tools_registered_ = true;
+        auto& mcp = McpServer::GetInstance();
+        mcp.AddTool("self.radio.get_status",
+                    "Get the current internet radio station and playback state.", PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        EnsureNativeRadio();
+                        return radio_service_.GetStatusJson();
+                    });
+        mcp.AddTool("self.radio.play",
+                    "When the user asks to listen to radio or broadcast, start internet radio and "
+                    "show the radio screen. Optionally choose a station by name.",
+                    PropertyList({Property("station", kPropertyTypeString, std::string(""))}),
+                    [this](const PropertyList& properties) -> ReturnValue {
+                        ++music_request_generation_;
+                        EnsureNativeRadio();
+                        const auto station = properties["station"].value<std::string>();
+                        if (!station.empty())
+                            radio_service_.SelectStation(station);
+                        radio_service_.Play();
+                        static_cast<QdtechTab5Display*>(display_)->ShowRadioPage();
+                        return true;
+                    });
+        mcp.AddTool("self.radio.stop", "Stop internet radio playback.", PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        ++music_request_generation_;
+                        if (native_radio_ready_.load())
+                            radio_service_.Stop();
+                        return true;
+                    });
+        mcp.AddTool("self.nes.status",
+                    "Get NES emulator and USB gamepad status.", PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        char buf[160];
+                        snprintf(buf, sizeof(buf),
+                                 "{\"gamepad\":%s,\"nes_mask\":%u,\"sd\":%s}",
+                                 UsbGamepadConnected() ? "true" : "false",
+                                 unsigned(UsbGamepadNesMask()),
+                                 Tab5SdReady() ? "true" : "false");
+                        return std::string(buf);
+                    });
+        mcp.AddTool("self.nes.start",
+                    "Start the NES (红白机) emulator. ROMs must be .nes files on the SD card under "
+                    "/sdcard/nes. Use a USB gamepad (e.g. SN30 Pro) to play.",
+                    PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        radio_service_.Stop();
+                        fc_emulator_service_.SetActive(true);
+                        fc_emulator_service_.PlayPause();
+                        return UsbGamepadConnected()
+                                   ? std::string("NES started. USB gamepad connected.")
+                                   : std::string(
+                                         "NES started. Plug a USB gamepad (SN30 Pro D-input) into "
+                                         "the Tab5 USB port to play.");
+                    });
+        mcp.AddTool("self.nes.stop", "Stop the NES emulator.", PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        fc_emulator_service_.SetActive(false);
+                        fc_emulator_service_.Stop();
+                        return true;
+                    });
+        mcp.AddTool("self.radio.next", "Play the next internet radio station.", PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        ++music_request_generation_;
+                        EnsureNativeRadio();
+                        radio_service_.Next();
+                        static_cast<QdtechTab5Display*>(display_)->ShowRadioPage();
+                        return true;
+                    });
+        mcp.AddTool("self.radio.previous", "Play the previous internet radio station.",
+                    PropertyList(), [this](const PropertyList&) -> ReturnValue {
+                        ++music_request_generation_;
+                        EnsureNativeRadio();
+                        radio_service_.Prev();
+                        static_cast<QdtechTab5Display*>(display_)->ShowRadioPage();
+                        return true;
+                    });
+        mcp.AddTool(
+            "self.daily.set_cards",
+            "Push up to 3 daily digest cards into the large Xiaozhi conversation panel "
+            "(idle). Use for curated briefs such as medical news. Bodies should be one or "
+            "two short sentences. The small daily card keeps quote/history/festival.",
+            PropertyList({Property("title0", kPropertyTypeString, std::string("")),
+                          Property("body0", kPropertyTypeString, std::string("")),
+                          Property("title1", kPropertyTypeString, std::string("")),
+                          Property("body1", kPropertyTypeString, std::string("")),
+                          Property("title2", kPropertyTypeString, std::string("")),
+                          Property("body2", kPropertyTypeString, std::string(""))}),
+            [this](const PropertyList& p) -> ReturnValue {
+                const auto t0 = p["title0"].value<std::string>();
+                const auto t1 = p["title1"].value<std::string>();
+                const auto t2 = p["title2"].value<std::string>();
+                const auto b0 = p["body0"].value<std::string>();
+                const auto b1 = p["body1"].value<std::string>();
+                const auto b2 = p["body2"].value<std::string>();
+                const char* titles[3] = {t0.c_str(), t1.c_str(), t2.c_str()};
+                const char* bodies[3] = {b0.c_str(), b1.c_str(), b2.c_str()};
+                if (!display_)
+                    return std::string("Display not ready");
+                static_cast<QdtechTab5Display*>(display_)->SetDailyCards(titles, bodies);
+                return std::string("Daily cards updated");
+            });
+        mcp.AddTool(
+            "self.ir.scan",
+            "Probe IR receiver wiring: count signal edges on candidate GPIOs for N seconds. "
+            "Press any remote button while it runs. The GPIO with the highest count is the "
+            "IR receiver data pin.",
+            PropertyList({Property("seconds", kPropertyTypeInteger, 5, 1, 20)}),
+            [this](const PropertyList& p) -> ReturnValue {
+                static const int kGpios[] = {14, 15, 16, 17, 18, 19, 20, 21,
+                                             24, 25, 33, 34, 35, 45, 46, 47,
+                                             48, 49, 50, 51, 52, 53, 54};
+                const int sec = p["seconds"].value<int>();
+                return IrService::GetInstance().ScanGpios(kGpios,
+                                                           sizeof(kGpios) / sizeof(kGpios[0]),
+                                                           sec);
+            });
+        mcp.AddTool(
+            "self.ir.send_raw",
+            "Send a raw IR frame on tx_gpio. Provide mark/space durations in microseconds, "
+            "starting with a mark (e.g. NEC: 9000,4500, 560,560, ...).",
+            PropertyList({Property("gpio", kPropertyTypeInteger, 53, 0, 54),
+                          Property("timings_us", kPropertyTypeString)}),
+            [this](const PropertyList& p) -> ReturnValue {
+                const int gpio = p["gpio"].value<int>();
+                const auto timings = p["timings_us"].value<std::string>();
+                std::vector<uint16_t> us;
+                size_t pos = 0;
+                while (pos < timings.size() && us.size() < 240) {
+                    auto comma = timings.find(',', pos);
+                    auto token = timings.substr(pos, comma - pos);
+                    if (!token.empty())
+                        us.push_back((uint16_t)atoi(token.c_str()));
+                    if (comma == std::string::npos)
+                        break;
+                    pos = comma + 1;
+                }
+                if (us.empty())
+                    return std::string("no timings");
+                bool ok = IrService::GetInstance().SendRaw(gpio, us.data(), us.size());
+                return ok ? std::string("IR sent") : std::string("IR send failed");
+            });
+        mcp.AddTool(
+            "self.ir.learn",
+            "Learn one IR frame from an existing remote. Point the remote at the IR receiver "
+            "and press a button. Returns timings_us JSON; save it for later self.ir.send_raw. "
+            "Default gpio 54 is the Tab5 Port A IR receiver pin.",
+            PropertyList({Property("gpio", kPropertyTypeInteger, 54, 0, 54),
+                          Property("timeout_ms", kPropertyTypeInteger, 8000, 1000, 30000)}),
+            [this](const PropertyList& p) -> ReturnValue {
+                return IrService::GetInstance().LearnFrame(p["gpio"].value<int>(),
+                                                           p["timeout_ms"].value<int>());
+            });
+        mcp.AddTool(
+            "self.ir.send_nec",
+            "Send a NEC IR frame (8-bit addr + cmd). Common for TVs (Xiaomi often uses NEC).",
+            PropertyList({Property("gpio", kPropertyTypeInteger, 53, 0, 54),
+                          Property("addr", kPropertyTypeInteger, 0, 0, 255),
+                          Property("cmd", kPropertyTypeInteger, 0, 0, 255)}),
+            [this](const PropertyList& p) -> ReturnValue {
+                bool ok = IrService::GetInstance().SendNec(p["gpio"].value<int>(),
+                                                           (uint8_t)p["addr"].value<int>(),
+                                                           (uint8_t)p["cmd"].value<int>());
+                return ok ? std::string("NEC sent") : std::string("NEC send failed");
+            });
+        mcp.AddTool(
+            "self.ir.dump_slot",
+            "Dump a learned IR slot from NVS as timings_us JSON.",
+            PropertyList({Property("slot", kPropertyTypeInteger, 0, 0, 19)}),
+            [](const PropertyList& p) -> ReturnValue {
+                const int slot = p["slot"].value<int>();
+                char key[16];
+                snprintf(key, sizeof(key), "s%d", slot);
+                nvs_handle_t h;
+                if (nvs_open("ir_slots", NVS_READONLY, &h) != ESP_OK)
+                    return std::string("{\"ok\":false,\"error\":\"nvs open\"}");
+                size_t len = 0;
+                nvs_get_blob(h, key, nullptr, &len);
+                std::vector<uint16_t> us(len / 2);
+                esp_err_t err = len ? nvs_get_blob(h, key, us.data(), &len) : ESP_ERR_NVS_NOT_FOUND;
+                nvs_close(h);
+                if (err != ESP_OK || us.empty())
+                    return std::string("{\"ok\":false,\"error\":\"slot empty\"}");
+                std::string json = "{\"ok\":true,\"count\":" + std::to_string(us.size() / 2) +
+                                   ",\"timings_us\":[";
+                for (size_t i = 0; i < us.size(); ++i) {
+                    if (i) json += ",";
+                    json += std::to_string(us[i]);
+                }
+                json += "]}";
+                return json;
+            });
+        mcp.AddTool(
+            "self.ir.loopback",
+            "TX a learned slot on gpio 53 while listening on gpio 54. If this hears the frame, "
+            "the IR LED path works and the AC unit should see the code.",
+            PropertyList({Property("slot", kPropertyTypeInteger, 0, 0, 19)}),
+            [](const PropertyList& p) -> ReturnValue {
+                const int slot = p["slot"].value<int>();
+                char key[16];
+                snprintf(key, sizeof(key), "s%d", slot);
+                nvs_handle_t h;
+                if (nvs_open("ir_slots", NVS_READONLY, &h) != ESP_OK)
+                    return std::string("{\"ok\":false,\"error\":\"nvs open\"}");
+                size_t len = 0;
+                nvs_get_blob(h, key, nullptr, &len);
+                std::vector<uint16_t> us(len / 2);
+                esp_err_t err = len ? nvs_get_blob(h, key, us.data(), &len) : ESP_ERR_NVS_NOT_FOUND;
+                nvs_close(h);
+                if (err != ESP_OK || us.empty())
+                    return std::string("{\"ok\":false,\"error\":\"slot empty\"}");
+                return IrService::GetInstance().Loopback(53, 54, us.data(), us.size(), 2500);
+            });
+        mcp.AddTool(
+            "self.music.play_url",
+            "Play a direct HTTP(S) MP3 song URL on Tab5. Pass the exact title and artist from "
+            "the NAS/NetEase MCP, and its numeric song_id when available. Pass real full timed "
+            "LRC in lyrics if the NAS provides it. Otherwise Tab5 looks up matching NetEase "
+            "lyrics before starting audio. Do not invent or read lyrics aloud.",
+            PropertyList({Property("title", kPropertyTypeString, std::string("Music")),
+                          Property("artist", kPropertyTypeString, std::string("")),
+                          Property("url", kPropertyTypeString),
+                          Property("lyrics", kPropertyTypeString, std::string("")),
+                          Property("song_id", kPropertyTypeString, std::string(""))}),
+            [this](const PropertyList& p) -> ReturnValue {
+                EnsureNativeRadio();
+                const auto title_value = p["title"].value<std::string>();
+                const auto title = title_value.empty() ? std::string("Music URL") : title_value;
+                const auto artist = p["artist"].value<std::string>();
+                const auto url = p["url"].value<std::string>();
+                const auto lyrics = p["lyrics"].value<std::string>();
+                const auto song_id = p["song_id"].value<std::string>();
+                if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0)
+                    return std::string("Music URL was NOT started: invalid HTTP(S) URL.");
+                const uint32_t generation = ++music_request_generation_;
+                tab5_lrc::Document supplied_lyrics;
+                if (tab5_lrc::Parse(lyrics, supplied_lyrics) && supplied_lyrics.timed)
+                    return StartMusicNow(title, artist, url, lyrics);
+                radio_service_.Stop();
+                auto* display = static_cast<QdtechTab5Display*>(display_);
+                display->BeginMusicTrack(title.c_str(), artist.c_str());
+                display->SetMusicInfo(title.c_str(), artist.c_str(), "正在查找歌词…");
+                auto* request = new (std::nothrow)
+                    MusicLookupRequest{this, generation, title, artist, url, song_id};
+                TaskHandle_t task = nullptr;
+                const BaseType_t created =
+                    request ? xTaskCreatePinnedToCoreWithCaps(MusicLookupTask, "music_lyrics", 8192,
+                                                              request, 2, &task, 0,
+                                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+                            : pdFAIL;
+                if (created != pdPASS) {
+                    delete request;
+                    return StartMusicNow(title, artist, url, "");
+                }
+                return std::string(
+                    "Song queued on Tab5; matching lyrics are being fetched before audio starts. "
+                    "No spoken follow-up is needed.");
+            });
+        mcp.AddTool(
+            "self.music.set_lyrics",
+            "Display complete timed LRC lyrics for the currently playing Tab5 song. Retrieve real "
+            "LRC from the connected NAS/NetEase MCP first, then pass its raw [mm:ss.xx] lines as "
+            "lyrics. Call after self.music.play_url when lyrics were not included there. Do not "
+            "fabricate lyrics.",
+            PropertyList({Property("title", kPropertyTypeString, std::string("")),
+                          Property("lyrics", kPropertyTypeString)}),
+            [this](const PropertyList& p) -> ReturnValue {
+                const auto title = p["title"].value<std::string>();
+                const auto lyrics = p["lyrics"].value<std::string>();
+                return static_cast<QdtechTab5Display*>(display_)->SetMusicLyrics(lyrics.c_str(),
+                                                                                 title.c_str())
+                           ? "Lyrics shown and synchronized on Tab5."
+                           : "Lyrics not shown: supply valid LRC for the current song (max 16 KB).";
+            });
+        mcp.AddTool("self.music.set_lyric",
+                    "Show the current lyric line on the Tab5 screen after music starts.",
+                    PropertyList({Property("title", kPropertyTypeString, std::string("")),
+                                  Property("artist", kPropertyTypeString, std::string("")),
+                                  Property("line", kPropertyTypeString, std::string(""))}),
+                    [this](const PropertyList& p) -> ReturnValue {
+                        static_cast<QdtechTab5Display*>(display_)->SetMusicInfo(
+                            p["title"].value<std::string>().c_str(),
+                            p["artist"].value<std::string>().c_str(),
+                            p["line"].value<std::string>().c_str());
+                        return true;
+                    });
+        mcp.AddTool("self.music.stop", "Stop song playback.", PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        ++music_request_generation_;
+                        if (native_radio_ready_.load())
+                            radio_service_.Stop();
+                        static_cast<QdtechTab5Display*>(display_)->StopMusicTrack();
+                        static_cast<QdtechTab5Display*>(display_)->SetMusicInfo("已停止", "",
+                                                                                "点歌或收听电台");
+                        return true;
+                    });
+        auto show_icu = [this](int mode, const icu::Result& result) -> ReturnValue {
+            static_cast<QdtechTab5Display*>(display_)->ShowIcuPage(mode, result.text);
+            return result.text;
+        };
+        mcp.AddTool("self.icu.open",
+            "Open the Tab5 ICU calculator. module is egfr, uacr, oxygen, blood_gas or pump. Ask for measured values and units before calculating.",
+            PropertyList({Property("module", kPropertyTypeString, std::string(""))}),
+            [this](const PropertyList& p) -> ReturnValue {
+                const auto name = p["module"].value<std::string>();
+                const int mode = name == "egfr" ? 0 : name == "uacr" ? 1 :
+                    name == "oxygen" ? 2 : name == "blood_gas" ? 3 :
+                    name == "pump" ? 4 : -1;
+                static_cast<QdtechTab5Display*>(display_)->ShowIcuPage(mode);
+                return true;
+            });
+        mcp.AddTool("self.icu.egfr",
+            "Calculate adult 2021 CKD-EPI creatinine eGFR. age_years and serum_creatinine_umol_l are decimal strings; sex must be male or female. Not reliable for unstable creatinine or AKI.",
+            PropertyList({Property("age_years", kPropertyTypeString),
+                          Property("sex", kPropertyTypeString),
+                          Property("serum_creatinine_umol_l", kPropertyTypeString)}),
+            [show_icu](const PropertyList& p) -> ReturnValue {
+                double age, scr;
+                const auto sex = p["sex"].value<std::string>();
+                if (!icu::ParseDecimal(p["age_years"].value<std::string>(), age) ||
+                    !icu::ParseDecimal(p["serum_creatinine_umol_l"].value<std::string>(), scr) ||
+                    (sex != "male" && sex != "female")) return std::string("请核对年龄、性别 male/female 与血肌酐 μmol/L。");
+                return show_icu(0, icu::Egfr(age, sex == "female", scr));
+            });
+        mcp.AddTool("self.icu.uacr",
+            "Calculate urine albumin-to-creatinine ratio from the same urine sample. Input decimal strings in mg/L and mmol/L.",
+            PropertyList({Property("urine_albumin_mg_l", kPropertyTypeString),
+                          Property("urine_creatinine_mmol_l", kPropertyTypeString)}),
+            [show_icu](const PropertyList& p) -> ReturnValue {
+                double albumin, creatinine;
+                if (!icu::ParseDecimal(p["urine_albumin_mg_l"].value<std::string>(), albumin) ||
+                    !icu::ParseDecimal(p["urine_creatinine_mmol_l"].value<std::string>(), creatinine))
+                    return std::string("请核对尿白蛋白 mg/L 与尿肌酐 mmol/L。");
+                return show_icu(1, icu::Uacr(albumin, creatinine));
+            });
+        mcp.AddTool("self.icu.oxygen",
+            "Calculate PaO2/FiO2 and, optionally, formal oxygenation index OI. Inputs are decimal strings: FiO2 percent 21-100, PaO2 mmHg, optional mean airway pressure cmH2O. No ARDS diagnosis.",
+            PropertyList({Property("fio2_percent", kPropertyTypeString),
+                          Property("pao2_mmhg", kPropertyTypeString),
+                          Property("mean_airway_pressure_cmh2o", kPropertyTypeString, std::string(""))}),
+            [show_icu](const PropertyList& p) -> ReturnValue {
+                double fio2, pao2, map = 0;
+                const auto optional = p["mean_airway_pressure_cmh2o"].value<std::string>();
+                if (!icu::ParseDecimal(p["fio2_percent"].value<std::string>(), fio2) ||
+                    !icu::ParseDecimal(p["pao2_mmhg"].value<std::string>(), pao2) ||
+                    (!optional.empty() && !icu::ParseDecimal(optional, map)))
+                    return std::string("请核对 FiO₂ 百分数、PaO₂ mmHg 和平均气道压 cmH₂O。");
+                return show_icu(2, icu::Oxygen(fio2, pao2, map));
+            });
+        mcp.AddTool("self.icu.blood_gas",
+            "Display acid-base measurements, anion gap and Winter expected PaCO2 where applicable. Decimal strings: pH, PaCO2 mmHg, HCO3 mmol/L; sodium, chloride mmol/L and albumin g/L optional. No diagnosis.",
+            PropertyList({Property("ph", kPropertyTypeString), Property("paco2_mmhg", kPropertyTypeString),
+                          Property("hco3_mmol_l", kPropertyTypeString),
+                          Property("sodium_mmol_l", kPropertyTypeString, std::string("")),
+                          Property("chloride_mmol_l", kPropertyTypeString, std::string("")),
+                          Property("albumin_g_l", kPropertyTypeString, std::string(""))}),
+            [show_icu](const PropertyList& p) -> ReturnValue {
+                double ph, co2, hco3, sodium = 0, chloride = 0, albumin = 0;
+                auto parse_optional = [&p](const char* name, double& value) {
+                    const auto input = p[name].value<std::string>();
+                    return input.empty() || icu::ParseDecimal(input, value);
+                };
+                if (!icu::ParseDecimal(p["ph"].value<std::string>(), ph) ||
+                    !icu::ParseDecimal(p["paco2_mmhg"].value<std::string>(), co2) ||
+                    !icu::ParseDecimal(p["hco3_mmol_l"].value<std::string>(), hco3) ||
+                    !parse_optional("sodium_mmol_l", sodium) ||
+                    !parse_optional("chloride_mmol_l", chloride) ||
+                    !parse_optional("albumin_g_l", albumin)) return std::string("请核对血气输入值与单位。");
+                return show_icu(3, icu::BloodGas(ph, co2, hco3, sodium, chloride, albumin));
+            });
+        mcp.AddTool("self.icu.pump",
+            "Convert an existing infusion preparation and mL/h pump rate; NEVER recommend a dose. drug must be norepinephrine, epinephrine, metaraminol, dopamine, dobutamine, amiodarone, omeprazole, vasopressin, somatostatin, octreotide, insulin, furosemide, or dexmedetomidine. amount is mg except vasopressin/insulin in U. final_volume_ml is the FINAL total syringe volume, not added diluent; rate_ml_h and optional weight_kg are decimal strings. Verify diluent compatibility separately.",
+            PropertyList({Property("drug", kPropertyTypeString), Property("amount", kPropertyTypeString),
+                          Property("final_volume_ml", kPropertyTypeString), Property("rate_ml_h", kPropertyTypeString),
+                          Property("weight_kg", kPropertyTypeString, std::string(""))}),
+            [show_icu](const PropertyList& p) -> ReturnValue {
+                const auto drug = p["drug"].value<std::string>();
+                const char* names[] = {"norepinephrine", "epinephrine", "metaraminol", "dopamine",
+                    "dobutamine", "amiodarone", "omeprazole", "vasopressin", "somatostatin",
+                    "octreotide", "insulin", "furosemide", "dexmedetomidine"};
+                int index = -1;
+                for (int i = 0; i < icu::kDrugCount; ++i) if (drug == names[i]) index = i;
+                double amount, volume, rate, weight = 0;
+                const auto optional = p["weight_kg"].value<std::string>();
+                if (index < 0 || !icu::ParseDecimal(p["amount"].value<std::string>(), amount) ||
+                    !icu::ParseDecimal(p["final_volume_ml"].value<std::string>(), volume) ||
+                    !icu::ParseDecimal(p["rate_ml_h"].value<std::string>(), rate) ||
+                    (!optional.empty() && !icu::ParseDecimal(optional, weight)))
+                    return std::string("请核对药物名称、药量、最终总液量 mL、泵速 mL/h 和体重 kg。");
+                return show_icu(4, icu::Pump(static_cast<icu::Drug>(index), amount, volume, rate, weight));
+            });
+    }
+#endif
     Pi4ioe1* pi4ioe1_;
     Pi4ioe2* pi4ioe2_;
     esp_lcd_touch_handle_t touch_ = nullptr;
+    FcEmulatorService fc_emulator_service_;
+#if !CONFIG_QDTECH_TAB5_NATIVE_UI
     TimeWeatherService time_weather_service_;
     PhotoService photo_service_;
-    RadioService radio_service_;
     PodcastService podcast_service_;
-    FcEmulatorService fc_emulator_service_;
     bool time_weather_started_ = false;
     bool product_tools_registered_ = false;
 
@@ -302,13 +802,40 @@ private:
                           Property("artist", kPropertyTypeString, std::string("")),
                           Property("url", kPropertyTypeString)}),
             [this](const PropertyList& p) -> ReturnValue {
-                return radio_service_.PlayUrlFromTool(
-                    p["title"].value<std::string>(), p["artist"].value<std::string>(),
+                const auto title = p["title"].value<std::string>();
+                const auto artist = p["artist"].value<std::string>();
+                if (display_) {
+                    static_cast<QdtechTab5Display*>(display_)->SetMusicInfo(
+                        title.c_str(), artist.c_str(), "正在连接音源…");
+                }
+                return radio_service_.PlayUrlFromTool(title, artist,
                     p["url"].value<std::string>());
             });
+        mcp.AddTool("self.music.set_lyric",
+            "Show the current lyric line on the Tab5 screen. Call after self.music.play_url.",
+            PropertyList({Property("title", kPropertyTypeString, std::string("")),
+                          Property("artist", kPropertyTypeString, std::string("")),
+                          Property("line", kPropertyTypeString, std::string(""))}),
+            [this](const PropertyList& p) -> ReturnValue {
+                if (display_) {
+                    static_cast<QdtechTab5Display*>(display_)->SetMusicInfo(
+                        p["title"].value<std::string>().c_str(),
+                        p["artist"].value<std::string>().c_str(),
+                        p["line"].value<std::string>().c_str());
+                }
+                return true;
+            });
         mcp.AddTool("self.music.stop", "Stop MP3 URL playback.", PropertyList(),
-            [this](const PropertyList&) -> ReturnValue { radio_service_.Stop(); return true; });
+            [this](const PropertyList&) -> ReturnValue {
+                if (display_) {
+                    static_cast<QdtechTab5Display*>(display_)->SetMusicInfo(
+                        "已停止", "", "点歌或收听电台");
+                }
+                return radio_service_.Stop();
+            });
     }
+#endif
+#if !CONFIG_QDTECH_TAB5_NATIVE_UI
     bool desktop_touch_pressed_ = false;
     uint16_t desktop_touch_start_x_ = 0;
     uint16_t desktop_touch_start_y_ = 0;
@@ -337,6 +864,7 @@ private:
                                         esp_timer_get_time() / 1000 - desktop_touch_started_ms_);
         }
     }
+#endif
 
     void RegisterTouchWithLvgl() {
         if (touch_ == nullptr) {
@@ -355,12 +883,21 @@ private:
                 auto* touch = board ? board->touch_ : nullptr;
                 data->state = LV_INDEV_STATE_RELEASED;
                 if (!touch || esp_lcd_touch_read_data(touch) != ESP_OK) {
+#if !CONFIG_QDTECH_TAB5_NATIVE_UI
                     if (board) board->ProcessDesktopTouch(false);
+#endif
                     return;
                 }
                 uint8_t count = 0;
                 esp_lcd_touch_point_data_t point[1] = {};
                 if (esp_lcd_touch_get_data(touch, point, &count, 1) == ESP_OK && count) {
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+                    // LVGL rotates pointer samples itself when the display is
+                    // set to 270 degrees. Pass raw portrait panel coordinates.
+                    data->point.x = point[0].x;
+                    data->point.y = point[0].y;
+                    data->state = LV_INDEV_STATE_PRESSED;
+#else
                     const auto* screen = static_cast<QdtechTab5Display*>(board->display_);
                     if (screen && screen->IsScaled()) {
                         if (point[0].y < 100 || point[0].y >= 1180) {
@@ -376,8 +913,11 @@ private:
                     }
                     data->state = LV_INDEV_STATE_PRESSED;
                     board->ProcessDesktopTouch(true, data->point.x, data->point.y);
+#endif
                 } else {
+#if !CONFIG_QDTECH_TAB5_NATIVE_UI
                     board->ProcessDesktopTouch(false);
+#endif
                 }
             });
             lv_indev_set_disp(indev, display);
@@ -679,7 +1219,9 @@ private:
         dpi_config.dpi_clock_freq_mhz = 70;
         dpi_config.in_color_format = LCD_COLOR_FMT_RGB565;
         dpi_config.out_color_format = LCD_COLOR_FMT_RGB565;
-        dpi_config.num_fbs = 1;
+        // Two scan-out buffers so the NES emulator can page-flip on VSYNC
+        // (tab5_nes_video). LVGL keeps drawing into whichever one is shown.
+        dpi_config.num_fbs = 2;
         dpi_config.video_timing.h_size = 720;
         dpi_config.video_timing.v_size = 1280;
         dpi_config.video_timing.hsync_pulse_width = 2;
@@ -843,10 +1385,27 @@ private:
         };
 
         camera_ = new EspVideo(video_config);
+        g_tab5_camera = camera_;
     }
 
 public:
     QdtechTab5Board() : boot_button_(BOOT_BUTTON_GPIO) {
+        // Distinguish freeze-vs-reboot: brownout, panic, task wdt, or power-on.
+        const esp_reset_reason_t why = esp_reset_reason();
+        ESP_LOGI(TAG, "boot reset_reason=%d (%s) free_sram=%u min_sram=%u", int(why),
+                 why == ESP_RST_POWERON   ? "poweron"
+                 : why == ESP_RST_EXT     ? "ext"
+                 : why == ESP_RST_SW      ? "sw"
+                 : why == ESP_RST_PANIC   ? "panic"
+                 : why == ESP_RST_INT_WDT ? "int_wdt"
+                 : why == ESP_RST_TASK_WDT ? "task_wdt"
+                 : why == ESP_RST_WDT     ? "wdt"
+                 : why == ESP_RST_DEEPSLEEP ? "deepsleep"
+                 : why == ESP_RST_BROWNOUT ? "BROWNOUT"
+                 : why == ESP_RST_USB     ? "usb"
+                                          : "other",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
         InitializeI2c();
         I2cDetect();
         InitializePi4ioe();
@@ -858,17 +1417,241 @@ public:
         SetUsb5vEn(true);
         SetExt5vEn(true);
         GetBacklight()->RestoreBrightness();
+        // USB gamepad starts after Wi-Fi/MQTT: starting it at boot leaves too
+        // little internal SRAM for `mqtt_client` task creation.
+        // UsbGamepadHostStart() is invoked from StartNetwork().
     }
 
     void StartNetwork() override {
         WifiBoard::StartNetwork();
-        // The display is set up before WifiBoard starts ESP-Hosted. Retry the
-        // SD slot after hosted has initialized the P4's shared controller.
-        if (!Tab5SdReady()) {
-            lvgl_port_lock(0);
-            Tab5SdMountAndRegisterFs();
-            lvgl_port_unlock();
+        // Native UI has no TimeWeatherService; start SNTP here so the clock
+        // and daily-card date logic actually run.
+        setenv("TZ", "CST-8", 1);
+        tzset();
+        esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+        esp_sntp_setservername(0, "ntp.aliyun.com");
+        esp_sntp_setservername(1, "pool.ntp.org");
+        esp_sntp_set_sync_interval(10 * 60 * 1000);
+        esp_sntp_init();
+        ESP_LOGI(TAG, "SNTP started (CST-8)");
+        // LAN MCP bridge for OpenClaw / host agents (ws://<ip>:8080/ws).
+        if (ws_control_server_ == nullptr) {
+            ws_control_server_ = new WebSocketControlServer();
+            if (!ws_control_server_->Start(8080)) {
+                delete ws_control_server_;
+                ws_control_server_ = nullptr;
+            }
         }
+        // Mount SD + load fallback font OFF the startup path. A slow/failed
+        // SDMMC init or lv_binfont_create must never block Initialize()/Run()
+        // or the main event loop — that freezes chat, MCP tools and every
+        // Schedule() callback while LVGL still paints (looks like "UI alive
+        // but dead / flash on tap").
+        xTaskCreate(
+            [](void* arg) {
+                auto* self = static_cast<QdtechTab5Board*>(arg);
+                // Let ESP-Hosted finish claiming the shared SDMMC host first.
+                vTaskDelay(pdMS_TO_TICKS(800));
+                if (!Tab5SdReady()) {
+                    Tab5SdMountAndRegisterFs();
+                }
+                if (self->display_ && Tab5SdReady()) {
+                    // lv_binfont_create touches LVGL heap — hold the port lock.
+                    lvgl_port_lock(0);
+                    static_cast<QdtechTab5Display*>(self->display_)->LoadSdFallbackFont();
+                    lvgl_port_unlock();
+                }
+                vTaskDelete(nullptr);
+            },
+            "tab5_sd_font", 10 * 1024, this, 2, nullptr);
+        // Bring USB HID up once Wi-Fi/MQTT have claimed their internal SRAM.
+        // UsbLibTask retries install if memory is still tight.
+        xTaskCreate(
+            [](void* arg) {
+                vTaskDelay(pdMS_TO_TICKS(2500));
+                UsbGamepadHostStart();
+                vTaskDelete(nullptr);
+            },
+            "tab5_usb_early", 2048, nullptr, 2, nullptr);
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+        if (display_) {
+            auto* native_display = static_cast<QdtechTab5Display*>(display_);
+            Tab5NativeApps::Actions actions;
+            actions.reconfigure_wifi = [this] {
+                ++music_request_generation_;
+                if (native_radio_ready_.load())
+                    radio_service_.Stop();
+                EnterWifiConfigMode();
+            };
+            actions.wifi_summary = [] {
+                auto& wifi = WifiManager::GetInstance();
+                if (wifi.IsConfigMode())
+                    return std::string("配网热点：") + wifi.GetApSsid() + "  地址：" +
+                           wifi.GetApWebUrl();
+                if (wifi.IsConnected())
+                    return std::string("已连接：") + wifi.GetSsid() + "  " + wifi.GetIpAddress();
+                return std::string("网络未连接");
+            };
+            actions.get_brightness = [this] {
+                auto* backlight = GetBacklight();
+                return backlight ? int(backlight->brightness()) : 0;
+            };
+            actions.get_volume = [this] {
+                auto* codec = GetAudioCodec();
+                return codec ? codec->output_volume() : 0;
+            };
+            actions.set_brightness = [this](int value) {
+                if (auto* backlight = GetBacklight())
+                    backlight->SetBrightness(std::clamp(value, 5, 100), true);
+            };
+            actions.set_volume = [this](int value) {
+                if (auto* codec = GetAudioCodec())
+                    codec->SetOutputVolume(std::clamp(value, 0, 100));
+            };
+            actions.start_radio = [this] { EnsureNativeRadio(); };
+            actions.radio_play_pause = [this] {
+                ++music_request_generation_;
+                EnsureNativeRadio();
+                radio_service_.PlayPause();
+            };
+            actions.radio_stop = [this] {
+                ++music_request_generation_;
+                if (native_radio_ready_.load())
+                    radio_service_.Stop();
+            };
+            actions.radio_next = [this] {
+                ++music_request_generation_;
+                EnsureNativeRadio();
+                radio_service_.Next();
+            };
+            actions.radio_previous = [this] {
+                ++music_request_generation_;
+                EnsureNativeRadio();
+                radio_service_.Prev();
+            };
+            actions.radio_select = [this](int index) {
+                ++music_request_generation_;
+                EnsureNativeRadio();
+                radio_service_.SelectStationIndex(index);
+            };
+            actions.station_count = [this] {
+                // Catalog load does not need the player task.
+                return radio_service_.GetStationCount();
+            };
+            actions.station_name = [this](int index) {
+                const char* name = radio_service_.GetStationName(index);
+                return std::string(name ? name : "");
+            };
+            actions.radio_level = [this] {
+                return native_radio_ready_.load() ? radio_service_.GetAudioLevel() : 0;
+            };
+            actions.start_nes = [this] {
+                ++music_request_generation_;
+                radio_service_.Stop();
+                // Game mode: free camera + claim audio so vision/MQTT stay off.
+                if (camera_) camera_->PauseStream();
+                Application::GetInstance().SetExternalAudioActive(true);
+                UsbGamepadSetOnConnect([] {
+                    if (g_tab5_camera) g_tab5_camera->PauseStream();
+                });
+                // USB host needs contiguous internal SRAM. Start it before the
+                // FC task claims another block; retry is idempotent.
+                UsbGamepadHostStart();
+                fc_emulator_service_.SetActive(true);
+                fc_emulator_service_.PlayPause();
+            };
+            actions.stop_nes = [this] {
+                // Stop the emulator but keep the page/session so the next
+                // ROM can be started without a full teardown.
+                fc_emulator_service_.Stop();
+            };
+            actions.nes_play_pause = [this] {
+                fc_emulator_service_.SetActive(true);
+                fc_emulator_service_.StartSelected();
+            };
+            actions.nes_next = [this] { fc_emulator_service_.Next(); };
+            actions.nes_previous = [this] { fc_emulator_service_.Prev(); };
+            actions.nes_status = [this] {
+                char buf[160];
+                snprintf(buf, sizeof(buf), "手柄: %s  ROM: %s",
+                         UsbGamepadConnected() ? "已连接" : "未连接",
+                         fc_emulator_service_.SelectedName().c_str());
+                static_cast<QdtechTab5Display*>(display_)->SetNesStatus(buf);
+            };
+            actions.nes_rom_count = [this] { return fc_emulator_service_.RomCount(); };
+            actions.nes_rom_name = [this](int i) { return fc_emulator_service_.RomNameAt(i); };
+            actions.nes_rom_index = [this] { return fc_emulator_service_.CurrentRomIndex(); };
+            actions.firmware_action = [] { Tab5Ota::GetInstance().HandleButton(); };
+            native_display->SetAppsActions(std::move(actions), [this] {
+                EnsureNativeRadio();
+                radio_service_.Play();
+            });
+            Tab5Ota::GetInstance().SetStatusCallback([native_display](const Tab5Ota::Status& status) {
+                native_display->SetFirmwareStatus(status.text, status.button, status.progress,
+                                                  status.busy);
+            });
+            RegisterNativeTools();
+            native_display->SetPresenceTestAction([this] { vision_service_.RequestPresenceTest(); });
+            native_display->SetInteractionAction([this] { vision_service_.NotifyInteraction(); });
+            if (camera_) vision_service_.Start(camera_, native_display);
+            // NES + USB gamepad (SN30 Pro). Frames can later bind to a native page.
+            fc_emulator_service_.Start({
+                .set_state = [native_display](const char* title, const char* detail, const char*) {
+                    char buf[160];
+                    snprintf(buf, sizeof(buf), "%s%s%s", title ? title : "",
+                             (detail && *detail) ? " · " : "", detail ? detail : "");
+                    native_display->SetNesStatus(buf);
+                },
+                .set_mode = [native_display](bool playing) {
+                    native_display->SetNesPlaying(playing);
+                },
+            });
+            fc_emulator_service_.SetDirectFrameCallback(
+                [native_display](const uint16_t* pixels, uint16_t width, uint16_t height) -> bool {
+                    native_display->PushNesFrame(pixels, width, height);
+                    return true;
+                });
+            // Direct-to-panel NES video (LVGL paused while a ROM runs). Falls
+            // back to the LVGL image path above if the panel has 1 buffer.
+            if (tab5_nes_video::Init(native_display->lcd_panel(), native_display->lv_disp())) {
+                {
+                    Settings settings("fc", false);
+                    tab5_nes_video::SetAspect(
+                        settings.GetInt("aspect", tab5_nes_video::kAspectPixelPerfect));
+                }
+                fc_emulator_service_.SetVideoSessionHooks(
+                    [] { tab5_nes_video::Begin(); },
+                    [] { tab5_nes_video::End(); });
+                fc_emulator_service_.SetIndexedFrameCallback(
+                    [](const uint8_t* const* lines, const uint16_t* palette, uint16_t width,
+                       uint16_t height) -> bool {
+                        if (!tab5_nes_video::Active()) {
+                            return false;
+                        }
+                        // Select+Left: pixel-perfect 3x, Select+Right: 4:3.
+                        static uint8_t last_pad = 0;
+                        const uint8_t pad = UsbGamepadNesMask();
+                        const uint8_t pressed = static_cast<uint8_t>(pad & ~last_pad);
+                        last_pad = pad;
+                        if (pad & kNesBtnSelect) {
+                            int aspect = -1;
+                            if (pressed & kNesBtnLeft) aspect = tab5_nes_video::kAspectPixelPerfect;
+                            if (pressed & kNesBtnRight) aspect = tab5_nes_video::kAspect4x3;
+                            if (aspect >= 0 && aspect != tab5_nes_video::GetAspect()) {
+                                tab5_nes_video::SetAspect(aspect);
+                                // NVS write off the emulator task (its stack is in PSRAM).
+                                Application::GetInstance().Schedule([aspect] {
+                                    Settings settings("fc", true);
+                                    settings.SetInt("aspect", aspect);
+                                });
+                            }
+                        }
+                        return tab5_nes_video::Present(lines, palette, width, height);
+                    });
+            }
+        }
+#endif
+#if !CONFIG_QDTECH_TAB5_NATIVE_UI
         if (!time_weather_started_ && display_) {
             auto* desktop = static_cast<QdtechTab5Display*>(display_)->GetDesktopUI();
             time_weather_service_.Start(desktop);
@@ -891,7 +1674,21 @@ public:
             radio_service_.Start(desktop);
             podcast_service_.Start(desktop);
             desktop->podcast_stop_other_media_ = [this]() { radio_service_.Stop(); };
-            fc_emulator_service_.Start(desktop);
+            fc_emulator_service_.Start({
+                .set_state = [desktop](const char* title, const char* detail, const char* list) {
+                    desktop->SetFcState(title, detail, list);
+                },
+                .set_mode = [desktop](bool playing) { desktop->SetFcMode(playing); },
+                .set_frame = [desktop](const lv_img_dsc_t* image) { desktop->SetFcFrame(image); },
+            });
+            desktop->SetFcActiveCallback([this](bool active) { fc_emulator_service_.SetActive(active); });
+            desktop->SetFcActions(
+                [this]() { fc_emulator_service_.PlayPause(); },
+                [this]() { fc_emulator_service_.Stop(); },
+                [this]() { fc_emulator_service_.Next(); },
+                [this]() { fc_emulator_service_.Prev(); });
+            desktop->SetFcControllerCallback(
+                [this](uint8_t c) { fc_emulator_service_.SetController(c); });
             desktop->fc_stop_other_media_ = [this]() {
                 radio_service_.Stop();
                 podcast_service_.Stop();
@@ -899,6 +1696,7 @@ public:
             RegisterProductTools();
             time_weather_started_ = true;
         }
+#endif
     }
 
     virtual AudioCodec* GetAudioCodec() override {
@@ -923,6 +1721,19 @@ public:
 
     virtual Camera* GetCamera() override {
         return camera_;
+    }
+
+    void PrepareForNetwork() override {
+        // MQTT/TLS need internal SRAM; park camera and stop NES first.
+        if (camera_) {
+            camera_->PauseStream();
+        }
+        if (fc_emulator_service_.RomCount() >= 0) {
+            fc_emulator_service_.SetActive(false);
+            fc_emulator_service_.Stop();
+        }
+        ESP_LOGI(TAG, "prepare network free_sram=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
 
     virtual Backlight* GetBacklight() override {
@@ -979,6 +1790,5 @@ public:
         }
     }
 };
-
 
 DECLARE_BOARD(QdtechTab5Board);

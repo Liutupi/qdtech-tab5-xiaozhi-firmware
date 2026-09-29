@@ -141,6 +141,11 @@ public:
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
+    // External players (radio/podcast/FC) write the codec outside AudioOutputTask.
+    // Keep the power manager from closing the speaker while they hold the path.
+    void SetExternalPlaybackActive(bool active);
+    void NoteOutputActivity();
+
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
@@ -206,6 +211,7 @@ private:
 #endif
     std::atomic<bool> service_stopped_{true};
     std::atomic<bool> audio_input_need_warmup_{false};
+    std::atomic<bool> external_playback_active_{false};
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;

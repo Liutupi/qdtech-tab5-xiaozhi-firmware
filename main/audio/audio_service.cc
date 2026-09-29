@@ -120,6 +120,8 @@ void AudioService::Start() {
                                            AS_EVENT_AUDIO_PROCESSOR_RUNNING |
                                            AS_EVENT_AUDIO_INPUT_STOP_REQUEST);
 
+    last_input_time_ = std::chrono::steady_clock::now();
+    last_output_time_ = std::chrono::steady_clock::now();
     esp_timer_start_periodic(audio_power_timer_, 1000000);
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -761,6 +763,20 @@ void AudioService::EnableDeviceAec(bool enable) {
 
 void AudioService::SetCallbacks(AudioServiceCallbacks& callbacks) { callbacks_ = callbacks; }
 
+void AudioService::SetExternalPlaybackActive(bool active) {
+    external_playback_active_.store(active, std::memory_order_relaxed);
+    if (active) {
+        NoteOutputActivity();
+        // Keep the power timer running so idle input can still sleep.
+        esp_timer_stop(audio_power_timer_);
+        esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+    }
+}
+
+void AudioService::NoteOutputActivity() {
+    last_output_time_ = std::chrono::steady_clock::now();
+}
+
 void AudioService::PlaySound(const std::string_view& ogg) {
     if (!codec_->output_enabled()) {
         esp_timer_stop(audio_power_timer_);
@@ -832,6 +848,12 @@ bool AudioService::MarkPlaybackDrainedLocked() {
 
 void AudioService::CheckAndUpdateAudioPowerState() {
     auto now = std::chrono::steady_clock::now();
+    if (external_playback_active_.load(std::memory_order_relaxed)) {
+        // Radio/podcast write the codec outside AudioOutputTask and never
+        // refresh last_output_time_. Treat that path as live output so the
+        // 15s idle timer does not close the speaker mid-stream.
+        last_output_time_ = now;
+    }
     auto input_elapsed =
         std::chrono::duration_cast<std::chrono::milliseconds>(now - last_input_time_).count();
     auto output_elapsed =
@@ -841,7 +863,8 @@ void AudioService::CheckAndUpdateAudioPowerState() {
         // input task instead of closing the codec from the esp_timer task.
         xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_INPUT_STOP_REQUEST);
     }
-    if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled()) {
+    if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled() &&
+        !external_playback_active_.load(std::memory_order_relaxed)) {
         // Keep TX clock when duplex RX is active; otherwise RX may stall on some boards.
         if (!(codec_->duplex() && codec_->input_enabled())) {
             codec_->EnableOutput(false);

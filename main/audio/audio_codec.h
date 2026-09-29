@@ -33,6 +33,9 @@ public:
     virtual void SetInputGain(float gain);
     virtual void EnableInput(bool enable);
     virtual void EnableOutput(bool enable);
+    // Radio/music owns the speaker; implementations should not reconfigure TX
+    // just because the mic path toggled while this is set.
+    virtual void SetExternalPlaybackActive(bool active) { (void)active; }
 
     virtual void OutputData(std::vector<int16_t>& data);
     void OutputData(const int16_t* data, int samples);

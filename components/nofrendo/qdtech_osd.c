@@ -10,6 +10,8 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include <bitmap.h>
 #include <event.h>
@@ -22,11 +24,13 @@
 #include <nesinput.h>
 
 #define TAG "NofrendoQD"
-#define QD_AUDIO_SAMPLE_RATE 22050
+#define QD_AUDIO_SAMPLE_RATE 24000
 #define QD_AUDIO_REFRESH_RATE 60
 #define QD_AUDIO_SAMPLES_PER_TICK (QD_AUDIO_SAMPLE_RATE / QD_AUDIO_REFRESH_RATE)
 
 static qd_nofrendo_frame_cb_t s_frame_cb;
+static qd_nofrendo_indexed_frame_cb_t s_indexed_cb;
+static void* s_indexed_user;
 static void* s_frame_user;
 static qd_nofrendo_audio_cb_t s_audio_cb;
 static void* s_audio_user;
@@ -55,6 +59,11 @@ static void qd_tick_timer_cb(void* arg) {
 void qd_nofrendo_set_frame_callback(qd_nofrendo_frame_cb_t callback, void* user) {
     s_frame_cb = callback;
     s_frame_user = user;
+}
+
+void qd_nofrendo_set_indexed_frame_callback(qd_nofrendo_indexed_frame_cb_t callback, void* user) {
+    s_indexed_cb = callback;
+    s_indexed_user = user;
 }
 
 void qd_nofrendo_set_audio_callback(qd_nofrendo_audio_cb_t callback, void* user) {
@@ -210,13 +219,33 @@ static int qd_video_set_mode(int width, int height) {
     return qd_video_init(width, height);
 }
 
+/* NTSC 2C02 palette (nesdev reference). nofrendo's generated hue/tint palette
+** is washed out, so entries 0..191 (3 copies of the 64 NES colours) use this. */
+static const uint32_t kNesPalette2C02[64] = {
+    0x666666, 0x002A88, 0x1412A7, 0x3B00A4, 0x5C007E, 0x6E0040, 0x6C0600, 0x561D00,
+    0x333500, 0x0B4800, 0x005200, 0x004F08, 0x00404D, 0x000000, 0x000000, 0x000000,
+    0xADADAD, 0x155FD9, 0x4240FF, 0x7527FE, 0xA01ACC, 0xB71E7B, 0xB53120, 0x994E00,
+    0x6B6D00, 0x388700, 0x0C9300, 0x008F32, 0x007C8D, 0x000000, 0x000000, 0x000000,
+    0xFFFEFF, 0x64B0FF, 0x9290FF, 0xC676FF, 0xF36AFF, 0xFE6ECC, 0xFE8170, 0xEA9E22,
+    0xBCBE00, 0x88D800, 0x5CE430, 0x45E082, 0x48CDDE, 0x4F4F4F, 0x000000, 0x000000,
+    0xFFFEFF, 0xC0DFFF, 0xD3D2FF, 0xE8C8FF, 0xFBC2FF, 0xFEC4EA, 0xFECCC5, 0xF7D8A5,
+    0xE4E594, 0xCFEF96, 0xBDF4AB, 0xB3F3CC, 0xB5EBF2, 0xB8B8B8, 0x000000, 0x000000,
+};
+
+static uint16_t qd_rgb565(uint8_t r, uint8_t g, uint8_t b) {
+    return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
 static void qd_video_set_palette(rgb_t* pal) {
+    /* Native RGB565. The old code byte-swapped for the S3 SPI panel, which
+    ** scrambled every colour on the Tab5 MIPI-DPI panel. */
     for (int i = 0; i < 256; ++i) {
-        const uint16_t r = (uint16_t)(pal[i].r >> 3);
-        const uint16_t g = (uint16_t)(pal[i].g >> 2);
-        const uint16_t b = (uint16_t)(pal[i].b >> 3);
-        uint16_t color = (uint16_t)((r << 11) | (g << 5) | b);
-        s_palette[i] = (uint16_t)((color << 8) | (color >> 8));
+        if (i < 192) {
+            const uint32_t c = kNesPalette2C02[i & 63];
+            s_palette[i] = qd_rgb565((uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c);
+        } else {
+            s_palette[i] = qd_rgb565(pal[i].r, pal[i].g, pal[i].b);
+        }
     }
 }
 
@@ -236,7 +265,17 @@ static void qd_video_free_write(int num_dirties, rect_t* dirty_rects) {
 static void qd_video_custom_blit(bitmap_t* bmp, int num_dirties, rect_t* dirty_rects) {
     (void)num_dirties;
     (void)dirty_rects;
-    if (!bmp || !s_frame_cb) {
+    if (!bmp) {
+        return;
+    }
+    /* Fast path: board converts palette + scales + rotates straight into the
+    ** panel frame buffer in one pass (no 256x240 RGB intermediate). */
+    if (s_indexed_cb &&
+        s_indexed_cb((const uint8_t* const*)bmp->line, s_palette, (uint16_t)bmp->width,
+                     (uint16_t)bmp->height, s_indexed_user)) {
+        return;
+    }
+    if (!s_frame_cb) {
         return;
     }
 
@@ -348,6 +387,12 @@ int osd_init(void) {
     s_stop_requested = false;
     s_controller = 0;
     return 0;
+}
+
+void osd_idle(void) {
+    /* nes_emulate() used to busy-spin between 60 Hz ticks, burning a core
+    ** and starving same-priority tasks. Sleep one RTOS tick instead. */
+    vTaskDelay(1);
 }
 
 void osd_togglefullscreen(int code) {

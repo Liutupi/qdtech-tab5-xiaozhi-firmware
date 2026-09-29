@@ -370,7 +370,10 @@ int vid_setmode(int width, int height)
 //   if (NULL != back_buffer)
 //      bmp_destroy(&back_buffer);
 
-   primary_buffer = bmp_create(width, height, 0); /* no overdraw */
+   /* 8px overdraw each side: the PPU renders from (line - fine_x) and 33
+   ** tiles wide, sprites can spill 8px past x=255. Without the margin that
+   ** corrupted the previous line's right edge and the heap around the buffer. */
+   primary_buffer = bmp_create(width, height, 8);
    if (NULL == primary_buffer)
       return -1;
 

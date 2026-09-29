@@ -5,6 +5,7 @@
 #include "board.h"
 #include "tab5_sd.h"
 #include "qdtech_nofrendo.h"
+#include "usb_gamepad_host.h"
 
 #include <algorithm>
 #include <cctype>
@@ -211,34 +212,24 @@ uint8_t corrected_mapper_for_crc(uint8_t mapper, uint32_t crc) {
     return mapper;
 }
 
-static const uint16_t kNesPaletteRgb565[64] = {
-    0x4208, 0x900A, 0xA804, 0x8812, 0x4018, 0x1021, 0x0120, 0x012C,
-    0x0138, 0x0020, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0xA514, 0xF98A, 0xF104, 0xD818, 0x8821, 0x3029, 0x0131, 0x09BD,
-    0x0251, 0x02A0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0xFFFF, 0xFDEA, 0xFCB0, 0xFC58, 0xFB9E, 0xA3BF, 0x53DF, 0x2D7F,
-    0x15DF, 0x0EB0, 0x23B0, 0x4390, 0x838F, 0x0000, 0x0000, 0x0000,
-    0xFFFF, 0xFF7F, 0xFEBF, 0xFDBF, 0xFCBF, 0xB5BF, 0x6DFF, 0x46FF,
-    0x36FF, 0x37F0, 0x5FF0, 0x87D7, 0xC7D7, 0x0000, 0x0000, 0x0000,
-};
 } // namespace
 
-void FcEmulatorService::Start(DesktopUI* desktop_ui) {
-    desktop_ui_ = desktop_ui;
-    if (desktop_ui_) {
-        desktop_ui_->SetFcActiveCallback([this](bool active) { SetActive(active); });
-        desktop_ui_->SetFcActions(
-            [this]() { PlayPause(); },
-            [this]() { Stop(); },
-            [this]() { Next(); },
-            [this]() { Prev(); });
-        desktop_ui_->SetFcControllerCallback([this](uint8_t controller) { SetController(controller); });
-    }
+void FcEmulatorService::Start(UiSink sink) {
+    ui_sink_ = std::move(sink);
     ESP_LOGI(TAG, "fc emulator service registered");
 }
 
 void FcEmulatorService::SetDirectFrameCallback(DirectFrameCallback callback) {
     direct_frame_cb_ = std::move(callback);
+}
+
+void FcEmulatorService::SetIndexedFrameCallback(IndexedFrameCallback callback) {
+    indexed_frame_cb_ = std::move(callback);
+}
+
+void FcEmulatorService::SetVideoSessionHooks(std::function<void()> begin, std::function<void()> end) {
+    video_begin_hook_ = std::move(begin);
+    video_end_hook_ = std::move(end);
 }
 
 void FcEmulatorService::SetActive(bool active) {
@@ -290,6 +281,7 @@ void FcEmulatorService::PlayPause() {
     }
     if (roms_.empty()) {
         scan_requested_.store(true);
+        play_after_scan_.store(true);
         PublishMode(false);
         PublishState("Scanning", "Looking for .nes files");
         return;
@@ -301,9 +293,17 @@ void FcEmulatorService::PlayPause() {
 }
 
 void FcEmulatorService::Stop() {
-    playing_.store(false);
     start_requested_.store(false);
+    play_after_stop_.store(false);
+    if (playing_.load()) {
+        // Only signal the emu thread. Touching LVGL / publishing from here
+        // while qd_nofrendo_run is still on the stack causes Load access fault.
+        qd_nofrendo_request_stop();
+        ESP_LOGI(TAG, "fc stop requested (async)");
+        return;
+    }
     qd_nofrendo_request_stop();
+    playing_.store(false);
     controller_state_.store(0);
     controller_release_tick_.store(0);
     PublishMode(false);
@@ -313,6 +313,11 @@ void FcEmulatorService::Stop() {
 }
 
 void FcEmulatorService::Next() {
+    // Never change ROM while nofrendo is running — that faults the emu task.
+    if (playing_.load()) {
+        ESP_LOGW(TAG, "fc next ignored while playing");
+        return;
+    }
     EnsureTaskStarted();
     if (scanning_.load()) {
         PublishMode(false);
@@ -339,6 +344,10 @@ void FcEmulatorService::Next() {
 }
 
 void FcEmulatorService::Prev() {
+    if (playing_.load()) {
+        ESP_LOGW(TAG, "fc prev ignored while playing");
+        return;
+    }
     EnsureTaskStarted();
     if (scanning_.load()) {
         PublishMode(false);
@@ -369,8 +378,11 @@ void FcEmulatorService::EnsureTaskStarted() {
         return;
     }
 
-    constexpr uint32_t stack_size = 6144;
-    constexpr UBaseType_t task_priority = 1;
+    // -O2 nofrendo inlines more; keep headroom (stack lives in PSRAM).
+    constexpr uint32_t stack_size = 8192;
+    // Was 1 (below LVGL/audio helpers) which starved emulation. The emu loop
+    // now sleeps between frames (osd_idle), so a mid priority is safe.
+    constexpr UBaseType_t task_priority = 3;
     ESP_LOGI(TAG, "fc task create free_internal=%u largest_internal=%u",
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
@@ -400,9 +412,34 @@ void FcEmulatorService::TaskWrapper(void* arg) {
     static_cast<FcEmulatorService*>(arg)->TaskLoop();
 }
 
+void FcEmulatorService::PollPadOnFrame() {
+    // Refresh USB pad every frame so NES sees live input.
+    const uint8_t pad = static_cast<uint8_t>(controller_state_.load() | UsbGamepadNesMask());
+    qd_nofrendo_set_controller(pad);
+    // Select+Start together leaves the game (Select alone now reaches the
+    // game; many titles need it). Works even while LVGL is paused.
+    constexpr uint8_t kExitCombo = 0x04 | 0x08;
+    if ((pad & kExitCombo) == kExitCombo && !exit_combo_latched_) {
+        exit_combo_latched_ = true;
+        ESP_LOGI(TAG, "fc exit combo (Select+Start)");
+        qd_nofrendo_request_stop();
+    }
+}
+
+int FcEmulatorService::NofrendoIndexedFrameThunk(const uint8_t* const* lines, const uint16_t* palette,
+                                                 uint16_t width, uint16_t height, void* user) {
+    auto* self = static_cast<FcEmulatorService*>(user);
+    if (!self || !self->indexed_frame_cb_ || !self->playing_.load()) return 0;
+    if (!self->indexed_frame_cb_(lines, palette, width, height)) return 0;
+    self->PollPadOnFrame();
+    return 1;
+}
+
 int FcEmulatorService::NofrendoFrameThunk(const uint16_t* pixels, uint16_t width, uint16_t height, void* user) {
     auto* self = static_cast<FcEmulatorService*>(user);
-    return self && self->PublishDirectFrame(pixels, width, height) ? 1 : 0;
+    if (!self) return 0;
+    self->PollPadOnFrame();
+    return self->PublishDirectFrame(pixels, width, height) ? 1 : 0;
 }
 
 void FcEmulatorService::NofrendoAudioThunk(const int16_t* samples, int sample_count, int sample_rate, void* user) {
@@ -457,6 +494,8 @@ void FcEmulatorService::TaskLoop() {
             controller_release_tick_.store(0);
             PublishMode(false);
             PublishState("Select ROM", SelectedName().c_str());
+            // List the ROMs; the user picks one on the game page.
+            play_after_scan_.store(false);
         }
 
         if (!is_active) {
@@ -726,9 +765,14 @@ void FcEmulatorService::RunNofrendoRom() {
         return;
     }
 
+    exit_combo_latched_ = false;
+    if (video_begin_hook_) {
+        video_begin_hook_();
+    }
+    qd_nofrendo_set_indexed_frame_callback(NofrendoIndexedFrameThunk, this);
     qd_nofrendo_set_frame_callback(NofrendoFrameThunk, this);
     qd_nofrendo_set_audio_callback(NofrendoAudioThunk, this);
-    qd_nofrendo_set_controller(controller_state_.load());
+    qd_nofrendo_set_controller(static_cast<uint8_t>(controller_state_.load() | UsbGamepadNesMask()));
     audio_frame_counter_ = 0;
     last_audio_log_us_ = 0;
     ESP_LOGI(TAG, "nofrendo run rom=%s free_internal=%u largest_internal=%u",
@@ -736,18 +780,28 @@ void FcEmulatorService::RunNofrendoRom() {
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     const int result = qd_nofrendo_run(roms_[idx].c_str());
+    qd_nofrendo_set_indexed_frame_callback(nullptr, nullptr);
     qd_nofrendo_set_frame_callback(nullptr, nullptr);
     qd_nofrendo_set_audio_callback(nullptr, nullptr);
     controller_state_.store(0);
     controller_release_tick_.store(0);
     playing_.store(false);
     audio_output_buf_.clear();
+    // Give the panel back to LVGL before any UI publishing below.
+    if (video_end_hook_) {
+        video_end_hook_();
+    }
 
     ESP_LOGI(TAG, "nofrendo finished result=%d", result);
     PublishMode(false);
     if (active_.load()) {
         PublishState(result == 0 ? "Select ROM" : "Load failed",
                      result == 0 ? SelectedName().c_str() : "Nofrendo could not run ROM");
+    }
+    // Select → list → A: start the newly picked ROM now that the old one is idle.
+    if (play_after_stop_.exchange(false) && active_.load()) {
+        start_requested_.store(true);
+        ESP_LOGI(TAG, "fc queued start after stop rom=%s", SelectedName().c_str());
     }
 }
 
@@ -766,22 +820,22 @@ void FcEmulatorService::ClearFrames() {
 }
 
 void FcEmulatorService::PublishState(const char* title, const char* detail) {
-    if (!desktop_ui_) {
+    if (!ui_sink_.set_state) {
         return;
     }
     const std::string list = BuildRomList();
     if (lvgl_port_lock(100)) {
-        desktop_ui_->SetFcState(title, detail, list.c_str());
+        ui_sink_.set_state(title, detail, list.c_str());
         lvgl_port_unlock();
     }
 }
 
 void FcEmulatorService::PublishMode(bool playing) {
-    if (!desktop_ui_) {
+    if (!ui_sink_.set_mode) {
         return;
     }
     if (lvgl_port_lock(100)) {
-        desktop_ui_->SetFcMode(playing);
+        ui_sink_.set_mode(playing);
         lvgl_port_unlock();
     }
 }
@@ -795,11 +849,11 @@ bool FcEmulatorService::PublishFrame(Frame& frame) {
 }
 
 bool FcEmulatorService::PublishLvglFrame(const lv_img_dsc_t* frame) {
-    if (!desktop_ui_ || !frame || !frame->data) {
+    if (!ui_sink_.set_frame || !frame || !frame->data) {
         return false;
     }
     if (lvgl_port_lock(50)) {
-        desktop_ui_->SetFcFrame(frame);
+        ui_sink_.set_frame(frame);
         lvgl_port_unlock();
         return true;
     }
@@ -922,6 +976,57 @@ std::string FcEmulatorService::SelectedName() const {
     return RomDisplayName(roms_[idx], 24);
 }
 
+void FcEmulatorService::SelectRomIndex(int index) {
+    if (playing_.load()) {
+        ESP_LOGW(TAG, "fc select ignored while playing");
+        return;
+    }
+    EnsureTaskStarted();
+    if (roms_.empty()) {
+        scan_requested_.store(true);
+        return;
+    }
+    if (index < 0) index = 0;
+    if (index >= static_cast<int>(roms_.size())) index = static_cast<int>(roms_.size()) - 1;
+    selected_index_.store(static_cast<size_t>(index), std::memory_order_relaxed);
+    PublishState("Select ROM", SelectedName().c_str());
+    ESP_LOGI(TAG, "fc select index=%d rom=%s", index, SelectedName().c_str());
+}
+
+void FcEmulatorService::StartSelected() {
+    // Re-entering a game after Select: always re-activate and queue a clean
+    // start. If the previous nofrendo is still winding down, start afterwards.
+    SetActive(true);
+    if (roms_.empty()) {
+        scan_requested_.store(true);
+        play_after_scan_.store(true);
+        PublishState("Scanning", "Looking for .nes files");
+        return;
+    }
+    if (playing_.load()) {
+        ESP_LOGW(TAG, "fc start: previous rom still running, queue restart");
+        play_after_stop_.store(true);
+        Stop();
+        return;
+    }
+    play_after_stop_.store(false);
+    PublishMode(true);
+    PublishState("Loading ROM", SelectedName().c_str());
+    start_requested_.store(true);
+    ESP_LOGI(TAG, "fc start requested rom=%s", SelectedName().c_str());
+}
+
+int FcEmulatorService::CurrentRomIndex() const {
+    return static_cast<int>(selected_index_.load(std::memory_order_relaxed));
+}
+
+int FcEmulatorService::RomCount() const { return static_cast<int>(roms_.size()); }
+
+std::string FcEmulatorService::RomNameAt(int index) const {
+    if (index < 0 || index >= static_cast<int>(roms_.size())) return "";
+    return RomDisplayName(roms_[static_cast<size_t>(index)], 28);
+}
+
 std::string FcEmulatorService::BuildRomList() const {
     if (roms_.empty()) {
         return "No .nes files found\nPut ROMs in /sdcard/nes";
@@ -960,5 +1065,5 @@ std::string FcEmulatorService::BuildRomList() const {
 void FcEmulatorService::SetController(uint8_t controller) {
     controller_state_.store(controller);
     controller_release_tick_.store(0);
-    qd_nofrendo_set_controller(controller);
+    qd_nofrendo_set_controller(static_cast<uint8_t>(controller | UsbGamepadNesMask()));
 }

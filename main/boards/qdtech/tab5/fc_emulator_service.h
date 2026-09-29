@@ -1,6 +1,5 @@
 #pragma once
 
-#include "desktop_ui.h"
 #include "lvgl.h"
 
 #include <atomic>
@@ -16,9 +15,24 @@
 class FcEmulatorService {
 public:
     using DirectFrameCallback = std::function<bool(const uint16_t* pixels, uint16_t width, uint16_t height)>;
+    // Palette-indexed fast path (lines[y][x] -> palette[] native RGB565).
+    // Return true if consumed; false falls back to DirectFrameCallback.
+    using IndexedFrameCallback = std::function<bool(const uint8_t* const* lines, const uint16_t* palette,
+                                                    uint16_t width, uint16_t height)>;
 
-    void Start(DesktopUI* desktop_ui);
+    // Optional UI sink so native UI can host NES without linking DesktopUI.
+    struct UiSink {
+        std::function<void(const char* title, const char* detail, const char* rom_list)> set_state;
+        std::function<void(bool playing)> set_mode;
+        std::function<void(const lv_img_dsc_t* image)> set_frame;
+    };
+
+    void Start(UiSink sink = {});
     void SetDirectFrameCallback(DirectFrameCallback callback);
+    void SetIndexedFrameCallback(IndexedFrameCallback callback);
+    // Run on the emulator task right before / after each ROM session
+    // (e.g. hand the panel to the emulator and back to LVGL).
+    void SetVideoSessionHooks(std::function<void()> begin, std::function<void()> end);
     void SetActive(bool active);
     bool PrepareSdCard();
     void PrepareTask();
@@ -26,6 +40,12 @@ public:
     void Stop();
     void Next();
     void Prev();
+    void SelectRomIndex(int index);
+    void StartSelected();
+    int CurrentRomIndex() const;
+    int RomCount() const;
+    std::string RomNameAt(int index) const;
+    std::string SelectedName() const;
     void SetController(uint8_t controller);
 
 private:
@@ -35,7 +55,7 @@ private:
         size_t pixel_count = 0;
     };
 
-    DesktopUI* desktop_ui_ = nullptr;
+    UiSink ui_sink_;
     TaskHandle_t task_handle_ = nullptr;
     std::atomic<bool> active_{false};
     std::atomic<bool> playing_{false};
@@ -59,11 +79,17 @@ private:
     int64_t last_audio_log_us_ = 0;
 
     uint8_t last_logged_controller_state_ = 0xff;
+    bool exit_combo_latched_ = false;
 
     std::atomic<uint8_t> controller_state_{0};
     std::atomic<uint32_t> controller_release_tick_{0};
+    std::atomic<bool> play_after_scan_{false};
+    std::atomic<bool> play_after_stop_{false};
 
     static void TaskWrapper(void* arg);
+    static int NofrendoIndexedFrameThunk(const uint8_t* const* lines, const uint16_t* palette,
+                                         uint16_t width, uint16_t height, void* user);
+    void PollPadOnFrame();
     static int NofrendoFrameThunk(const uint16_t* pixels, uint16_t width, uint16_t height, void* user);
     static void NofrendoAudioThunk(const int16_t* samples, int sample_count, int sample_rate, void* user);
     void EnsureTaskStarted();
@@ -84,9 +110,11 @@ private:
     bool PublishDirectFrame(const uint16_t* pixels, uint16_t width, uint16_t height);
     void WriteNofrendoAudio(const int16_t* samples, int sample_count, int sample_rate);
     std::string RomDisplayName(const std::string& path, size_t max_chars = 22) const;
-    std::string SelectedName() const;
     std::string BuildRomList() const;
 
     DirectFrameCallback direct_frame_cb_;
+    IndexedFrameCallback indexed_frame_cb_;
+    std::function<void()> video_begin_hook_;
+    std::function<void()> video_end_hook_;
     std::vector<int16_t> audio_output_buf_;
 };

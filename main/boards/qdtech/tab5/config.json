@@ -7,6 +7,7 @@
             "name": "qdtech-tab5",
             "sdkconfig_append": [
                 "CONFIG_BOARD_TYPE_QDTECH_TAB5=y",
+                "CONFIG_HTTPD_WS_SUPPORT=y",
                 "CONFIG_COMPILER_OPTIMIZATION_SIZE=y",
                 "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/qdtech_tab5.csv\"",
                 "CONFIG_LV_USE_GIF=y",
@@ -25,13 +26,45 @@
                 "CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D3_4BIT_BUS_SLOT_1=8",
                 "CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y",
                 "CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y",
-                "CONFIG_ESP32P4_REV_MIN_100=y"
+                "CONFIG_ESP32P4_REV_MIN_100=y",
+                "CONFIG_LV_USE_FREETYPE=y",
+                "CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=512"
+            ]
+        },
+        {
+            "name": "qdtech-tab5-native",
+            "sdkconfig_append": [
+                "CONFIG_BOARD_TYPE_QDTECH_TAB5=y",
+                "CONFIG_QDTECH_TAB5_NATIVE_UI=y",
+                "CONFIG_HTTPD_WS_SUPPORT=y",
+                "CONFIG_COMPILER_OPTIMIZATION_SIZE=y",
+                "CONFIG_ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP=n",
+                "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/qdtech_tab5.csv\"",
+                "CONFIG_LV_USE_FONT_COMPRESSED=y",
+                "CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=n",
+                "CONFIG_LV_FONT_MONTSERRAT_20=y",
+                "CONFIG_LV_FONT_MONTSERRAT_48=y",
+                "CONFIG_CAMERA_SC202CS=y",
+                "CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE=y",
+                "CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CMD_SLOT_1=13",
+                "CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CLK_SLOT_1=12",
+                "CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D0_SLOT_1=11",
+                "CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D1_4BIT_BUS_SLOT_1=10",
+                "CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D2_4BIT_BUS_SLOT_1=9",
+                "CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D3_4BIT_BUS_SLOT_1=8",
+                "CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y",
+                "CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM=y",
+                "CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y",
+                "CONFIG_ESP32P4_REV_MIN_100=y",
+                "CONFIG_LV_USE_FREETYPE=y",
+                "CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=512"
             ]
         },
         {
             "name": "qdtech-tab5-p4x",
             "sdkconfig_append": [
                 "CONFIG_BOARD_TYPE_QDTECH_TAB5=y",
+                "CONFIG_HTTPD_WS_SUPPORT=y",
                 "CONFIG_COMPILER_OPTIMIZATION_SIZE=y",
                 "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/qdtech_tab5.csv\"",
                 "CONFIG_LV_USE_GIF=y",
@@ -48,7 +81,9 @@
                 "CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D1_4BIT_BUS_SLOT_1=10",
                 "CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D2_4BIT_BUS_SLOT_1=9",
                 "CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D3_4BIT_BUS_SLOT_1=8",
-                "CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y"
+                "CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y",
+                "CONFIG_LV_USE_FREETYPE=y",
+                "CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=512"
             ]
         }
     ]

@@ -164,10 +164,7 @@ static const lv_font_t* qd_cn_font_16() {
     return &font_puhui_16_4;
 }
 
-static const lv_font_t* qd_cn_font_20() {
-    // Puhui has broader Chinese coverage than the compact LXGW subsets.
-    return &font_puhui_16_4;
-}
+static const lv_font_t* qd_cn_font_20() { return &qd_font_lxgw_20; }
 
 static std::string clean_subtitle_text(const char* text, size_t max_codepoints = 42) {
     if (!text) {
