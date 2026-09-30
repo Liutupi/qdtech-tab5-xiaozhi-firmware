@@ -112,6 +112,9 @@ public:
 
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
+    // Send a spoken-style text command to the server (no wake word audio).
+    // Returns false when the device is busy (not idle) and nothing was sent.
+    bool InvokeTextCommand(const std::string& text);
     bool UpgradeFirmware(const std::string& url, const std::string& version = "",
                          const std::string& expected_sha256 = "");
     bool CanEnterSleepMode();

@@ -24,6 +24,7 @@
 #include "font/binfont_loader/lv_binfont_loader.h"
 #include "nabo_assets.h"
 #include "src/misc/cache/instance/lv_image_cache.h"
+#include "tab5_clinical_pearls.h"
 #include "tab5_daily_content.h"
 #include "tab5_lrc.h"
 #include "tab5_native_apps.h"
@@ -44,10 +45,15 @@ class QdtechTab5Display : public MipiLcdDisplay {
     lv_obj_t* sleep_z_[3] = {};
     lv_obj_t* daily_title_label_ = nullptr;
     lv_obj_t* daily_body_label_ = nullptr;
-    lv_obj_t* daily_dots_[6] = {};
+    // Pages 0-2: pushed digest, 3-5: quote/history/festival, 6-8: offline clinical pearls.
+    static constexpr unsigned kDailyPages = 9;
+    lv_obj_t* daily_dots_[9] = {};
     // 0-2: pushed medical digest; 3-5: quote / history / festival.
-    std::string daily_titles_[6];
-    std::string daily_bodies_[6];
+    std::string daily_titles_[9];
+    std::string daily_bodies_[9];
+    std::string daily_sources_[9];
+    std::string digest_prompt_ = "今日医学精选";
+    unsigned next_page_tick_ = 0;
     int daily_date_key_ = -1;
     unsigned daily_page_ = 0;
     std::string digest_text_;
@@ -117,19 +123,44 @@ class QdtechTab5Display : public MipiLcdDisplay {
         lv_obj_set_style_transform_scale_y(static_cast<lv_obj_t*>(obj), value, 0);
     }
 
+    // Pages 0-2 only exist once something was pushed; pages 6-8 need today's date.
+    bool DailyPageValid(unsigned page) const {
+        if (page < 3)
+            return has_digest_;
+        if (page >= 6)
+            return daily_date_key_ != -1;
+        return true;
+    }
+
+    unsigned NextDailyPage() const {
+        unsigned next = daily_page_;
+        for (unsigned i = 0; i < kDailyPages; ++i) {
+            next = (next + 1) % kDailyPages;
+            if (DailyPageValid(next))
+                return next;
+        }
+        return daily_page_;
+    }
+
     void ShowDailyPage(unsigned page) {
-        daily_page_ = page % 6;
+        daily_page_ = page % kDailyPages;
+        // Clinical pearls need longer to read than the one-line cards.
+        next_page_tick_ = tick_ + (daily_page_ >= 6 ? 300 : 160);
         if (!daily_title_label_ || !daily_body_label_)
             return;
         lv_label_set_text(daily_title_label_, daily_titles_[daily_page_].c_str());
         lv_label_set_text(daily_body_label_, daily_bodies_[daily_page_].c_str());
-        for (unsigned i = 0; i < 6; ++i)
+        for (unsigned i = 0; i < kDailyPages; ++i)
             lv_obj_set_style_bg_opa(daily_dots_[i], i == daily_page_ ? LV_OPA_COVER : LV_OPA_30, 0);
-        if (has_digest_ && daily_page_ < 3) {
+        const bool pearl = daily_page_ >= 6 && daily_date_key_ != -1;
+        if ((has_digest_ && daily_page_ < 3) || pearl) {
+            digest_prompt_ = pearl ? "临床干货" : "今日医学精选";
             digest_text_ = daily_titles_[daily_page_] + "\n" + daily_bodies_[daily_page_];
+            if (pearl && !daily_sources_[daily_page_].empty())
+                digest_text_ += "\n来源：" + daily_sources_[daily_page_];
             if (!active_ && !speaking_ && !music_active_) {
                 if (prompt_label_)
-                    lv_label_set_text(prompt_label_, "今日医学精选");
+                    lv_label_set_text(prompt_label_, digest_prompt_.c_str());
                 if (message_label_)
                     lv_label_set_text(message_label_, digest_text_.c_str());
             }
@@ -144,6 +175,10 @@ class QdtechTab5Display : public MipiLcdDisplay {
         daily_bodies_[4] = "正在校时…";
         daily_titles_[5] = "节日提醒";
         daily_bodies_[5] = "正在校时…";
+        for (int i = 6; i < 9; ++i) {
+            daily_titles_[i] = "临床干货";
+            daily_bodies_[i] = "正在校时…";
+        }
         if (!has_digest_) {
             daily_titles_[0] = "今日医学";
             daily_bodies_[0] = "等待推送…";
@@ -189,6 +224,12 @@ class QdtechTab5Display : public MipiLcdDisplay {
                                std::to_string(content.days_to_next_festival) + "天";
         } else {
             daily_bodies_[5] = "愿今天也有值得记住的小事";
+        }
+        const auto pearls = Tab5PearlsForDate(date);
+        for (int i = 0; i < 3; ++i) {
+            daily_titles_[6 + i] = std::string(pearls.prefix[i]) + pearls.item[i].title;
+            daily_bodies_[6 + i] = pearls.item[i].body;
+            daily_sources_[6 + i] = pearls.item[i].source;
         }
         if (!has_digest_) {
             daily_titles_[0] = "今日医学";
@@ -335,8 +376,8 @@ class QdtechTab5Display : public MipiLcdDisplay {
         RefreshMusicLyrics();
         if (apps_ && apps_->IsVisible())
             return;
-        if (tick_ % 160 == 0)
-            ShowDailyPage(daily_page_ + 1);
+        if (tick_ >= next_page_tick_)
+            ShowDailyPage(NextDailyPage());
         if (preview_active_)
             return;
         if (sleeping_) {
@@ -559,7 +600,7 @@ public:
         daily_title_label_ = Label(daily_card, "每日一句", &qd_font_cjk_28, 0x76d8ed, 46, 12, 430);
         daily_body_label_ = Label(daily_card, "等待校时", &qd_font_cjk_28, 0xf5f9fd, 46, 52, 555);
         lv_obj_set_height(daily_body_label_, 82);
-        for (int i = 0; i < 6; ++i)
+        for (unsigned i = 0; i < kDailyPages; ++i)
             daily_dots_[i] = Card(daily_card, 500 + i * 16, 23, 8, 8, 0x76d8ed, 0x76d8ed, 5);
         InitDailyFallback();
 
@@ -932,7 +973,7 @@ public:
         if (digest_text_.empty() || active_ || speaking_)
             return;
         if (prompt_label_)
-            lv_label_set_text(prompt_label_, "今日医学精选");
+            lv_label_set_text(prompt_label_, digest_prompt_.c_str());
         if (message_label_)
             lv_label_set_text(message_label_, digest_text_.c_str());
     }

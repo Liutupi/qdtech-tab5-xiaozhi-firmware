@@ -433,6 +433,17 @@ void Tab5NativeApps::BuildRadio() {
     lv_obj_set_style_bg_grad_color(player, lv_color_hex(0x1d4056), 0);
     lv_obj_set_style_bg_grad_dir(player, LV_GRAD_DIR_VER, 0);
     Label(player, "NOW PLAYING", &qd_font_lxgw_28, 0x83d6e8, 38, 20, 350);
+    auto* ask_song = Button(
+        player, "点歌", 600, 12, 156, 50,
+        [](lv_event_t* event) {
+            auto* self = static_cast<Tab5NativeApps*>(lv_event_get_user_data(event));
+            if (!self->actions_.ask_song)
+                return;
+            lv_label_set_text(self->radio_state_, "请说出想听的歌名…");
+            Schedule(self->actions_.ask_song);
+        },
+        this);
+    lv_obj_set_style_bg_color(ask_song, lv_color_hex(0x7a4fd6), 0);
     // Dynamic song/station titles use Noto (much broader CJK) so random
     // NetEase names do not turn into boxes/garbage from the LXGW subset.
     radio_station_ =
@@ -487,13 +498,14 @@ void Tab5NativeApps::BuildRadio() {
             Schedule(self->actions_.radio_stop);
         },
         this);
-    Button(
+    auto* next_button = Button(
         player, "下一台", 586, 449, 168, 62,
         [](lv_event_t* event) {
             auto* self = static_cast<Tab5NativeApps*>(lv_event_get_user_data(event));
             Schedule(self->actions_.radio_next);
         },
         this);
+    radio_next_label_ = lv_obj_get_child(next_button, 0);
 }
 
 void Tab5NativeApps::DrawWave(lv_event_t* event) {
@@ -779,11 +791,15 @@ void Tab5NativeApps::SetMusicLyricsWindow(const char* title, const char* artist,
                       (artist && *artist) ? artist : "");
         if (radio_station_)
             lv_label_set_text(radio_station_, head);
+        if (radio_next_label_)
+            lv_label_set_text(radio_next_label_, "下一首");
     }
     SetMusicLyricLine(current);
 }
 
 void Tab5NativeApps::ClearMusicLyrics() {
+    if (radio_next_label_)
+        lv_label_set_text(radio_next_label_, "下一台");
     if (radio_lyric_previous_)
         lv_label_set_text(radio_lyric_previous_, "");
     if (radio_lyric_)

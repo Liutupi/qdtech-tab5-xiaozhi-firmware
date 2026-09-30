@@ -1308,6 +1308,42 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
     }
 }
 
+bool Application::InvokeTextCommand(const std::string& text) {
+    if (!protocol_ || text.empty()) {
+        return false;
+    }
+    if (GetDeviceState() != kDeviceStateIdle) {
+        return false;
+    }
+    Schedule([this, text]() {
+        if (GetDeviceState() != kDeviceStateIdle || !protocol_) {
+            ESP_LOGW(TAG, "text command dropped (state %d): %s", (int)GetDeviceState(), text.c_str());
+            return;
+        }
+        if (!SetDeviceState(kDeviceStateConnecting)) {
+            return;
+        }
+        auto open_and_send = [this, text]() {
+            if (GetDeviceState() != kDeviceStateConnecting) {
+                return;
+            }
+            if (!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) {
+                SetDeviceState(kDeviceStateIdle);
+                return;
+            }
+            ESP_LOGI(TAG, "text command: %s", text.c_str());
+            protocol_->SendWakeWordDetected(text);
+            SetListeningMode(GetDefaultListeningMode());
+        };
+        if (auto* background = GetBackgroundTask()) {
+            background->Schedule(open_and_send);
+            return;
+        }
+        open_and_send();
+    });
+    return true;
+}
+
 void Application::WakeWordInvoke(const std::string& wake_word) {
     if (!protocol_) {
         return;

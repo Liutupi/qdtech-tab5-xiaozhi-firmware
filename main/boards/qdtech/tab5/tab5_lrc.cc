@@ -8,7 +8,7 @@ namespace tab5_lrc {
 namespace {
 
 constexpr size_t kMaxInputBytes = 16 * 1024;
-constexpr size_t kMaxLines = 180;
+constexpr size_t kMaxLines = 240;
 constexpr size_t kMaxTextBytes = 160;
 
 bool Digit(char ch) { return ch >= '0' && ch <= '9'; }
@@ -112,7 +112,7 @@ bool Parse(const std::string& input, Document& output) {
         }
         for (const uint32_t stamp : stamps) {
             if (output.lines.size() >= kMaxLines)
-                return false;
+                break;  // keep the first kMaxLines lines instead of dropping all lyrics
             output.lines.push_back({stamp, content});
         }
     }

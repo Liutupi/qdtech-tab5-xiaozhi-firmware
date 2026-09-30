@@ -511,6 +511,7 @@ void RadioService::SelectStationIndex(int index, int category_filter) {
         return;
     }
     requested_category_filter_.store(category_filter, std::memory_order_relaxed);
+    music_playback_state_.store(0, std::memory_order_relaxed);
     requested_station_index_.store(index, std::memory_order_relaxed);
     stream_generation_.fetch_add(1, std::memory_order_relaxed);
     PostCommand(Command::SELECT_STATION);
@@ -539,6 +540,7 @@ void RadioService::Pause() {
         return;
     }
     ESP_LOGI(TAG, "Pause requested");
+    music_playback_state_.store(0, std::memory_order_relaxed);
     play_requested_ = false;
     stop_requested_ = true;
     reconnect_attempt_ = 0;
@@ -549,6 +551,7 @@ void RadioService::Pause() {
 
 void RadioService::Stop() {
     ESP_LOGI(TAG, "Stop requested");
+    music_playback_state_.store(0, std::memory_order_relaxed);
     playback_release_pending_.store(true, std::memory_order_relaxed);
     stop_requested_ = true;
     stream_generation_.fetch_add(1, std::memory_order_relaxed);
@@ -570,11 +573,13 @@ void RadioService::NotifyPlaybackReleased() {
 }
 
 void RadioService::Next() {
+    music_playback_state_.store(0, std::memory_order_relaxed);
     stream_generation_.fetch_add(1, std::memory_order_relaxed);
     PostCommand(Command::NEXT);
 }
 
 void RadioService::Prev() {
+    music_playback_state_.store(0, std::memory_order_relaxed);
     stream_generation_.fetch_add(1, std::memory_order_relaxed);
     PostCommand(Command::PREV);
 }
@@ -588,10 +593,17 @@ std::string RadioService::GetStatusJson() const {
     return json;
 }
 
+std::string RadioService::GetMusicStatusJson() const {
+    const char* states[] = {"stopped", "playing", "ended", "unavailable"};
+    const int state = music_playback_state_.load(std::memory_order_relaxed);
+    return std::string("{\"state\":\"") + states[state >= 0 && state < 4 ? state : 0] + "\"}";
+}
+
 std::string RadioService::SelectStation(const std::string& station) {
     std::string needle = Lower(station);
     for (int i = 0; i < StationCount(); ++i) {
         if (Lower(kStations[i].name).find(needle) != std::string::npos) {
+            music_playback_state_.store(0, std::memory_order_relaxed);
             stream_generation_.fetch_add(1, std::memory_order_relaxed);
             playing_custom_url_ = false;
             // MCP selection historically cycled the full catalog afterwards.
@@ -653,6 +665,7 @@ std::string RadioService::PlayUrlFromTool(const std::string& title, const std::s
 
     station_index_ = custom_station_index_;
     playing_custom_url_ = true;
+    music_playback_state_.store(1, std::memory_order_relaxed);
     play_requested_ = true;
     stop_requested_ = false;
     audio_focus_blocked_.store(false, std::memory_order_relaxed);
@@ -725,6 +738,7 @@ void RadioService::Task() {
         }
         if (play_requested_ && playing_custom_url_) {
             if (custom_url_stream_completed_) {
+                music_playback_state_.store(2, std::memory_order_relaxed);
                 play_requested_ = false;
                 stop_requested_ = true;
                 reconnect_attempt_ = 0;
@@ -742,6 +756,7 @@ void RadioService::Task() {
                 continue;
             }
             play_requested_ = false;
+            music_playback_state_.store(3, std::memory_order_relaxed);
             stop_requested_ = true;
             playback_release_pending_.store(true, std::memory_order_relaxed);
             reconnect_attempt_ = 0;
@@ -778,6 +793,7 @@ void RadioService::HandleCommand(Command command) {
     
     switch (command) {
         case Command::PLAY_PAUSE: {
+            music_playback_state_.store(0, std::memory_order_relaxed);
             play_requested_ = !play_requested_.load(std::memory_order_relaxed);
             stop_requested_ = !play_requested_.load(std::memory_order_relaxed);
             reconnect_attempt_ = 0;
@@ -796,6 +812,7 @@ void RadioService::HandleCommand(Command command) {
             break;
         }
         case Command::STOP:
+            music_playback_state_.store(0, std::memory_order_relaxed);
             play_requested_ = false;
             stop_requested_ = true;
             reconnect_attempt_ = 0;
@@ -810,6 +827,7 @@ void RadioService::HandleCommand(Command command) {
             ESP_LOGI(TAG, "radio stopped");
             break;
         case Command::NEXT:
+            music_playback_state_.store(0, std::memory_order_relaxed);
             if (playing_custom_url_ || station_index_ == custom_station_index_) {
                 play_requested_ = false;
                 stop_requested_ = true;
@@ -827,6 +845,7 @@ void RadioService::HandleCommand(Command command) {
             ESP_LOGI(TAG, "radio next station=%s", kStations[station_index_].name.c_str());
             break;
         case Command::PREV:
+            music_playback_state_.store(0, std::memory_order_relaxed);
             if (playing_custom_url_) {
                 playing_custom_url_ = false;
                 if (last_radio_station_index_ >= 0 && last_radio_station_index_ < StationCount()) {
@@ -841,6 +860,7 @@ void RadioService::HandleCommand(Command command) {
             ESP_LOGI(TAG, "radio previous station=%s", kStations[station_index_].name.c_str());
             break;
         case Command::SELECT_STATION: {
+            music_playback_state_.store(0, std::memory_order_relaxed);
             const int requested = requested_station_index_.exchange(-1, std::memory_order_relaxed);
             if (requested < 0 || requested >= count) {
                 ESP_LOGW(TAG, "selected station request out of range index=%d count=%d", requested, count);
@@ -869,6 +889,7 @@ void RadioService::HandleCommand(Command command) {
             }
             break;
         case Command::PLAY_CUSTOM_URL:
+            music_playback_state_.store(1, std::memory_order_relaxed);
             play_requested_ = true;
             stop_requested_ = false;
             reconnect_attempt_ = 0;
@@ -950,6 +971,7 @@ void RadioService::PlayCurrentStation(uint32_t stream_generation) {
 
 bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t stream_generation) {
     const std::string station_name = kStations[station_index_].name;
+    const int64_t t_start_us = esp_timer_get_time();
     SetUi("Connecting", url_index == 0 ? "Opening stream" : "Fallback source");
     ResetAudioLeveler();
     last_url_permanent_error_ = false;
@@ -997,6 +1019,8 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     }
 
     esp_err_t err = esp_http_client_open(client, 0);
+    ESP_LOGI(TAG, "timing: http open %s in %d ms", err == ESP_OK ? "ok" : "FAILED",
+             static_cast<int>((esp_timer_get_time() - t_start_us) / 1000));
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "open failed station=%s url_index=%d err=%s url=%s", station_name.c_str(), url_index, esp_err_to_name(err), url.c_str());
         esp_http_client_cleanup(client);
@@ -1090,6 +1114,8 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     if (playing_custom_url_) {
         ESP_LOGI(TAG, "music url open ok len=%d url=%s", content_length, url.c_str());
     }
+    ESP_LOGI(TAG, "timing: headers received %d ms after connect start",
+             static_cast<int>((esp_timer_get_time() - t_start_us) / 1000));
     SetUi("Buffering", "Filling buffer");
 
     HMP3Decoder decoder = MP3InitDecoder();
@@ -1163,7 +1189,10 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         // at a 2 KB target for the entire song, turning normal network jitter
         // directly into audible drop-outs.
         const int steady_target = playing_custom_url_ ? kMusicReadTargetBytes : kRadioReadTargetBytes;
-        const int target_bytes = decoded_frames == 0 ? kInitialReadTargetBytes : steady_target;
+        // On-demand songs start after 6 KB (about 0.4 s of 128 kbps audio); live radio keeps
+        // the larger first fill because its servers deliver in bursts.
+        const int initial_target = playing_custom_url_ ? 6 * 1024 : kInitialReadTargetBytes;
+        const int target_bytes = decoded_frames == 0 ? initial_target : steady_target;
         while (bytes_left < target_bytes && bytes_left < kReadBufferSize &&
                play_requested_ && !stop_requested_ &&
                stream_generation == stream_generation_.load(std::memory_order_relaxed)) {
@@ -1213,6 +1242,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         if (stream_completed) {
             if (playing_custom_url_) {
                 custom_url_stream_completed_ = true;
+                music_playback_state_.store(2, std::memory_order_relaxed);
                 play_requested_ = false;
                 stop_requested_ = true;
                 playback_release_pending_.store(true, std::memory_order_relaxed);
@@ -1295,6 +1325,10 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
             snprintf(detail, sizeof(detail), "%d kbps %d Hz %u KB",
                      frame_info.bitrate / 1000, frame_info.samprate, static_cast<unsigned>(total_bytes / 1024));
             SetUi("Playing", detail);
+            if (decoded_frames == 1) {
+                ESP_LOGI(TAG, "timing: first audio frame %d ms after connect start",
+                         static_cast<int>((esp_timer_get_time() - t_start_us) / 1000));
+            }
             ESP_LOGI(TAG, "playing station=%s frames=%d rate=%d channels=%d total=%u KB",
                      station_name.c_str(), decoded_frames, frame_info.samprate, frame_info.nChans,
                      static_cast<unsigned>(total_bytes / 1024));

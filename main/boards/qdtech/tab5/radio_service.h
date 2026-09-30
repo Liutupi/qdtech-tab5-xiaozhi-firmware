@@ -25,6 +25,7 @@ public:
     void SetPlaybackReleasedCallback(std::function<void()> callback);
     std::string PlayUrlFromTool(const std::string& title, const std::string& artist, const std::string& url);
     std::string GetStatusJson() const;
+    std::string GetMusicStatusJson() const;
     std::string SelectStation(const std::string& station);
     void SelectStationIndex(int index, int category_filter = -1);
     
@@ -102,5 +103,7 @@ private:
     TickType_t custom_url_speaking_grace_until_ = 0;
     std::atomic<uint32_t> stream_generation_{0};
     std::atomic<int> audio_level_{0};
+    // 0 stopped, 1 playing, 2 completed, 3 unavailable. Read by MCP from another task.
+    std::atomic<int> music_playback_state_{0};
     int32_t audio_gain_q12_ = 4096;
 };

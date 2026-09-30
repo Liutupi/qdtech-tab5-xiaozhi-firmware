@@ -26,6 +26,8 @@ public:
         std::function<void()> radio_stop;
         std::function<void()> radio_next;
         std::function<void()> radio_previous;
+        // 点歌 from the radio page: stop playback and open a voice turn.
+        std::function<void()> ask_song;
         std::function<void(int)> radio_select;
         std::function<int()> station_count;
         std::function<std::string(int)> station_name;
@@ -116,6 +118,7 @@ private:
     lv_obj_t* radio_lyric_ = nullptr;
     lv_obj_t* radio_lyric_previous_ = nullptr;
     lv_obj_t* radio_lyric_next_ = nullptr;
+    lv_obj_t* radio_next_label_ = nullptr;
     const lv_font_t* music_font_ = nullptr;
     lv_obj_t* radio_play_label_ = nullptr;
     lv_obj_t* station_rows_[kRows] = {};

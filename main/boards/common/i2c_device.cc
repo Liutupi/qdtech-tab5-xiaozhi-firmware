@@ -1,6 +1,8 @@
 #include "i2c_device.h"
 
 #include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,7 +26,15 @@ I2cDevice::I2cDevice(i2c_master_bus_handle_t i2c_bus, uint8_t addr)
 
 void I2cDevice::WriteReg(uint8_t reg, uint8_t value) {
     uint8_t buffer[2] = {reg, value};
-    ESP_ERROR_CHECK(i2c_master_transmit(i2c_device_, buffer, 2, 100));
+    // Right after a USB/power reset a slave may NACK the very first transfer
+    // (seen on the Tab5 I/O expander); retry briefly before treating it as fatal.
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < 4 && err != ESP_OK; ++attempt) {
+        if (attempt)
+            vTaskDelay(pdMS_TO_TICKS(10));
+        err = i2c_master_transmit(i2c_device_, buffer, 2, 100);
+    }
+    ESP_ERROR_CHECK(err);
 }
 
 void I2cDevice::WriteRegs(uint8_t reg, const uint8_t* buffer, size_t length) {

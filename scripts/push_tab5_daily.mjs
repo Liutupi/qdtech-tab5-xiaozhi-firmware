@@ -6,7 +6,10 @@
 
 import { readFile } from "node:fs/promises";
 
-const endpoint = process.env.TAB5_WS_URL || "ws://192.168.88.101:8080/ws";
+// TAB5_WS_URL wins; otherwise TAB5_HOST (IP or mDNS name) is used; the old fixed IP is the last fallback.
+const endpoint = process.env.TAB5_WS_URL ||
+  (process.env.TAB5_HOST ? `ws://${process.env.TAB5_HOST}:8080/ws` : "ws://192.168.88.101:8080/ws");
+const attempts = Number(process.env.TAB5_PUSH_ATTEMPTS || 4);
 const path = process.argv[2];
 
 function fail(message) {
@@ -25,7 +28,7 @@ function validate(data, supported) {
   if (!Array.isArray(data.items) || data.items.length !== 3)
     throw new Error("exactly three cards are required");
   for (const [index, item] of data.items.entries()) {
-    for (const [field, limit] of [["title", 14], ["body", 18]]) {
+    for (const [field, limit] of [["title", 14], ["body", 36]]) {
       const value = item?.[field];
       if (typeof value !== "string" || !value.trim() ||
           [...value].length > limit || /[\x00-\x1f\x7f]/u.test(value)) {
@@ -72,35 +75,54 @@ function callDevice(socket, method, params, id) {
   });
 }
 
-let socket;
+async function pushOnce(brief) {
+  let socket;
+  try {
+    socket = new WebSocket(endpoint);
+    await Promise.race([
+      new Promise((resolve, reject) => {
+        socket.addEventListener("open", resolve, { once: true });
+        socket.addEventListener("error", () => reject(new Error("device connection failed")), { once: true });
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("device connection timed out")), 5000)),
+    ]);
+    const args = Object.fromEntries(brief.items.flatMap((item, i) =>
+      [[`title${i}`, item.title], [`body${i}`, item.body]]));
+    const result = await callDevice(socket, "tools/call", {
+      name: "self.daily.set_cards", arguments: args,
+    }, 1);
+    const text = (result?.content || []).filter((part) => part.type === "text")
+      .map((part) => part.text).join(" ");
+    if (result?.isError || !text.includes("Daily cards updated"))
+      throw new Error(`device did not confirm card update: ${text.slice(0, 200)}`);
+  } finally {
+    socket?.close();
+  }
+}
+
 try {
   if (!path) throw new Error("pass a JSON brief file path");
   const raw = await readFile(path, "utf8");
-  if (Buffer.byteLength(raw) > 2048) throw new Error("brief file exceeds 2 KB");
+  if (Buffer.byteLength(raw) > 3072) throw new Error("brief file exceeds 3 KB");
   const brief = JSON.parse(raw);
   const glyphs = await readFile(new URL("./tab5_dynamic_symbols.txt", import.meta.url), "utf8");
   const supported = new Set([...glyphs, ...Array.from({ length: 96 }, (_, i) => String.fromCharCode(i + 32))]);
   validate(brief, supported);
-  socket = new WebSocket(endpoint);
-  await Promise.race([
-    new Promise((resolve, reject) => {
-      socket.addEventListener("open", resolve, { once: true });
-      socket.addEventListener("error", () => reject(new Error("device connection failed")), { once: true });
-    }),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("device connection timed out")), 5000)),
-  ]);
-  const args = Object.fromEntries(brief.items.flatMap((item, i) =>
-    [[`title${i}`, item.title], [`body${i}`, item.body]]));
-  const result = await callDevice(socket, "tools/call", {
-    name: "self.daily.set_cards", arguments: args,
-  }, 1);
-  const text = (result?.content || []).filter((part) => part.type === "text")
-    .map((part) => part.text).join(" ");
-  if (result?.isError || !text.includes("Daily cards updated"))
-    throw new Error(`device did not confirm card update: ${text.slice(0, 200)}`);
-  console.log(JSON.stringify({ ok: true, date: brief.date, cards: 3, device: endpoint }));
+  // The device may be asleep, roaming or rebooting at 08:00: retry with growing pauses.
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; ++attempt) {
+    try {
+      await pushOnce(brief);
+      console.log(JSON.stringify({ ok: true, date: brief.date, cards: 3, device: endpoint, attempt }));
+      lastError = undefined;
+      break;
+    } catch (error) {
+      lastError = error;
+      console.error(`attempt ${attempt}/${attempts} failed: ${error.message || error}`);
+      if (attempt < attempts) await new Promise((r) => setTimeout(r, 5000 * 3 ** (attempt - 1)));
+    }
+  }
+  if (lastError) throw lastError;
 } catch (error) {
   fail(error.message || String(error));
-} finally {
-  socket?.close();
 }
