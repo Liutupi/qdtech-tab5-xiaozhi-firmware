@@ -1,6 +1,7 @@
 #pragma once
 
 #include <esp_heap_caps.h>
+#include "settings.h"
 #include <esp_log.h>
 #include <unistd.h>
 
@@ -169,6 +170,8 @@ class QdtechTab5Display : public MipiLcdDisplay {
             }
         }
         daily_date_key_ = key;
+        if (!has_digest_)
+            LoadPersistedDailyCards(key);
         const auto content = Tab5DailyContentForDate(date);
         // Pages 3-5 keep the original daily trio.
         daily_titles_[3] = "每日一句";
@@ -888,7 +891,41 @@ public:
             daily_bodies_[i] = body ? body : "";
         }
         has_digest_ = true;
+        SavePersistedDailyCards();
         ShowDailyPage(0);
+    }
+
+    // OpenClaw pushes are kept in NVS together with the date they were pushed for,
+    // so a reboot (or a crash) during the day no longer throws the digest away.
+    void SavePersistedDailyCards() {
+        if (daily_date_key_ <= 0)
+            return;  // clock not set yet: cannot tell which day the cards belong to
+        Settings settings("tab5daily", true);
+        settings.SetInt("date", daily_date_key_);
+        for (int i = 0; i < 3; ++i) {
+            settings.SetString("t" + std::to_string(i), daily_titles_[i]);
+            settings.SetString("b" + std::to_string(i), daily_bodies_[i]);
+        }
+    }
+
+    // Called once the clock is known; restores today's cards if they were saved today.
+    void LoadPersistedDailyCards(int today_key) {
+        Settings settings("tab5daily", false);
+        if (settings.GetInt("date", 0) != today_key)
+            return;
+        bool any = false;
+        for (int i = 0; i < 3; ++i) {
+            auto title = settings.GetString("t" + std::to_string(i));
+            if (title.empty())
+                continue;
+            daily_titles_[i] = title;
+            daily_bodies_[i] = settings.GetString("b" + std::to_string(i));
+            any = true;
+        }
+        if (any) {
+            has_digest_ = true;
+            ESP_LOGI("Tab5Daily", "restored today's digest from NVS (%d)", today_key);
+        }
     }
 
     void RestoreDigestIfIdle() {

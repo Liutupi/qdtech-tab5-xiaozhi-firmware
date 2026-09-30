@@ -301,8 +301,14 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
             },
         .flags =
             {
+#ifdef CONFIG_BOARD_TYPE_QDTECH_TAB5
+                // Tab5: keep the ~72 KB LVGL draw buffer out of scarce internal SRAM.
+                .buff_dma = false,
+                .buff_spiram = true,
+#else
                 .buff_dma = true,
                 .buff_spiram = false,
+#endif
                 .sw_rotate = true,
             },
     };

@@ -1,4 +1,6 @@
 #include "audio_service.h"
+#include <freertos/idf_additions.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <cstring>
 
@@ -163,6 +165,21 @@ void AudioService::Start() {
 #endif
 
     /* Start the opus codec task */
+#ifdef CONFIG_BOARD_TYPE_QDTECH_TAB5
+    // Tab5: the 24 KB stack would otherwise sit in internal SRAM (only ~8 KB is ever used).
+    // This task only encodes/decodes Opus and never touches flash, so a PSRAM stack is safe.
+    if (xTaskCreateWithCaps(
+            [](void* arg) {
+                AudioService* audio_service = (AudioService*)arg;
+                audio_service->OpusCodecTask();
+                vTaskDelete(NULL);
+            },
+            "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        opus_codec_task_handle_ = nullptr;
+    }
+    if (opus_codec_task_handle_ == nullptr)
+#endif
     xTaskCreate(
         [](void* arg) {
             AudioService* audio_service = (AudioService*)arg;

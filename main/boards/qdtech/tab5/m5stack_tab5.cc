@@ -24,6 +24,7 @@
 #include "tab5_audio_codec.h"
 #include "tab5_sd.h"
 #include "tab5_ota.h"
+#include "tab5_memdiag.h"
 #include "fc_emulator_service.h"
 #include "settings.h"
 #include "tab5_nes_video.h"
@@ -952,7 +953,7 @@ private:
         return esp_ldo_acquire_channel(&ldo_mipi_phy_config, &ldo_mipi_phy);
     }
 
-    void I2cDetect() {
+    [[maybe_unused]] void I2cDetect() {
         uint8_t address;
         printf("     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f\r\n");
         for (int i = 0; i < 128; i += 16) {
@@ -1407,11 +1408,18 @@ public:
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
         InitializeI2c();
+        // 调试用的 I2C 全地址扫描每次开机要多花约 6.6 秒（128 次 200ms 超时），默认关闭。
+#ifdef QDTECH_TAB5_I2C_SCAN_AT_BOOT
         I2cDetect();
+#endif
         InitializePi4ioe();
+        Tab5MemDiag::Stage("before display");
         InitializeDisplay();  // Auto-detect and initialize display + touch
+        Tab5MemDiag::Stage("after display");
         InitializeCamera();
+        Tab5MemDiag::Stage("after camera");
         InitializeButtons();
+        Tab5MemDiag::ScheduleReport();
         SetChargeQcEn(true);
         SetChargeEn(true);
         SetUsb5vEn(true);

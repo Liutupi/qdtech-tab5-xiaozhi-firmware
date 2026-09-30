@@ -29,3 +29,5 @@ updater/sdkconfig.old
 updater/managed_components/
 updater/dependencies.lock
 *.command
+*.patch
+*.orig
