@@ -432,7 +432,13 @@ void Tab5NativeApps::BuildRadio() {
     auto* player = Card(radio_page_, 448, 139, 784, 522, 0x142d43, 0x35627d, 27);
     lv_obj_set_style_bg_grad_color(player, lv_color_hex(0x1d4056), 0);
     lv_obj_set_style_bg_grad_dir(player, LV_GRAD_DIR_VER, 0);
-    Label(player, "NOW PLAYING", &qd_font_lxgw_28, 0x83d6e8, 38, 20, 350);
+    Label(player, "NOW PLAYING", &qd_font_lxgw_28, 0x83d6e8, 38, 20, 220);
+    // Voice status pill (聆听中 / 回应中 / last utterance) left of the 点歌 button.
+    radio_voice_ = Label(player, "", &qd_font_cjk_28, 0x9ff0b8, 262, 22, 326);
+    lv_obj_set_height(radio_voice_, 34);
+    lv_label_set_long_mode(radio_voice_, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(radio_voice_, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_add_flag(radio_voice_, LV_OBJ_FLAG_HIDDEN);
     auto* ask_song = Button(
         player, "点歌", 600, 12, 156, 50,
         [](lv_event_t* event) {
@@ -440,10 +446,12 @@ void Tab5NativeApps::BuildRadio() {
             if (!self->actions_.ask_song)
                 return;
             lv_label_set_text(self->radio_state_, "请说出想听的歌名…");
+            self->SetVoiceStatus("正在连接 Nabo…", true);
             Schedule(self->actions_.ask_song);
         },
         this);
     lv_obj_set_style_bg_color(ask_song, lv_color_hex(0x7a4fd6), 0);
+    ask_song_label_ = lv_obj_get_child(ask_song, 0);
     // Dynamic song/station titles use Noto (much broader CJK) so random
     // NetEase names do not turn into boxes/garbage from the LXGW subset.
     radio_station_ =
@@ -795,6 +803,19 @@ void Tab5NativeApps::SetMusicLyricsWindow(const char* title, const char* artist,
             lv_label_set_text(radio_next_label_, "下一首");
     }
     SetMusicLyricLine(current);
+}
+
+void Tab5NativeApps::SetVoiceStatus(const char* text, bool active) {
+    if (!radio_voice_)
+        return;
+    if (!text || !*text) {
+        lv_obj_add_flag(radio_voice_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_label_set_text(radio_voice_, text);
+        lv_obj_clear_flag(radio_voice_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (ask_song_label_)
+        lv_label_set_text(ask_song_label_, active ? "对话中" : "点歌");
 }
 
 void Tab5NativeApps::ClearMusicLyrics() {

@@ -691,6 +691,18 @@ public:
                                                                          : "今日医学精选")));
         if (!active_ && !speaking_ && !digest_text_.empty() && message_label_)
             lv_label_set_text(message_label_, digest_text_.c_str());
+        if (apps_) {
+            const bool connecting =
+                status && std::strcmp(status, Lang::Strings::CONNECTING) == 0;
+            if (speaking_)
+                apps_->SetVoiceStatus("● Nabo 正在回应", true);
+            else if (active_)
+                apps_->SetVoiceStatus("● 正在聆听，请说歌名", true);
+            else if (connecting)
+                apps_->SetVoiceStatus("正在连接 Nabo…", true);
+            else
+                apps_->SetVoiceStatus("", false);
+        }
     }
 
     void SetChatMessage(const char* role, const char* content) override {
@@ -708,6 +720,14 @@ public:
                               has ? content : "轻触下方按钮，开始对话。");
             if (role && std::strcmp(role, "assistant") == 0 && has)
                 lv_label_set_text(prompt_label_, "Nabo 说");
+            if (apps_ && has && (active_ || speaking_) && role) {
+                const bool user = std::strcmp(role, "user") == 0;
+                if (user || std::strcmp(role, "assistant") == 0) {
+                    std::string line = user ? "你：" : "Nabo：";
+                    line += content;
+                    apps_->SetVoiceStatus(line.c_str(), true);
+                }
+            }
             if (play_radio && apps_)
                 apps_->OpenRadio();
         }

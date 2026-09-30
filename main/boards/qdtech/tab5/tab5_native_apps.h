@@ -66,6 +66,9 @@ public:
     void SetFirmwareStatus(const char* text, const char* button, int progress, bool busy);
     void RefreshStations();
     void SetRadioState(const char* station, const char* state, const char* meta);
+    // Voice-assistant status on the radio/music page (点歌). Empty text hides it.
+    // Must be called with the display lock held.
+    void SetVoiceStatus(const char* text, bool active);
     void SetMusicLyric(const char* title, const char* artist, const char* line);
     void SetMusicLyricLine(const char* line);
     void SetMusicLyricsWindow(const char* title, const char* artist, const char* previous,
@@ -119,6 +122,8 @@ private:
     lv_obj_t* radio_lyric_previous_ = nullptr;
     lv_obj_t* radio_lyric_next_ = nullptr;
     lv_obj_t* radio_next_label_ = nullptr;
+    lv_obj_t* radio_voice_ = nullptr;
+    lv_obj_t* ask_song_label_ = nullptr;
     const lv_font_t* music_font_ = nullptr;
     lv_obj_t* radio_play_label_ = nullptr;
     lv_obj_t* station_rows_[kRows] = {};
