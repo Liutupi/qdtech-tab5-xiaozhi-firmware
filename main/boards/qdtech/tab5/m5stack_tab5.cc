@@ -4,6 +4,10 @@
 #if CONFIG_QDTECH_TAB5_NATIVE_UI
 #include "icu_calculators.h"
 #include "tab5_music_lyrics.h"
+#include "tab5_muse_inbox.h"
+#include "tab5_sd_assets.h"
+#include "assets.h"
+#include "lvgl_font.h"
 #include "tab5_native_display.h"
 #include "tab5_vision_service.h"
 #else
@@ -19,6 +23,7 @@
 #include "esp_video.h"
 #include "esp_video_init.h"
 #include "ir_service.h"
+#include "ir_store.h"
 #include "mcp_server.h"
 #include "radio_service.h"
 #include "tab5_audio_codec.h"
@@ -291,29 +296,93 @@ private:
     // Sticky: true while the user is in a continuous (daily recommendation) session,
     // so the player's "下一首" button can skip to the next recommended song.
     std::atomic<bool> music_continuous_session_{false};
-    std::atomic<int> music_next_retries_{0};
+    // Next-song request state. A request is "pending" from the moment the previous song
+    // ended until a new play_url arrives (music_play_count_ changes) or we give up. While
+    // pending, the request is re-sent when the assistant turn ends without a song, and the
+    // song that does arrive keeps the session continuous even if the model forgot the flag.
+    std::atomic<bool> music_next_pending_{false};
+    std::atomic<uint32_t> music_play_count_{0};
+    uint32_t music_next_base_count_ = 0;
+    int music_next_attempts_ = 0;
+    int64_t music_next_started_us_ = 0;
+    int64_t music_next_last_attempt_us_ = 0;
     esp_timer_handle_t music_next_timer_ = nullptr;
     esp_timer_handle_t ask_song_timer_ = nullptr;
     static constexpr const char* kMusicNextCommand = "继续播放下一首每日推荐";
+    static constexpr int kMusicNextMaxAttempts = 3;
+    static constexpr int64_t kMusicNextAnswerWaitUs = 40LL * 1000 * 1000;
+    static constexpr int64_t kMusicNextGiveUpUs = 150LL * 1000 * 1000;
 
     static void MusicNextTimerCb(void* arg) {
         auto* board = static_cast<QdtechTab5Board*>(arg);
-        if (Application::GetInstance().InvokeTextCommand(kMusicNextCommand)) {
-            ESP_LOGI(TAG, "continuous music: requested next song");
+        Application::GetInstance().Schedule([board] { board->MusicNextTick(); });
+    }
+
+    void ArmMusicNextTimer(int delay_ms) {
+        if (!music_next_timer_)
+            return;
+        esp_timer_stop(music_next_timer_);
+        esp_timer_start_once(music_next_timer_, uint64_t(delay_ms) * 1000);
+    }
+
+    void SetNextSongStatus(const char* line) {
+        if (display_)
+            static_cast<QdtechTab5Display*>(display_)->SetMusicInfo("每日推荐", "", line);
+    }
+
+    // Runs on the main task. Drives one next-song request to completion.
+    void MusicNextTick() {
+        if (!music_next_pending_.load())
+            return;
+        if (music_play_count_.load() != music_next_base_count_) {
+            music_next_pending_.store(false);  // a song arrived
             return;
         }
-        const int left = board->music_next_retries_.fetch_sub(1);
-        if (left > 0) {
-            ESP_LOGW(TAG, "continuous music: device busy, retry (%d left)", left - 1);
-            esp_timer_start_once(board->music_next_timer_, 3000 * 1000);
-        } else {
-            ESP_LOGW(TAG, "continuous music: gave up requesting next song");
+        auto& app = Application::GetInstance();
+        const auto state = app.GetDeviceState();
+        const int64_t now = esp_timer_get_time();
+        const int64_t since_attempt = now - music_next_last_attempt_us_;
+        // Wait for the assistant's answer, but not when the turn is already over (back to
+        // idle) without a song: a successful answer bumps music_play_count_ before that.
+        const bool waiting_answer =
+            music_next_attempts_ > 0 && since_attempt < kMusicNextAnswerWaitUs &&
+            !(state == kDeviceStateIdle && since_attempt > 12LL * 1000 * 1000);
+        if (now - music_next_started_us_ > kMusicNextGiveUpUs ||
+            (music_next_attempts_ >= kMusicNextMaxAttempts && !waiting_answer)) {
+            ESP_LOGW(TAG, "continuous music: no next song after %d request(s), giving up",
+                     music_next_attempts_);
+            music_next_pending_.store(false);
+            music_continuous_session_.store(false);
+            SetNextSongStatus("没取到下一首，可说“继续播放每日推荐”");
+            return;
         }
+        if (waiting_answer) {
+            ArmMusicNextTimer(2000);
+            return;
+        }
+        if (music_next_attempts_ > 0 && state == kDeviceStateListening) {
+            // The assistant answered without starting a song and is now just listening:
+            // close this turn so the request can be sent again.
+            ESP_LOGW(TAG, "continuous music: turn ended without a song, closing it to retry");
+            app.ToggleChatState();
+            ArmMusicNextTimer(1500);
+            return;
+        }
+        if (state == kDeviceStateIdle && app.InvokeTextCommand(kMusicNextCommand)) {
+            ++music_next_attempts_;
+            music_next_last_attempt_us_ = now;
+            ESP_LOGI(TAG, "continuous music: requested next song (attempt %d)",
+                     music_next_attempts_);
+            SetNextSongStatus(music_next_attempts_ == 1 ? "正在获取下一首…"
+                                                        : "正在重新获取下一首…");
+        }
+        ArmMusicNextTimer(2000);
     }
 
     void EndContinuousSession() {
         music_continuous_.store(false);
         music_continuous_session_.store(false);
+        music_next_pending_.store(false);
         if (music_next_timer_)
             esp_timer_stop(music_next_timer_);
     }
@@ -321,7 +390,7 @@ private:
     void OnMusicEndedNaturally() {
         if (!music_continuous_.exchange(false))
             return;
-        RequestNextSong(1500);
+        RequestNextSong(800);
     }
 
     // Skip button: only meaningful inside a continuous session.
@@ -332,7 +401,7 @@ private:
         music_continuous_.store(false);  // the stop below must not count as a natural end
         if (native_radio_ready_.load())
             radio_service_.Stop();
-        RequestNextSong(800);
+        RequestNextSong(600);
         return true;
     }
 
@@ -348,13 +417,26 @@ private:
                 return;
             }
         }
-        music_next_retries_.store(5);
-        esp_timer_stop(music_next_timer_);
+        music_next_base_count_ = music_play_count_.load();
+        music_next_attempts_ = 0;
+        music_next_started_us_ = esp_timer_get_time();
+        music_next_last_attempt_us_ = 0;
+        music_next_pending_.store(true);
+        music_continuous_session_.store(true);
         // Give the stream task time to release the speaker / external-audio mode.
-        esp_timer_start_once(music_next_timer_, uint64_t(delay_ms) * 1000);
-        if (display_)
-            static_cast<QdtechTab5Display*>(display_)->SetMusicInfo(
-                "每日推荐", "", "正在获取下一首…");
+        ArmMusicNextTimer(delay_ms);
+        SetNextSongStatus("正在获取下一首…");
+    }
+
+    // Called for every play_url (MCP or UDP). Returns the effective continuous flag.
+    bool NoteMusicPlayRequest(bool continuous) {
+        if (music_next_pending_.load())
+            continuous = true;  // the answer to our own next-song request
+        music_next_pending_.store(false);
+        music_play_count_.fetch_add(1);
+        music_continuous_.store(continuous);
+        music_continuous_session_.store(continuous);
+        return continuous;
     }
 
     struct MusicLookupRequest {
@@ -381,22 +463,29 @@ private:
         return result;
     }
 
+    // Lyrics are looked up while the song is already playing: the display keeps its own
+    // playback clock, so timed LRC that arrives a moment later still lines up.
     static void MusicLookupTask(void* arg) {
         {
             std::unique_ptr<MusicLookupRequest> request(static_cast<MusicLookupRequest*>(arg));
-            vTaskDelay(pdMS_TO_TICKS(250));
-            auto lyrics =
-                tab5_music_lyrics::Lookup(request->title, request->artist, request->song_id);
+            // Let the MP3 stream connect first so both don't fight over the network.
+            vTaskDelay(pdMS_TO_TICKS(1200));
             auto* board = request->board;
             const auto generation = request->generation;
-            Application::GetInstance().Schedule(
-                [board, generation, title = std::move(request->title),
-                 artist = std::move(request->artist), url = std::move(request->url),
-                 lyrics = std::move(lyrics)] {
-                    if (board->music_request_generation_.load() != generation)
-                        return;
-                    board->StartMusicNow(title, artist, url, lyrics);
-                });
+            if (board->music_request_generation_.load() == generation) {
+                auto lyrics =
+                    tab5_music_lyrics::Lookup(request->title, request->artist, request->song_id);
+                if (!lyrics.empty()) {
+                    Application::GetInstance().Schedule(
+                        [board, generation, title = std::move(request->title),
+                         lyrics = std::move(lyrics)] {
+                            if (board->music_request_generation_.load() != generation)
+                                return;
+                            static_cast<QdtechTab5Display*>(board->display_)
+                                ->SetMusicLyrics(lyrics.c_str(), title.c_str());
+                        });
+                }
+            }
         }
         vTaskDelete(nullptr);
     }
@@ -412,10 +501,9 @@ private:
         tab5_lrc::Document supplied_lyrics;
         if (tab5_lrc::Parse(lyrics, supplied_lyrics) && supplied_lyrics.timed)
             return StartMusicNow(title, artist, url, lyrics);
-        radio_service_.Stop();
-        auto* display = static_cast<QdtechTab5Display*>(display_);
-        display->BeginMusicTrack(title.c_str(), artist.c_str());
-        display->SetMusicInfo(title.c_str(), artist.c_str(), "正在查找歌词…");
+        auto result = StartMusicNow(title, artist, url, "");
+        if (result.rfind("Music URL was NOT started", 0) == 0)
+            return result;
         auto* request = new (std::nothrow)
             MusicLookupRequest{this, generation, title, artist, url, song_id};
         TaskHandle_t task = nullptr;
@@ -424,13 +512,11 @@ private:
                                                       request, 2, &task, 0,
                                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
                     : pdFAIL;
-        if (created != pdPASS) {
+        if (created != pdPASS)
             delete request;
-            return StartMusicNow(title, artist, url, "");
-        }
         return std::string(
-            "Song queued on Tab5; matching lyrics are being fetched before audio starts. "
-            "No spoken follow-up is needed.");
+            "Song is playing on Tab5; lyrics are fetched automatically. No spoken follow-up "
+            "is needed.");
     }
 
     // ---- LAN UDP control (NAS NetEase service pushes the next song here when the cloud
@@ -510,7 +596,10 @@ private:
                              static_cast<unsigned>(lrc.size()));
                     Application::GetInstance().Schedule(
                         [board, t = std::move(t), a = std::move(a), u = std::move(u),
-                         lrc = std::move(lrc)] { board->PlayMusicRequest(t, a, u, lrc, ""); });
+                         lrc = std::move(lrc)] {
+                            board->NoteMusicPlayRequest(false);
+                            board->PlayMusicRequest(t, a, u, lrc, "");
+                        });
                 }
                 // Per-line lyric packets are ignored: Tab5 shows its own timed lyrics.
                 cJSON_Delete(root);
@@ -526,6 +615,40 @@ private:
         if (xTaskCreatePinnedToCoreWithCaps(MusicUdpTask, "music_udp", 6144, this, 2, &task, 0,
                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS)
             music_udp_started_.store(false);
+    }
+
+    // Large resources kept on the SD card (flash assets partition is full). Currently the
+    // Noto common CJK text font: downloaded once, then loaded into PSRAM at every boot.
+    static void StartSdAssetsTask(QdtechTab5Board* board) {
+        xTaskCreatePinnedToCoreWithCaps(
+            [](void* arg) {
+                auto* self = static_cast<QdtechTab5Board*>(arg);
+                // Runs on a PSRAM stack: must never touch flash (no NVS / mmap / OTA APIs).
+                const auto& font = tab5_sd_assets::TextFont();
+                if (!tab5_sd_assets::Present(font)) {
+                    // Wait for Wi-Fi (up to 10 min), then fetch it once.
+                    for (int i = 0; i < 300 && !WifiManager::GetInstance().IsConnected(); ++i)
+                        vTaskDelay(pdMS_TO_TICKS(2000));
+                    vTaskDelay(pdMS_TO_TICKS(15000));  // let the voice session settle first
+                    if (!tab5_sd_assets::Ensure(font)) {
+                        ESP_LOGW(TAG, "text font not available; using the built-in basic font");
+                        vTaskDelete(nullptr);
+                        return;
+                    }
+                }
+                size_t loaded = 0;
+                void* data = tab5_sd_assets::LoadToPsram(font, &loaded);
+                if (data) {
+                    // Kept for the lifetime of the firmware: LVGL references the glyph data.
+                    auto text_font = std::make_shared<LvglCBinFont>(data);
+                    if (text_font->font() && self->display_ && self->display_->SetTextFont(text_font))
+                        ESP_LOGI(TAG, "SD text font loaded (%u bytes)", unsigned(loaded));
+                    else
+                        ESP_LOGW(TAG, "SD text font rejected");
+                }
+                vTaskDelete(nullptr);
+            },
+            "sd_assets", 8192, board, 2, nullptr, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
 
     void EnsureNativeRadio() {
@@ -577,7 +700,10 @@ private:
                     });
         mcp.AddTool("self.radio.stop", "Stop internet radio playback.", PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
-                        EndContinuousSession();
+                        // While Tab5 itself asked for the next song, a stop from the model is
+                        // just its "stop before play" habit: keep the session alive.
+                        if (!music_next_pending_.load())
+                            EndContinuousSession();
                         ++music_request_generation_;
                         if (native_radio_ready_.load())
                             radio_service_.Stop();
@@ -656,140 +782,155 @@ private:
                 return std::string("Daily cards updated");
             });
         mcp.AddTool(
-            "self.ir.scan",
-            "Probe IR receiver wiring: count signal edges on candidate GPIOs for N seconds. "
-            "Press any remote button while it runs. The GPIO with the highest count is the "
-            "IR receiver data pin.",
-            PropertyList({Property("seconds", kPropertyTypeInteger, 5, 1, 20)}),
-            [this](const PropertyList& p) -> ReturnValue {
-                static const int kGpios[] = {14, 15, 16, 17, 18, 19, 20, 21,
-                                             24, 25, 33, 34, 35, 45, 46, 47,
-                                             48, 49, 50, 51, 52, 53, 54};
-                const int sec = p["seconds"].value<int>();
-                return IrService::GetInstance().ScanGpios(kGpios,
-                                                           sizeof(kGpios) / sizeof(kGpios[0]),
-                                                           sec);
+            "self.ir.list",
+            "List the infrared devices (TV, air conditioner, fan, ...) the user has set up on the "
+            "Tab5 IR remote, with the keys that have been learned. Call before self.ir.send when "
+            "unsure of the exact names.",
+            PropertyList(),
+            [](const PropertyList&) -> ReturnValue {
+                ir::Store::GetInstance().Load();
+                return ir::Store::GetInstance().SummaryJson();
             });
         mcp.AddTool(
+            "self.ir.send",
+            "Send a learned infrared key, e.g. device=空调 key=开机, device=电视 key=音量+. Names are "
+            "matched loosely (打开/关闭 map to 开机/关机/电源). Only learned keys can be sent; if it "
+            "fails, tell the user to learn that key on the Tab5 红外遥控 page.",
+            PropertyList({Property("device", kPropertyTypeString, std::string("")),
+                          Property("key", kPropertyTypeString)}),
+            [](const PropertyList& p) -> ReturnValue {
+                auto& store = ir::Store::GetInstance();
+                store.Load();
+                int device_id = -1, key_id = -1;
+                std::string resolved;
+                if (!store.Find(p["device"].value<std::string>(), p["key"].value<std::string>(),
+                                &device_id, &key_id, &resolved))
+                    return std::string("No learned IR key matches. Learned keys: ") + store.SummaryJson();
+                std::vector<uint16_t> t;
+                uint32_t carrier = 38000;
+                int repeat = 1;
+                store.GetTimings(device_id, key_id, &t, &carrier, &repeat);
+                const auto cfg = store.GetConfig();
+                const bool ok =
+                    IrService::GetInstance().Send(cfg.tx_gpio, t.data(), t.size(), cfg.active_high, carrier, repeat);
+                return ok ? "Sent IR key " + resolved : std::string("IR transmit failed");
+            });
+        // Wiring/debug helpers: user-only so they do not count against the assistant's tool limit.
+        mcp.AddUserOnlyTool(
+            "self.ir.scan",
+            "Probe IR receiver wiring: count edges on candidate GPIOs while a remote button is pressed.",
+            PropertyList({Property("seconds", kPropertyTypeInteger, 5, 1, 20)}),
+            [](const PropertyList& p) -> ReturnValue {
+                static const int kGpios[] = {14, 15, 16, 17, 18, 19, 20, 21, 24, 25, 33, 34,
+                                             35, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54};
+                return IrService::GetInstance().ScanGpios(kGpios, sizeof(kGpios) / sizeof(kGpios[0]),
+                                                          p["seconds"].value<int>());
+            });
+        mcp.AddUserOnlyTool(
+            "self.ir.learn",
+            "Learn one IR code on the receiver pin and return its timings_us.",
+            PropertyList({Property("timeout_ms", kPropertyTypeInteger, 8000, 1000, 30000)}),
+            [](const PropertyList& p) -> ReturnValue {
+                return IrService::GetInstance().LearnFrame(ir::Store::GetInstance().GetConfig().rx_gpio,
+                                                           p["timeout_ms"].value<int>());
+            });
+        mcp.AddUserOnlyTool(
             "self.ir.send_raw",
-            "Send a raw IR frame on tx_gpio. Provide mark/space durations in microseconds, "
-            "starting with a mark (e.g. NEC: 9000,4500, 560,560, ...).",
-            PropertyList({Property("gpio", kPropertyTypeInteger, 53, 0, 54),
-                          Property("timings_us", kPropertyTypeString)}),
-            [this](const PropertyList& p) -> ReturnValue {
-                const int gpio = p["gpio"].value<int>();
-                const auto timings = p["timings_us"].value<std::string>();
+            "Send raw mark/space microsecond timings (comma separated, starting with a mark).",
+            PropertyList({Property("timings_us", kPropertyTypeString),
+                          Property("carrier_hz", kPropertyTypeInteger, 38000, 20000, 60000)}),
+            [](const PropertyList& p) -> ReturnValue {
+                const auto text = p["timings_us"].value<std::string>();
                 std::vector<uint16_t> us;
-                size_t pos = 0;
-                while (pos < timings.size() && us.size() < 240) {
-                    auto comma = timings.find(',', pos);
-                    auto token = timings.substr(pos, comma - pos);
-                    if (!token.empty())
-                        us.push_back((uint16_t)atoi(token.c_str()));
+                for (size_t pos = 0; pos < text.size() && us.size() < 1500;) {
+                    const size_t comma = text.find(',', pos);
+                    const int v = atoi(text.substr(pos, comma - pos).c_str());
+                    if (v > 0)
+                        us.push_back(uint16_t(std::min(v, 65535)));
                     if (comma == std::string::npos)
                         break;
                     pos = comma + 1;
                 }
                 if (us.empty())
                     return std::string("no timings");
-                bool ok = IrService::GetInstance().SendRaw(gpio, us.data(), us.size());
-                return ok ? std::string("IR sent") : std::string("IR send failed");
+                const auto cfg = ir::Store::GetInstance().GetConfig();
+                return IrService::GetInstance().Send(cfg.tx_gpio, us.data(), us.size(), cfg.active_high,
+                                                     uint32_t(p["carrier_hz"].value<int>()), 1)
+                           ? std::string("IR sent")
+                           : std::string("IR send failed");
             });
-        mcp.AddTool(
-            "self.ir.learn",
-            "Learn one IR frame from an existing remote. Point the remote at the IR receiver "
-            "and press a button. Returns timings_us JSON; save it for later self.ir.send_raw. "
-            "Default gpio 54 is the Tab5 Port A IR receiver pin.",
-            PropertyList({Property("gpio", kPropertyTypeInteger, 54, 0, 54),
-                          Property("timeout_ms", kPropertyTypeInteger, 8000, 1000, 30000)}),
-            [this](const PropertyList& p) -> ReturnValue {
-                return IrService::GetInstance().LearnFrame(p["gpio"].value<int>(),
-                                                           p["timeout_ms"].value<int>());
-            });
-        mcp.AddTool(
-            "self.ir.send_nec",
-            "Send a NEC IR frame (8-bit addr + cmd). Common for TVs (Xiaomi often uses NEC).",
-            PropertyList({Property("gpio", kPropertyTypeInteger, 53, 0, 54),
-                          Property("addr", kPropertyTypeInteger, 0, 0, 255),
-                          Property("cmd", kPropertyTypeInteger, 0, 0, 255)}),
-            [this](const PropertyList& p) -> ReturnValue {
-                bool ok = IrService::GetInstance().SendNec(p["gpio"].value<int>(),
-                                                           (uint8_t)p["addr"].value<int>(),
-                                                           (uint8_t)p["cmd"].value<int>());
-                return ok ? std::string("NEC sent") : std::string("NEC send failed");
-            });
-        mcp.AddTool(
-            "self.ir.dump_slot",
-            "Dump a learned IR slot from NVS as timings_us JSON.",
-            PropertyList({Property("slot", kPropertyTypeInteger, 0, 0, 19)}),
-            [](const PropertyList& p) -> ReturnValue {
-                const int slot = p["slot"].value<int>();
-                char key[16];
-                snprintf(key, sizeof(key), "s%d", slot);
-                nvs_handle_t h;
-                if (nvs_open("ir_slots", NVS_READONLY, &h) != ESP_OK)
-                    return std::string("{\"ok\":false,\"error\":\"nvs open\"}");
-                size_t len = 0;
-                nvs_get_blob(h, key, nullptr, &len);
-                std::vector<uint16_t> us(len / 2);
-                esp_err_t err = len ? nvs_get_blob(h, key, us.data(), &len) : ESP_ERR_NVS_NOT_FOUND;
-                nvs_close(h);
-                if (err != ESP_OK || us.empty())
-                    return std::string("{\"ok\":false,\"error\":\"slot empty\"}");
-                std::string json = "{\"ok\":true,\"count\":" + std::to_string(us.size() / 2) +
-                                   ",\"timings_us\":[";
-                for (size_t i = 0; i < us.size(); ++i) {
-                    if (i) json += ",";
-                    json += std::to_string(us[i]);
-                }
-                json += "]}";
-                return json;
-            });
-        mcp.AddTool(
+        mcp.AddUserOnlyTool(
             "self.ir.loopback",
-            "TX a learned slot on gpio 53 while listening on gpio 54. If this hears the frame, "
-            "the IR LED path works and the AC unit should see the code.",
-            PropertyList({Property("slot", kPropertyTypeInteger, 0, 0, 19)}),
-            [](const PropertyList& p) -> ReturnValue {
-                const int slot = p["slot"].value<int>();
-                char key[16];
-                snprintf(key, sizeof(key), "s%d", slot);
-                nvs_handle_t h;
-                if (nvs_open("ir_slots", NVS_READONLY, &h) != ESP_OK)
-                    return std::string("{\"ok\":false,\"error\":\"nvs open\"}");
-                size_t len = 0;
-                nvs_get_blob(h, key, nullptr, &len);
-                std::vector<uint16_t> us(len / 2);
-                esp_err_t err = len ? nvs_get_blob(h, key, us.data(), &len) : ESP_ERR_NVS_NOT_FOUND;
-                nvs_close(h);
-                if (err != ESP_OK || us.empty())
-                    return std::string("{\"ok\":false,\"error\":\"slot empty\"}");
-                return IrService::GetInstance().Loopback(53, 54, us.data(), us.size(), 2500);
+            "Transmit a probe frame while listening on the receiver; reports which LED polarity was heard.",
+            PropertyList(),
+            [](const PropertyList&) -> ReturnValue {
+                const auto cfg = ir::Store::GetInstance().GetConfig();
+                const bool high = IrService::GetInstance().LoopbackHeard(cfg.tx_gpio, cfg.rx_gpio, true);
+                const bool low = !high && IrService::GetInstance().LoopbackHeard(cfg.tx_gpio, cfg.rx_gpio, false);
+                return std::string("{\"active_high_heard\":") + (high ? "true" : "false") +
+                       ",\"active_low_heard\":" + (low ? "true" : "false") + "}";
             });
         mcp.AddTool(
             "self.music.play_url",
-            "Play a direct HTTP(S) MP3 song URL on Tab5. Pass the exact title and artist from "
-            "the NAS/NetEase MCP, and its numeric song_id when available. Pass real full timed "
-            "LRC in lyrics if the NAS provides it. Otherwise Tab5 looks up matching NetEase "
-            "lyrics before starting audio. Do not invent or read lyrics aloud. Set continuous "
-            "to true when the NAS play_url_arguments include continuous=true (private FM / "
-            "daily recommendation); Tab5 will then ask for the next song when this one ends.",
+            "Play a direct HTTP(S) MP3 song URL on Tab5. Pass only the exact title, artist, "
+            "url and numeric song_id from the NAS/NetEase result, plus continuous. NEVER pass "
+            "lyrics or lyrics_json, even if the NAS result contains them: Tab5 fetches the "
+            "lyrics itself, and copying them makes the song start very late. Call this right "
+            "away without stopping playback first and without a spoken introduction. Set "
+            "continuous to true when the NAS play_url_arguments include continuous=true "
+            "(private FM / daily recommendation); Tab5 then fetches the next song by itself.",
             PropertyList({Property("title", kPropertyTypeString, std::string("Music")),
                           Property("artist", kPropertyTypeString, std::string("")),
                           Property("url", kPropertyTypeString),
-                          Property("lyrics", kPropertyTypeString, std::string("")),
                           Property("song_id", kPropertyTypeString, std::string("")),
                           Property("continuous", kPropertyTypeBoolean, false)}),
             [this](const PropertyList& p) -> ReturnValue {
-                const bool continuous = p["continuous"].value<bool>();
-                music_continuous_.store(continuous);
-                music_continuous_session_.store(continuous);
+                NoteMusicPlayRequest(p["continuous"].value<bool>());
                 return PlayMusicRequest(p["title"].value<std::string>(),
                                         p["artist"].value<std::string>(),
-                                        p["url"].value<std::string>(),
-                                        p["lyrics"].value<std::string>(),
+                                        p["url"].value<std::string>(), std::string(),
                                         p["song_id"].value<std::string>());
             });
+        mcp.AddTool(
+            "self.muse.inbox",
+            "Read the latest messages that the user's Muse agent pushed to the Tab5 inbox "
+            "(newest first). Use when the user asks what Muse sent / 有什么推送. Summarize them "
+            "briefly in speech; they are also shown in the Tab5 Muse app.",
+            PropertyList({Property("limit", kPropertyTypeInteger, 3, 1, 10)}),
+            [](const PropertyList& p) -> ReturnValue {
+                auto& inbox = tab5_muse::Inbox::GetInstance();
+                const auto snapshot = inbox.Current();
+                if (!snapshot.ever_ok)
+                    return std::string("Muse inbox relay on the NAS is not reachable yet (") +
+                           snapshot.host + ").";
+                if (snapshot.messages.empty())
+                    return std::string("The Muse inbox is empty.");
+                const int limit = p["limit"].value<int>();
+                std::string out;
+                int n = 0;
+                for (const auto& m : snapshot.messages) {
+                    if (n++ >= limit)
+                        break;
+                    out += "[" + m.time + "] " + m.title + "\n" + m.body + "\n\n";
+                }
+                inbox.MarkAllSeen();
+                return out;
+            });
+        mcp.AddUserOnlyTool("self.muse.set_url",
+                    "Set the public Muse relay URL (the MCP URL .../mcp/<token> or the inbox URL "
+                    ".../inbox/<token>). Used by the setup script; do not call from conversation.",
+                    PropertyList({Property("url", kPropertyTypeString)}),
+                    [](const PropertyList& p) -> ReturnValue {
+                        return tab5_muse::Inbox::GetInstance().SetUrl(p["url"].value<std::string>());
+                    });
+        mcp.AddUserOnlyTool("self.muse.set_host",
+                    "Set the NAS address (host:port) of the Muse inbox relay. Default "
+                    "192.168.3.200:8787. Only when the user asks to change it.",
+                    PropertyList({Property("host", kPropertyTypeString)}),
+                    [](const PropertyList& p) -> ReturnValue {
+                        tab5_muse::Inbox::GetInstance().SetHost(p["host"].value<std::string>());
+                        return true;
+                    });
         mcp.AddTool("self.music.get_status",
                     "Get direct-song playback state: stopped, playing, ended, or unavailable.",
                     PropertyList(), [this](const PropertyList&) -> ReturnValue {
@@ -840,6 +981,13 @@ private:
                     });
         mcp.AddTool("self.music.stop", "Stop song playback.", PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
+                        if (music_next_pending_.load()) {
+                            // Answering our own next-song request: nothing to stop yet.
+                            ++music_request_generation_;
+                            if (native_radio_ready_.load())
+                                radio_service_.Stop();
+                            return true;
+                        }
                         EndContinuousSession();
                         ++music_request_generation_;
                         if (native_radio_ready_.load())
@@ -1678,6 +1826,19 @@ public:
                     static_cast<QdtechTab5Display*>(self->display_)->LoadSdFallbackFont();
                     lvgl_port_unlock();
                 }
+                // Learned IR codes: load now (SD mounted or not) so the remote page and the
+                // voice tool do not wait for the card later.
+                ir::Store::GetInstance().Load();
+                // Assets::GetInstance() may mmap the flash partition, which needs an
+                // internal-RAM stack — decide here, before handing off to the PSRAM task.
+                if (Tab5SdReady()) {
+                    void* ptr = nullptr;
+                    size_t size = 0;
+                    if (Assets::GetInstance().GetAssetData(tab5_sd_assets::TextFont().name, ptr, size))
+                        ESP_LOGI(TAG, "text font is in the flash assets; SD copy not needed");
+                    else
+                        StartSdAssetsTask(self);
+                }
                 vTaskDelete(nullptr);
             },
             "tab5_sd_font", 10 * 1024, this, 2, nullptr);
@@ -1832,6 +1993,8 @@ public:
             actions.nes_rom_name = [this](int i) { return fc_emulator_service_.RomNameAt(i); };
             actions.nes_rom_index = [this] { return fc_emulator_service_.CurrentRomIndex(); };
             actions.firmware_action = [] { Tab5Ota::GetInstance().HandleButton(); };
+            actions.muse_refresh = [] { tab5_muse::Inbox::GetInstance().RequestRefresh(); };
+            actions.muse_opened = [] { tab5_muse::Inbox::GetInstance().MarkAllSeen(); };
             native_display->SetAppsActions(std::move(actions), [this] {
                 EnsureNativeRadio();
                 radio_service_.Play();
@@ -1841,6 +2004,16 @@ public:
                                                   status.busy);
             });
             RegisterNativeTools();
+            tab5_muse::Inbox::GetInstance().Start(
+                [native_display, announced = std::make_shared<std::atomic<int>>(-1)](
+                    const tab5_muse::Snapshot& snapshot) {
+                    // First successful poll after boot only records the baseline; later
+                    // increases of latest_id with unread messages are "new arrivals".
+                    const int previous = announced->exchange(snapshot.latest_id);
+                    const bool new_arrival = previous >= 0 && snapshot.latest_id > previous &&
+                                             snapshot.Unread() > 0;
+                    native_display->SetMuseInbox(snapshot, new_arrival);
+                });
             native_display->SetPresenceTestAction([this] { vision_service_.RequestPresenceTest(); });
             native_display->SetInteractionAction([this] { vision_service_.NotifyInteraction(); });
             if (camera_) vision_service_.Start(camera_, native_display);

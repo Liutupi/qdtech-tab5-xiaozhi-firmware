@@ -1,0 +1,13 @@
+services:
+  muse-relay:
+    image: jks0831/node18-alpine:latest
+    container_name: muse-relay
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/data
+    environment:
+      DATA_DIR: /data
+      TZ: Asia/Shanghai
+    command: ["sh", "-c", "while [ ! -f /data/start.sh ]; do sleep 5; done; exec sh /data/start.sh"]

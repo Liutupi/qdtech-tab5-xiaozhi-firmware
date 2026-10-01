@@ -568,7 +568,7 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
+        if (GetDeviceState() == kDeviceStateSpeaking && !IsExternalAudioActive()) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -633,17 +633,26 @@ void Application::InitializeProtocol() {
                 StartNotification(std::move(url), std::move(subtitles));
             });
         } else if (strcmp(type->valuestring, "tts") == 0) {
+            if (IsExternalAudioActive()) {
+                return;
+            }
             auto state = cJSON_GetObjectItem(root, "state");
             if (!cJSON_IsString(state)) {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
+                    if (IsExternalAudioActive()) {
+                        return;
+                    }
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
+                    if (IsExternalAudioActive()) {
+                        return;
+                    }
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
@@ -860,6 +869,12 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
                 return;
             }
         }
+        if (GetDeviceState() != kDeviceStateConnecting) {
+            if (IsExternalAudioActive() && protocol_->IsAudioChannelOpened()) {
+                protocol_->CloseAudioChannel();
+            }
+            return;
+        }
         SetListeningMode(mode);
     };
     if (auto* background = GetBackgroundTask()) {
@@ -923,6 +938,9 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::HandleWakeWordDetectedEvent() {
+    if (IsExternalAudioActive()) {
+        return;
+    }
     if (!protocol_) {
         return;
     }
@@ -1017,6 +1035,12 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
                 return;
             }
         }
+        if (GetDeviceState() != kDeviceStateConnecting) {
+            if (IsExternalAudioActive() && protocol_->IsAudioChannelOpened()) {
+                protocol_->CloseAudioChannel();
+            }
+            return;
+        }
         after_open();
     };
     if (auto* background = GetBackgroundTask()) {
@@ -1106,6 +1130,10 @@ void Application::StartListeningAudio() {
     // Runs in the main loop, either directly from HandleStateChangedEvent or
     // deferred via MAIN_EVENT_PLAYBACK_DRAINED once the playback queue drains.
     if (GetDeviceState() != kDeviceStateListening) {
+        return;
+    }
+    if (IsExternalAudioActive()) {
+        pending_listening_start_ = true;
         return;
     }
 
@@ -1331,6 +1359,12 @@ bool Application::InvokeTextCommand(const std::string& text) {
                 SetDeviceState(kDeviceStateIdle);
                 return;
             }
+            if (GetDeviceState() != kDeviceStateConnecting) {
+                if (IsExternalAudioActive() && protocol_->IsAudioChannelOpened()) {
+                    protocol_->CloseAudioChannel();
+                }
+                return;
+            }
             ESP_LOGI(TAG, "text command: %s", text.c_str());
             protocol_->SendWakeWordDetected(text);
             SetListeningMode(GetDefaultListeningMode());
@@ -1485,7 +1519,15 @@ void Application::SetExternalAudioActive(bool active) {
         // Defer mic bring-up. A stream reconnect can briefly clear the flag;
         // re-enabling the mic reconfigures shared duplex I2S and can kill TX.
         Schedule([this]() {
-            if (external_audio_active_.load() || GetDeviceState() != kDeviceStateIdle) {
+            if (external_audio_active_.load()) {
+                return;
+            }
+            if (GetDeviceState() == kDeviceStateListening) {
+                pending_listening_start_ = false;
+                StartListeningAudio();
+                return;
+            }
+            if (GetDeviceState() != kDeviceStateIdle) {
                 return;
             }
             audio_service_.EnableWakeWordDetection(true);
@@ -1496,6 +1538,11 @@ void Application::SetExternalAudioActive(bool active) {
 void Application::PrepareExternalAudioPlayback() {
     SetExternalAudioActive(true);
     Schedule([this]() {
+        if (!IsExternalAudioActive()) {
+            return;
+        }
+        pending_listening_start_ = false;
+        play_popup_on_listening_ = false;
         if (protocol_ && protocol_->IsAudioChannelOpened()) {
             protocol_->CloseAudioChannel();
         }

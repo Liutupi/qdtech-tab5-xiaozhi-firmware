@@ -28,7 +28,12 @@
                 "CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y",
                 "CONFIG_ESP32P4_REV_MIN_100=y",
                 "CONFIG_LV_USE_FREETYPE=y",
-                "CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=512"
+                "CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=512",
+                "CONFIG_USE_CUSTOM_WAKE_WORD=y",
+                "CONFIG_CUSTOM_WAKE_WORD=\"ni hao na bo;ni hao xiao zhi\"",
+                "CONFIG_CUSTOM_WAKE_WORD_DISPLAY=\"你好Nabo;你好小智\"",
+                "CONFIG_CUSTOM_WAKE_WORD_THRESHOLD=20",
+                "CONFIG_SR_MN_CN_MULTINET7_QUANT=y"
             ]
         },
         {
@@ -57,7 +62,15 @@
                 "CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y",
                 "CONFIG_ESP32P4_REV_MIN_100=y",
                 "CONFIG_LV_USE_FREETYPE=y",
-                "CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=512"
+                "CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=512",
+                "CONFIG_USE_CUSTOM_WAKE_WORD=y",
+                "CONFIG_CUSTOM_WAKE_WORD=\"ni hao na bo;ni hao xiao zhi\"",
+                "CONFIG_CUSTOM_WAKE_WORD_DISPLAY=\"你好Nabo;你好小智\"",
+                "CONFIG_CUSTOM_WAKE_WORD_THRESHOLD=20",
+                "CONFIG_SR_MN_CN_MULTINET7_QUANT=y",
+                "CONFIG_LV_USE_LZ4=y",
+                "CONFIG_LV_USE_LZ4_INTERNAL=y",
+                "CONFIG_LV_BIN_DECODER_RAM_LOAD=y"
             ]
         },
         {

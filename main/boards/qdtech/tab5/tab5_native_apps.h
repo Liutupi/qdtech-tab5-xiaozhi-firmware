@@ -9,6 +9,7 @@
 #include "lvgl.h"
 #include "tab5_icu_page.h"
 #include "tab5_ir_remote_page.h"
+#include "tab5_muse_inbox.h"
 
 // A full-resolution second page for device controls and internet radio.
 // All methods that touch LVGL are called while the display lock is held.
@@ -44,6 +45,9 @@ public:
         std::function<int()> nes_rom_index;
         // Settings -> 固件升级 (check / install)
         std::function<void()> firmware_action;
+        // Muse inbox: poll the NAS now / the user opened the inbox (mark read).
+        std::function<void()> muse_refresh;
+        std::function<void()> muse_opened;
     };
 
     explicit Tab5NativeApps(lv_obj_t* screen);
@@ -53,6 +57,9 @@ public:
     void OpenRadio();
     void OpenNes();
     void OpenIr();
+    void OpenMuse();
+    // Called with the display lock held.
+    void SetMuseInbox(const tab5_muse::Snapshot& snapshot);
     void OpenIcu(int mode = -1, const std::string& external_result = "");
     static void Schedule(std::function<void()> action);
     // Feed one NES 256x240 RGB565 frame; scaled to 960x720 (4:3) on the game page.
@@ -86,6 +93,16 @@ private:
     lv_obj_t* settings_page_ = nullptr;
     lv_obj_t* radio_page_ = nullptr;
     lv_obj_t* game_page_ = nullptr;
+    lv_obj_t* muse_page_ = nullptr;
+    lv_obj_t* muse_list_ = nullptr;
+    lv_obj_t* muse_status_ = nullptr;
+    lv_obj_t* muse_url_ = nullptr;
+    lv_obj_t* muse_entry_label_ = nullptr;
+    int muse_rendered_latest_ = -1;
+    size_t muse_rendered_count_ = 0;
+    int muse_rendered_seen_ = -1;
+    void BuildMuse();
+    void RenderMuseList(const tab5_muse::Snapshot& snapshot);
     std::unique_ptr<Tab5IcuPage> icu_page_;
     std::unique_ptr<Tab5IrRemotePage> ir_page_;
     lv_obj_t* game_canvas_ = nullptr;

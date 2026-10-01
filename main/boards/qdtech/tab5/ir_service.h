@@ -1,11 +1,16 @@
 #pragma once
+#include <cstddef>
+#include <atomic>
 #include <cstdint>
-#include <functional>
 #include <mutex>
 #include <string>
+#include <vector>
 
-// Lightweight IR RX probe + TX via RMT. Used to detect wiring (e.g. "AEC" pad)
-// and later send NEC/raw frames from OpenClaw.
+// IR receive (learning) and transmit through the ESP32-P4 RMT peripheral.
+//
+// Timings are stored as alternating mark/space durations in microseconds, starting with a
+// mark: [mark, space, mark, space, ...]. A value may be up to 65535 us, so the gap between
+// the parts of a multi-frame air-conditioner code is kept.
 class IrService {
 public:
     static IrService& GetInstance() {
@@ -13,23 +18,30 @@ public:
         return instance;
     }
 
+    // Learn one button press on rx_gpio. Waits up to timeout_ms for the first frame, then keeps
+    // listening briefly for follow-up frames (multi-part AC codes). NEC repeat codes and exact
+    // repeats of an already captured frame are dropped. Returns false with a Chinese reason.
+    bool Learn(int rx_gpio, int timeout_ms, std::vector<uint16_t>* timings, std::string* error,
+               const std::atomic<bool>* cancel = nullptr);
+
+    // Transmit timings on tx_gpio with a carrier. active_high selects the LED drive polarity.
+    bool Send(int tx_gpio, const uint16_t* timings, size_t count, bool active_high = true,
+              uint32_t carrier_hz = 38000, int repeat = 1);
+
+    // Transmit a test frame on tx_gpio while listening on rx_gpio. True when the receiver
+    // heard it (the module's own receiver usually sees its LED). Used to find the polarity.
+    bool LoopbackHeard(int tx_gpio, int rx_gpio, bool active_high);
+
     // Count edges on each GPIO for `seconds`. Returns JSON: {"gpio":count,...}
     std::string ScanGpios(const int* gpios, size_t n, int seconds);
 
-    // Learn one IR frame on rx_gpio for up to timeout_ms. Returns
-    // {"ok":true,"timings_us":[mark,space,...]} or {"ok":false,"error":"..."}.
+    // JSON wrappers kept for the MCP debug tools.
     std::string LearnFrame(int rx_gpio, int timeout_ms);
+    bool SendRaw(int tx_gpio, const uint16_t* marks_spaces_us, size_t count) {
+        return Send(tx_gpio, marks_spaces_us, count, true, 38000, 1);
+    }
 
-    // Send a raw mark/space microsecond pattern on tx_gpio (NEC-style).
-    bool SendRaw(int tx_gpio, const uint16_t* marks_spaces_us, size_t count);
-
-    // Send a NEC frame (addr, cmd; addr/cmd are 8-bit).
-    bool SendNec(int tx_gpio, uint8_t addr, uint8_t cmd);
-
-    // TX a frame on tx_gpio while capturing on rx_gpio. Returns RX JSON.
-    // Used to verify the TX path independently of the AC unit.
-    std::string Loopback(int tx_gpio, int rx_gpio, const uint16_t* marks_spaces_us,
-                         size_t count, int timeout_ms = 2000);
+    static std::string TimingsToJson(const std::vector<uint16_t>& timings);
 
 private:
     IrService() = default;

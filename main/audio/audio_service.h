@@ -212,6 +212,7 @@ private:
     std::atomic<bool> service_stopped_{true};
     std::atomic<bool> audio_input_need_warmup_{false};
     std::atomic<bool> external_playback_active_{false};
+    std::mutex audio_control_mutex_;
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;

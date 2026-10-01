@@ -985,12 +985,13 @@ def main():
             "language": language,
             "duration": 3000,  # Default duration in ms
             "threshold": custom_wake_word_config['threshold'],
+            # Several wake phrases may be given separated by ';' (display texts likewise).
             "commands": [
-                {
-                    "command": custom_wake_word_config['wake_word'],
-                    "text": custom_wake_word_config['display'],
-                    "action": "wake"
-                }
+                {"command": word.strip(), "text": (texts[i] if i < len(texts) else texts[-1]).strip(),
+                 "action": "wake"}
+                for i, word in enumerate(custom_wake_word_config['wake_word'].split(';'))
+                for texts in [custom_wake_word_config['display'].split(';')]
+                if word.strip()
             ]
         }
         print(f"  custom wake word: {custom_wake_word_config['wake_word']} ({custom_wake_word_config['display']})")

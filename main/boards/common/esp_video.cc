@@ -897,6 +897,9 @@ bool EspVideo::CaptureVisionFrame(uint8_t* rgb, size_t capacity,
     if (!rgb || capacity < size_t(kWidth) * kHeight * 3 ||
         !streaming_on_ || video_fd_ < 0) return false;
     std::lock_guard<std::mutex> capture_lock(capture_mutex_);
+    // PauseStream can stop the driver while this sampler waits for the lock.
+    // Never dequeue from a stopped stream: DQBUF may block with the lock held.
+    if (!streaming_on_ || stream_paused_ || video_fd_ < 0) return false;
     struct v4l2_buffer buf = {};
     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     buf.memory = V4L2_MEMORY_MMAP;

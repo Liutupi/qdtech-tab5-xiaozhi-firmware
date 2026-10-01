@@ -1,9 +1,9 @@
 #pragma once
 
 #include <esp_heap_caps.h>
-#include "settings.h"
 #include <esp_log.h>
 #include <unistd.h>
+#include "settings.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -11,6 +11,7 @@
 #include <ctime>
 #include <functional>
 #include <memory>
+#include <new>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -20,12 +21,15 @@
 #include "display/lcd_display.h"
 #include "display/lvgl_display/lvgl_font.h"
 #include "display/lvgl_display/lvgl_theme.h"
-#include "tab5_native_apps.h"
 #include "font/binfont_loader/lv_binfont_loader.h"
+#include "nabo_animation.h"
 #include "nabo_assets.h"
+#include "nabo_reactions.h"
+#include "src/draw/lv_image_decoder_private.h"
 #include "src/misc/cache/instance/lv_image_cache.h"
 #include "tab5_clinical_pearls.h"
 #include "tab5_daily_content.h"
+#include "tab5_home_animation.h"
 #include "tab5_lrc.h"
 #include "tab5_native_apps.h"
 
@@ -40,6 +44,14 @@ class QdtechTab5Display : public MipiLcdDisplay {
     lv_obj_t* blink_ = nullptr;
     lv_obj_t* mouth_ = nullptr;
     lv_obj_t* wave_ = nullptr;
+    nabo::WaveGeometry pose_geometry_ = NaboWaveGeometry();
+    bool pose_has_hand_ = true;
+    bool pose_has_head_ = true;
+    lv_obj_t* wave_legs_ = nullptr;
+    lv_obj_t* wave_torso_ = nullptr;
+    lv_obj_t* wave_head_ = nullptr;
+    lv_obj_t* wave_hand_ = nullptr;
+    lv_obj_t* wave_cuff_ = nullptr;
     lv_obj_t* sleep_ = nullptr;
     lv_obj_t* ambient_[3] = {};
     lv_obj_t* sleep_z_[3] = {};
@@ -59,9 +71,18 @@ class QdtechTab5Display : public MipiLcdDisplay {
     std::string digest_text_;
     bool has_digest_ = false;
     lv_font_t* sd_fallback_font_ = nullptr;
-    unsigned next_blink_tick_ = 65;
-    unsigned blink_step_ = 0;
-    int wave_frame_ = -1;
+    tab5_home::Animation face_animation_;
+    unsigned eye_frame_ = 0;
+    lv_obj_t* thought_[3] = {};
+    int bar_heights_[5] = {};
+    nabo::Animation pose_animation_;
+    uint64_t last_touch_ms_ = 0;
+    uint64_t next_idle_reaction_ms_ = 0;
+    unsigned touch_reaction_ = 0;
+    unsigned idle_reaction_ = 0;
+    nabo::PendingEmotion pending_emotion_;
+    bool awaiting_reply_ = false;
+    uint32_t greeting_started_ms_ = 0;
     lv_obj_t* message_label_ = nullptr;
     lv_obj_t* prompt_label_ = nullptr;
     lv_obj_t* button_label_ = nullptr;
@@ -77,8 +98,9 @@ class QdtechTab5Display : public MipiLcdDisplay {
     lv_obj_t* waveform_[5] = {};
     lv_timer_t* animation_timer_ = nullptr;
     unsigned tick_ = 0;
-    unsigned wave_ticks_ = 0;
-    unsigned greeting_ticks_ = 0;
+    uint32_t animation_started_ms_ = 0;
+    bool wave_active_ = false;
+    bool greeting_active_ = false;
     bool active_ = false;
     bool speaking_ = false;
     bool sleeping_ = false;
@@ -342,9 +364,145 @@ class QdtechTab5Display : public MipiLcdDisplay {
         return obj;
     }
 
-    void ShowWave() {
-        if (interaction_action_)
-            interaction_action_();
+    static void SetVisible(lv_obj_t* obj, bool visible) {
+        if (!obj || visible == !lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN))
+            return;
+        if (visible)
+            lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    static lv_obj_t* WavePart(lv_obj_t* parent, const lv_image_dsc_t* source,
+                              const nabo::LayerGeometry& geometry) {
+        auto* part = lv_image_create(parent);
+        lv_image_set_src(part, source);
+        lv_obj_set_pos(part, geometry.x, geometry.y);
+        lv_image_set_pivot(part, geometry.pivot_x, geometry.pivot_y);
+        lv_image_set_antialias(part, true);
+        lv_obj_clear_flag(part, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(part, LV_OBJ_FLAG_HIDDEN);
+        return part;
+    }
+
+    void DropMotionCache() {
+        for (auto* part : {wave_legs_, wave_torso_, wave_head_, wave_hand_, wave_cuff_}) {
+            if (part)
+                lv_image_cache_drop(lv_image_get_src(part));
+        }
+    }
+
+    void ConfigureMotionRig(nabo::Action action) {
+        DropMotionCache();
+        auto bind = [](lv_obj_t* image, const lv_image_dsc_t* source,
+                       const nabo::LayerGeometry& geometry) {
+            lv_image_set_src(image, source);
+            lv_image_set_pivot(image, geometry.pivot_x, geometry.pivot_y);
+        };
+        pose_has_hand_ = action == nabo::Action::Wave;
+        if (action == nabo::Action::Wave) {
+            pose_has_head_ = true;
+            pose_geometry_ = NaboWaveGeometry();
+            bind(wave_legs_, &nabo_wave_legs, pose_geometry_.legs);
+            bind(wave_torso_, &nabo_wave_torso, pose_geometry_.torso);
+            bind(wave_head_, &nabo_wave_head, pose_geometry_.head);
+            bind(wave_hand_, &nabo_wave_hand, pose_geometry_.hand);
+            bind(wave_cuff_, &nabo_wave_cuff, pose_geometry_.cuff);
+        } else {
+            const auto rig = NaboReactionRig(action);
+            pose_geometry_ = rig.geometry;
+            pose_has_head_ = rig.head != nullptr;
+            pose_has_hand_ = rig.hand != nullptr && rig.cuff != nullptr;
+            bind(wave_legs_, rig.legs, pose_geometry_.legs);
+            bind(wave_torso_, rig.torso, pose_geometry_.torso);
+            if (pose_has_head_)
+                bind(wave_head_, rig.head, pose_geometry_.head);
+            if (pose_has_hand_) {
+                bind(wave_hand_, rig.hand, pose_geometry_.hand);
+                bind(wave_cuff_, rig.cuff, pose_geometry_.cuff);
+            }
+        }
+    }
+
+    bool MotionRigReady(nabo::Action action) {
+        // Pin the complete pose while validating, before hiding the portrait.
+        std::unique_ptr<lv_image_decoder_dsc_t[]> checks(new (std::nothrow)
+                                                             lv_image_decoder_dsc_t[5]{});
+        if (!checks)
+            return false;
+        unsigned opened = 0;
+        bool ready = true;
+        for (auto* part : {wave_legs_, wave_torso_, wave_head_, wave_hand_, wave_cuff_}) {
+            if ((part == wave_head_ && !pose_has_head_) ||
+                ((part == wave_hand_ || part == wave_cuff_) && !pose_has_hand_))
+                continue;
+            const void* source = lv_image_get_src(part);
+            if (!source ||
+                lv_image_decoder_open(&checks[opened], source, nullptr) != LV_RESULT_OK) {
+                ESP_LOGW("NaboPose", "Pose %d layer %u decode failed; keeping complete portrait",
+                         static_cast<int>(action), opened);
+                ready = false;
+                break;
+            }
+            ++opened;
+        }
+        for (unsigned i = 0; i < opened; ++i)
+            lv_image_decoder_close(&checks[i]);
+        return ready;
+    }
+
+    void ApplyWaveMotion(const nabo::WaveMotion& motion) {
+        const auto pose = nabo::BuildWavePose(pose_geometry_, motion);
+        auto place = [](lv_obj_t* image, const nabo::LayerPose& part) {
+            lv_obj_set_pos(image, nabo::Pixel(part.x), nabo::Pixel(part.y));
+            lv_image_set_rotation(image, (part.angle + 3600) % 3600);
+        };
+        place(wave_legs_, pose.legs);
+        place(wave_torso_, pose.torso);
+        if (pose_has_head_)
+            place(wave_head_, pose.head);
+        if (pose_has_hand_) {
+            place(wave_hand_, pose.hand);
+            place(wave_cuff_, pose.cuff);
+        }
+    }
+
+    void SetWaveRig(bool enabled) {
+        for (auto* part : {wave_legs_, wave_torso_, wave_head_, wave_hand_, wave_cuff_}) {
+            if (!part)
+                continue;
+            if (enabled && (pose_has_head_ || part != wave_head_) &&
+                (pose_has_hand_ || (part != wave_hand_ && part != wave_cuff_)))
+                lv_obj_remove_flag(part, LV_OBJ_FLAG_HIDDEN);
+            else
+                lv_obj_add_flag(part, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (!enabled)
+            DropMotionCache();
+        // Keep decoded PNGs for the current motion and release them when it ends.
+        if (animation_timer_)
+            lv_timer_set_period(animation_timer_, enabled ? 20 : 40);
+        if (auto* refresh = lv_display_get_refr_timer(display_))
+            lv_timer_set_period(refresh, enabled ? 20 : LV_DEF_REFR_PERIOD);
+    }
+
+    void CancelWave() {
+        wave_active_ = false;
+        pose_animation_.Stop();
+        SetWaveRig(false);
+        SetVisible(wave_, false);
+        SetVisible(portrait_, !sleeping_ && !preview_active_);
+    }
+
+    static uint64_t AnimationTimeMs() { return esp_timer_get_time() / 1000; }
+
+    void ShowAction(nabo::Action action) {
+        // Keep live speaking mouth patches visible; large pose swaps are brief.
+        if (speaking_ || preview_active_ || (active_ && action == nabo::Action::Wave))
+            return;
+        const uint64_t now = AnimationTimeMs();
+        if (pose_animation_.Current(now) == action)
+            return;
         if (sleeping_) {
             sleeping_ = false;
             lv_obj_add_flag(sleep_, LV_OBJ_FLAG_HIDDEN);
@@ -355,110 +513,159 @@ class QdtechTab5Display : public MipiLcdDisplay {
                 if (dot)
                     lv_obj_remove_flag(dot, LV_OBJ_FLAG_HIDDEN);
         }
-        wave_ticks_ = 28;
-        wave_frame_ = 0;
-        lv_image_set_src(wave_, &nabo_wave_low);
+        if (nabo::Animation::HasMotion(action)) {
+            ConfigureMotionRig(action);
+            if (!MotionRigReady(action)) {
+                CancelWave();
+                return;
+            }
+        }
+        wave_active_ = true;
+        pose_animation_.Start(action, now);
+        face_animation_.ResetEyes(lv_tick_get());
+        eye_frame_ = 0;
         lv_obj_set_x(wave_, 106);
         lv_obj_add_flag(portrait_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(blink_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
         mouth_frame_ = 0;
         lv_obj_remove_flag(wave_, LV_OBJ_FLAG_HIDDEN);
+        if (nabo::Animation::HasMotion(action))
+            ApplyWaveMotion(pose_animation_.Motion(now));
+        SetWaveRig(nabo::Animation::HasMotion(action));
+    }
+
+    void ShowWave() {
+        if (interaction_action_)
+            interaction_action_();
+        ShowAction(nabo::Action::Wave);
+    }
+
+    void TouchNabo() {
+        if (interaction_action_)
+            interaction_action_();
+        pending_emotion_.Clear();
+        const uint64_t now = AnimationTimeMs();
+        const bool double_tap = last_touch_ms_ && now - last_touch_ms_ < 400;
+        last_touch_ms_ = now;
+        static constexpr nabo::Action reactions[] = {
+            nabo::Action::Wave, nabo::Action::Wink, nabo::Action::Encourage, nabo::Action::Curious};
+        ShowAction(double_tap ? nabo::Action::Happy : reactions[touch_reaction_++ % 4]);
+        next_idle_reaction_ms_ = now + 18000;
     }
 
     void Tick() {
-        ++tick_;
-        UpdateClock();
-        if (apps_)
-            apps_->Tick();
-        if (apps_ && apps_->IsSettingsVisible() && tick_ % 40 == 0)
-            apps_->RefreshWifi();
-        RefreshMusicLyrics();
-        if (apps_ && apps_->IsVisible())
+        const uint32_t now = lv_tick_get();
+        const unsigned service_tick = (now - animation_started_ms_) / 50;
+        // Keep application polling/carousel cadence at 50 ms while face
+        // patches target 25 fps. A delayed callback never runs a catch-up loop.
+        if (service_tick != tick_) {
+            const bool refresh_wifi = service_tick / 40 != tick_ / 40;
+            tick_ = service_tick;
+            UpdateClock();
+            if (apps_)
+                apps_->Tick();
+            if (apps_ && apps_->IsSettingsVisible() && refresh_wifi)
+                apps_->RefreshWifi();
+            RefreshMusicLyrics();
+        }
+        if (apps_ && apps_->IsVisible()) {
+            pending_emotion_.Clear();
+            if (wave_active_)
+                CancelWave();
             return;
+        }
         if (tick_ >= next_page_tick_)
             ShowDailyPage(NextDailyPage());
         if (preview_active_)
             return;
         if (sleeping_) {
-            if (tick_ % 6 == 0) {
-                for (unsigned i = 0; i < 3; ++i) {
-                    const unsigned phase = (tick_ / 6 + i * 4) % 16;
-                    lv_obj_set_pos(sleep_z_[i], 344 + static_cast<int>(i) * 32,
-                                   135 - static_cast<int>(phase) * 3);
-                    lv_obj_set_style_opa(
-                        sleep_z_[i],
-                        static_cast<lv_opa_t>(phase < 8 ? 55 + phase * 22 : 231 - (phase - 8) * 28),
-                        0);
-                }
+            for (unsigned i = 0; i < 3; ++i) {
+                const uint32_t phase = (now + i * 1600) % 4800;
+                lv_obj_set_y(sleep_z_[i], 135 - static_cast<int>(phase * 48 / 4800));
+                const int fade = phase < 2400 ? phase : 4800 - phase;
+                lv_obj_set_style_opa(sleep_z_[i], 35 + fade * 196 / 2400, 0);
             }
             return;
         }
-        if (greeting_ticks_)
-            --greeting_ticks_;
-        if (wave_ticks_) {
-            const unsigned elapsed = 28 - wave_ticks_;
-            const int frame = elapsed < 4 || elapsed >= 22    ? 0
-                              : elapsed < 10 || elapsed >= 16 ? 1
-                                                              : 2;
-            if (frame != wave_frame_) {
-                wave_frame_ = frame;
-                lv_image_set_src(wave_, frame == 0   ? &nabo_wave_low
-                                        : frame == 1 ? &nabo_wave
-                                                     : &nabo_wave_side);
-                lv_obj_set_x(wave_, frame == 2 ? 78 : 106);
-            }
-            if (--wave_ticks_ == 0) {
-                lv_obj_add_flag(wave_, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_remove_flag(portrait_, LV_OBJ_FLAG_HIDDEN);
+        if (greeting_active_ && now - greeting_started_ms_ >= 3000)
+            greeting_active_ = false;
+        const uint64_t pose_now = AnimationTimeMs();
+        const auto current_pose = pose_animation_.Current(pose_now);
+        if (active_ && !speaking_ && Application::GetInstance().IsVoiceDetected()) {
+            pending_emotion_.Clear();
+            if (current_pose != nabo::Action::Idle && current_pose != nabo::Action::Listen &&
+                current_pose != nabo::Action::Think)
+                ShowAction(nabo::Action::Listen);
+        }
+        const bool speech_pending =
+            speaking_ || !Application::GetInstance().GetAudioService().IsPlaybackIdle();
+        const auto pending =
+            pending_emotion_.Take(pose_now,
+                                  !speech_pending && !awaiting_reply_ &&
+                                      pose_animation_.Current(pose_now) == nabo::Action::Idle &&
+                                      (!active_ || !Application::GetInstance().IsVoiceDetected()),
+                                  speech_pending);
+        if (pending != nabo::Action::Idle) {
+            ShowAction(pending);
+            next_idle_reaction_ms_ = pose_now + 18000;
+        }
+        if (!active_ && !wave_active_ && pose_now >= next_idle_reaction_ms_) {
+            ShowAction(music_playing_ ? nabo::Action::Music : nabo::IdleAction(idle_reaction_++));
+            next_idle_reaction_ms_ = pose_now + 18000 + pose_now % 7000;
+        }
+        if (wave_active_) {
+            const auto action = pose_animation_.Current(pose_now);
+            const int frame = pose_animation_.Frame(pose_now);
+            if (frame < 0) {
+                CancelWave();
+                face_animation_.ResetEyes(now);
+            } else if (nabo::Animation::HasMotion(action)) {
+                ApplyWaveMotion(pose_animation_.Motion(pose_now));
             }
         }
-        // Blink redraws a 312x125 eye patch, never the full character.
-        if (!wave_ticks_ && tick_ >= next_blink_tick_) {
-            if (blink_step_ == 0 || blink_step_ == 2) {
-                lv_image_set_src(blink_, &nabo_half_blink);
-                lv_obj_remove_flag(blink_, LV_OBJ_FLAG_HIDDEN);
-            } else if (blink_step_ == 1) {
-                lv_image_set_src(blink_, &nabo_closed_blink);
-            } else {
+        auto& application = Application::GetInstance();
+        const bool playback = speaking_ && !application.GetAudioService().IsPlaybackIdle();
+        const auto frame =
+            face_animation_.Sample(now, active_ && !speaking_ && application.IsVoiceDetected(),
+                                   playback, greeting_active_);
+        // Blink and mouth stay aligned with the original portrait. No full-body
+        // translation/scale or per-frame allocations in the speaking path.
+        const unsigned eyes = wave_active_ ? 0 : frame.eyes;
+        if (eyes != eye_frame_ || (eyes && lv_obj_has_flag(blink_, LV_OBJ_FLAG_HIDDEN))) {
+            eye_frame_ = eyes;
+            if (!eyes) {
                 lv_obj_add_flag(blink_, LV_OBJ_FLAG_HIDDEN);
-            }
-            blink_step_ = (blink_step_ + 1) % 4;
-            next_blink_tick_ = tick_ + (blink_step_ ? 2 : 64 + (tick_ * 37) % 55);
-        }
-        if (tick_ % 4 == 0) {
-            for (unsigned i = 0; i < 3; ++i) {
-                const unsigned phase = (tick_ / 4 + i * 5) % 20;
-                lv_obj_set_y(ambient_[i],
-                             112 + static_cast<int>(i) * 69 - static_cast<int>(phase / 5));
-                lv_obj_set_style_opa(
-                    ambient_[i], static_cast<lv_opa_t>(active_ ? 120 + phase * 5 : 70 + phase * 4),
-                    0);
+            } else {
+                lv_image_set_src(blink_, eyes == 1 ? &nabo_half_blink : &nabo_closed_blink);
+                lv_obj_remove_flag(blink_, LV_OBJ_FLAG_HIDDEN);
             }
         }
-        // Twelve 50 ms phoneme beats combine rest, half-open and open artwork.
-        // Changes stay inside a 48x31 mouth patch.
-        static constexpr unsigned kMouth[12] = {0, 1, 1, 2, 2, 1, 0, 1, 2, 1, 0, 0};
-        unsigned next_mouth =
-            (speaking_ || greeting_ticks_) && !wave_ticks_ ? kMouth[tick_ % 12] : 0;
-        if (next_mouth != mouth_frame_) {
-            mouth_frame_ = next_mouth;
-            if (mouth_frame_ == 0) {
+        const unsigned mouth = wave_active_ ? 0 : frame.mouth;
+        if (mouth != mouth_frame_ || (mouth && lv_obj_has_flag(mouth_, LV_OBJ_FLAG_HIDDEN))) {
+            mouth_frame_ = mouth;
+            if (!mouth) {
                 lv_obj_add_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
             } else {
-                lv_image_set_src(mouth_, mouth_frame_ == 1 ? &nabo_mouth_half : &nabo_mouth_open);
+                lv_image_set_src(mouth_, mouth == 1 ? &nabo_mouth_half : &nabo_mouth_open);
                 lv_obj_remove_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
             }
         }
-        static constexpr int kIdle[5] = {12, 19, 26, 17, 11};
-        static constexpr int kActive[5][5] = {
-            {18, 38, 24, 43, 16}, {28, 17, 46, 22, 34}, {14, 36, 21, 42, 27},
-            {32, 22, 39, 17, 30}, {20, 43, 18, 35, 22},
-        };
-        for (int i = 0; i < 5; ++i) {
-            int height = active_ ? kActive[tick_ % 5][i] : kIdle[i];
-            lv_obj_set_height(waveform_[i], height);
-            lv_obj_set_y(waveform_[i], (48 - height) / 2);
+        if (mouth)
+            lv_obj_set_style_opa(mouth_, frame.mouth_opa, 0);
+        for (unsigned i = 0; i < 3; ++i) {
+            lv_obj_set_y(ambient_[i], frame.ambient_y[i]);
+            lv_obj_set_style_opa(ambient_[i], frame.ambient_opa[i], 0);
+            SetVisible(thought_[i], frame.thought_opa[i] != 0);
+            if (frame.thought_opa[i])
+                lv_obj_set_style_opa(thought_[i], frame.thought_opa[i], 0);
+        }
+        for (unsigned i = 0; i < 5; ++i) {
+            if (bar_heights_[i] == frame.bars[i])
+                continue;
+            bar_heights_[i] = frame.bars[i];
+            lv_obj_set_height(waveform_[i], frame.bars[i]);
+            lv_obj_set_y(waveform_[i], (48 - frame.bars[i]) / 2);
         }
     }
 
@@ -483,7 +690,10 @@ public:
             return;
         Display::SetupUI();
         DisplayLockGuard lock(this);
-        lv_image_cache_resize(3 * 1024 * 1024, false);
+        const size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        // Keep the current pose decoded while leaving PSRAM for AFE and person detection.
+        const size_t art_cache = std::min<size_t>(1024 * 1024, psram_free / 2);
+        lv_image_cache_resize(art_cache, false);
         auto* screen = lv_screen_active();
         lv_obj_set_style_bg_color(screen, lv_color_hex(0x0d1b2b), 0);
         lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
@@ -543,9 +753,9 @@ public:
         lv_obj_add_event_cb(
             portrait_,
             [](lv_event_t* e) {
-                static_cast<QdtechTab5Display*>(lv_event_get_user_data(e))->ShowWave();
+                static_cast<QdtechTab5Display*>(lv_event_get_user_data(e))->TouchNabo();
             },
-            LV_EVENT_CLICKED, this);
+            LV_EVENT_SHORT_CLICKED, this);
         lv_obj_add_event_cb(portrait_, PresenceLongPress, LV_EVENT_LONG_PRESSED, this);
 
         blink_ = lv_image_create(emoji_box_);
@@ -558,18 +768,27 @@ public:
         lv_obj_set_pos(mouth_, 231, 361);  // Matches portrait mouth at source x216,y441.
         lv_obj_add_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
 
-        wave_ = lv_image_create(emoji_box_);
-        lv_image_set_src(wave_, &nabo_wave);
+        wave_ = lv_obj_create(emoji_box_);
+        lv_obj_remove_style_all(wave_);
+        lv_obj_set_size(wave_, 300, 561);
+        lv_obj_clear_flag(wave_, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_pos(wave_, 106, -4);
         lv_obj_add_flag(wave_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(wave_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(
             wave_,
             [](lv_event_t* e) {
-                static_cast<QdtechTab5Display*>(lv_event_get_user_data(e))->ShowWave();
+                static_cast<QdtechTab5Display*>(lv_event_get_user_data(e))->TouchNabo();
             },
-            LV_EVENT_CLICKED, this);
+            LV_EVENT_SHORT_CLICKED, this);
         lv_obj_add_event_cb(wave_, PresenceLongPress, LV_EVENT_LONG_PRESSED, this);
+        lv_obj_add_flag(wave_, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+        constexpr auto rig = NaboWaveGeometry();
+        wave_legs_ = WavePart(wave_, &nabo_wave_legs, rig.legs);
+        wave_torso_ = WavePart(wave_, &nabo_wave_torso, rig.torso);
+        wave_hand_ = WavePart(wave_, &nabo_wave_hand, rig.hand);
+        wave_cuff_ = WavePart(wave_, &nabo_wave_cuff, rig.cuff);
+        wave_head_ = WavePart(wave_, &nabo_wave_head, rig.head);
 
         sleep_ = lv_image_create(emoji_box_);
         lv_image_set_src(sleep_, &nabo_sleep);
@@ -579,9 +798,9 @@ public:
         lv_obj_add_event_cb(
             sleep_,
             [](lv_event_t* e) {
-                static_cast<QdtechTab5Display*>(lv_event_get_user_data(e))->ShowWave();
+                static_cast<QdtechTab5Display*>(lv_event_get_user_data(e))->TouchNabo();
             },
-            LV_EVENT_CLICKED, this);
+            LV_EVENT_SHORT_CLICKED, this);
         lv_obj_add_event_cb(sleep_, PresenceLongPress, LV_EVENT_LONG_PRESSED, this);
 
         for (int i = 0; i < 3; ++i) {
@@ -593,6 +812,11 @@ public:
             ambient_[i] = Card(emoji_box_, ambient_x[i], 112 + i * 69, 7 + i * 2, 7 + i * 2,
                                0x81d8eb, 0x81d8eb, 12);
             lv_obj_set_style_opa(ambient_[i], LV_OPA_30, 0);
+        }
+
+        for (unsigned i = 0; i < 3; ++i) {
+            thought_[i] = Card(emoji_box_, 414 + i * 17, 72, 8, 8, 0xa7d9ec, 0xa7d9ec, 4);
+            lv_obj_add_flag(thought_[i], LV_OBJ_FLAG_HIDDEN);
         }
 
         auto* daily_card = Card(screen, 581, 112, 647, 143, 0x122b43, 0x2c536c, 26);
@@ -660,11 +884,13 @@ public:
 
         apps_ = std::make_unique<Tab5NativeApps>(screen);
 
+        animation_started_ms_ = lv_tick_get();
+        next_idle_reaction_ms_ = AnimationTimeMs() + 18000;
         animation_timer_ = lv_timer_create(
             [](lv_timer_t* timer) {
                 static_cast<QdtechTab5Display*>(lv_timer_get_user_data(timer))->Tick();
             },
-            50, this);
+            40, this);
         UpdateClock();
     }
 
@@ -676,30 +902,51 @@ public:
                               status[0] <= '9' && status[1] >= '0' && status[1] <= '9' &&
                               status[2] == ':' && status[3] >= '0' && status[3] <= '9' &&
                               status[4] >= '0' && status[4] <= '9';
-        lv_label_set_text(status_label_, is_clock ? "已就绪" : (status ? status : ""));
-        active_ = status && (std::strcmp(status, Lang::Strings::LISTENING) == 0 ||
-                             std::strcmp(status, Lang::Strings::SPEAKING) == 0);
+        if (is_clock)
+            return;
+        const bool connecting = status && std::strcmp(status, Lang::Strings::CONNECTING) == 0;
+        lv_label_set_text(status_label_, status ? status : "");
+        active_ = connecting || (status && (std::strcmp(status, Lang::Strings::LISTENING) == 0 ||
+                                            std::strcmp(status, Lang::Strings::SPEAKING) == 0));
         speaking_ = status && std::strcmp(status, Lang::Strings::SPEAKING) == 0;
+        if (!is_clock) {
+            awaiting_reply_ = status && std::strcmp(status, Lang::Strings::CONNECTING) == 0;
+            if (awaiting_reply_)
+                pending_emotion_.Clear();
+        }
+        const auto previous_state = face_animation_.state();
+        face_animation_.SetState(speaking_    ? tab5_home::State::Speaking
+                                 : connecting ? tab5_home::State::Thinking
+                                 : active_    ? tab5_home::State::Listening
+                                              : tab5_home::State::Idle,
+                                 lv_tick_get());
+        if (active_ && (speaking_ || previous_state != face_animation_.state())) {
+            CancelWave();
+            greeting_active_ = false;
+            if (!speaking_ && !connecting && previous_state != tab5_home::State::Listening)
+                ShowAction(nabo::Action::Listen);
+        }
         if (button_label_)
             lv_label_set_text(button_label_,
                               speaking_ ? "继续对话" : (active_ ? "结束对话" : "开始对话"));
         if (prompt_label_)
-            lv_label_set_text(prompt_label_, speaking_ ? "Nabo 正在回应"
-                                                       : (active_ ? "Nabo 正在倾听"
-                                                                  : (digest_text_.empty()
-                                                                         ? "随时倾听"
-                                                                         : "今日医学精选")));
+            lv_label_set_text(
+                prompt_label_,
+                speaking_
+                    ? "Nabo 正在回应"
+                    : (connecting
+                           ? "正在连接 Nabo…"
+                           : (active_ ? "Nabo 正在倾听"
+                                      : (digest_text_.empty() ? "随时倾听" : "今日医学精选"))));
         if (!active_ && !speaking_ && !digest_text_.empty() && message_label_)
             lv_label_set_text(message_label_, digest_text_.c_str());
         if (apps_) {
-            const bool connecting =
-                status && std::strcmp(status, Lang::Strings::CONNECTING) == 0;
             if (speaking_)
                 apps_->SetVoiceStatus("● Nabo 正在回应", true);
-            else if (active_)
-                apps_->SetVoiceStatus("● 正在聆听，请说歌名", true);
             else if (connecting)
                 apps_->SetVoiceStatus("正在连接 Nabo…", true);
+            else if (active_)
+                apps_->SetVoiceStatus("● 正在聆听，请说歌名", true);
             else
                 apps_->SetVoiceStatus("", false);
         }
@@ -716,10 +963,19 @@ public:
             DisplayLockGuard lock(this);
             if (!message_label_)
                 return;
-            lv_label_set_text(message_label_,
-                              has ? content : "轻触下方按钮，开始对话。");
+            lv_label_set_text(message_label_, has ? content : "轻触下方按钮，开始对话。");
+            if (role && std::strcmp(role, "user") == 0 && has) {
+                pending_emotion_.Clear();
+                awaiting_reply_ = true;
+            }
+            if (role && std::strcmp(role, "user") == 0 && has && active_ && !speaking_) {
+                face_animation_.SetState(tab5_home::State::Thinking, lv_tick_get());
+                CancelWave();
+                ShowAction(nabo::Action::Think);
+                lv_label_set_text(prompt_label_, "Nabo 正在思考");
+            }
             if (role && std::strcmp(role, "assistant") == 0 && has)
-                lv_label_set_text(prompt_label_, "Nabo 说");
+                lv_label_set_text(prompt_label_, speaking_ ? "Nabo 说" : "Nabo 正在思考");
             if (apps_ && has && (active_ || speaking_) && role) {
                 const bool user = std::strcmp(role, "user") == 0;
                 if (user || std::strcmp(role, "assistant") == 0) {
@@ -742,8 +998,9 @@ public:
 
     void SetEmotion(const char* emotion) override {
         DisplayLockGuard lock(this);
-        if (emotion && std::strcmp(emotion, "happy") == 0 && portrait_)
-            ShowWave();
+        if (!emotion || !portrait_ || preview_active_ || sleeping_ || (apps_ && apps_->IsVisible()))
+            return;
+        pending_emotion_.Store(nabo::EmotionAction(emotion), AnimationTimeMs());
     }
 
     void SetSleeping(bool sleeping) {
@@ -751,7 +1008,17 @@ public:
         if (!sleep_ || sleeping_ == sleeping)
             return;
         sleeping_ = sleeping;
-        wave_ticks_ = 0;
+        pending_emotion_.Clear();
+        awaiting_reply_ = false;
+        wave_active_ = false;
+        pose_animation_.Stop();
+        SetWaveRig(false);
+        next_idle_reaction_ms_ = AnimationTimeMs() + 18000;
+        greeting_active_ = false;
+        mouth_frame_ = eye_frame_ = 0;
+        face_animation_.ResetEyes(lv_tick_get());
+        for (auto* dot : thought_)
+            SetVisible(dot, false);
         lv_obj_add_flag(wave_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(blink_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
@@ -803,7 +1070,8 @@ public:
                 lv_label_set_text(message_label_, digest_text_.c_str());
         }
         ShowWave();
-        greeting_ticks_ = 60;
+        greeting_active_ = !active_;
+        greeting_started_ms_ = lv_tick_get();
     }
 
     void SetPresenceTestAction(std::function<void()> action) {
@@ -816,6 +1084,25 @@ public:
         if (apps_)
             apps_->SetActions(std::move(actions));
         radio_voice_action_ = std::move(voice_play);
+    }
+
+    // Muse inbox update from the poll task. new_arrival: a message newer than any seen before
+    // arrived; show it on the idle home panel so it is noticed without opening the app.
+    void SetMuseInbox(const tab5_muse::Snapshot& snapshot, bool new_arrival) {
+        DisplayLockGuard lock(this);
+        if (!lock.locked())
+            return;
+        if (apps_)
+            apps_->SetMuseInbox(snapshot);
+        if (!new_arrival || active_ || speaking_ || snapshot.messages.empty())
+            return;
+        const auto& latest = snapshot.messages.front();
+        if (prompt_label_)
+            lv_label_set_text(prompt_label_, "Muse 新推送");
+        if (message_label_) {
+            std::string text = latest.title + "\n" + latest.body;
+            lv_label_set_text(message_label_, text.c_str());
+        }
     }
 
     void ShowRadioPage() {
@@ -833,7 +1120,8 @@ public:
 
     // Load a prebuilt LVGL .bin CJK font from SD and use it as fallback for
     // the flash-subset LXGW fonts (missing glyphs render blank otherwise).
-    // Build: lv_font_conv --format bin --size 28 --bpp 4 --font <ttf> --symbols <chars> -o cjk28.bin
+    // Build: lv_font_conv --format bin --size 28 --bpp 4 --font <ttf> --symbols <chars> -o
+    // cjk28.bin
     bool LoadSdFallbackFont() {
         if (sd_fallback_font_)
             return true;
@@ -932,9 +1220,8 @@ public:
         if (prompt_label_)
             lv_label_set_text(prompt_label_, digest_text_.empty() ? "随时倾听" : "今日医学精选");
         if (message_label_)
-            lv_label_set_text(message_label_, digest_text_.empty()
-                                                  ? "轻触下方按钮，开始对话。"
-                                                  : digest_text_.c_str());
+            lv_label_set_text(message_label_, digest_text_.empty() ? "轻触下方按钮，开始对话。"
+                                                                   : digest_text_.c_str());
     }
 
     // Push external digest onto the small daily card (stable all day) and
@@ -1078,6 +1365,8 @@ public:
         else
             music_elapsed_ms_ += now_ms - music_resume_ms_;
         music_playing_ = playing;
+        if (playing)
+            next_idle_reaction_ms_ = static_cast<uint64_t>(now_ms);
     }
 
     bool SetMusicLyrics(const char* lrc, const char* title = nullptr) {
@@ -1146,6 +1435,14 @@ public:
             pixels, kPixels * sizeof(uint16_t), 320, 240, 320 * 2, LV_COLOR_FORMAT_RGB565);
         lv_image_set_src(preview_image_, preview_image_cached_->image_dsc());
         preview_active_ = true;
+        pending_emotion_.Clear();
+        wave_active_ = greeting_active_ = false;
+        pose_animation_.Stop();
+        SetWaveRig(false);
+        mouth_frame_ = eye_frame_ = 0;
+        face_animation_.ResetEyes(lv_tick_get());
+        for (auto* dot : thought_)
+            SetVisible(dot, false);
         lv_obj_add_flag(portrait_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(blink_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(mouth_, LV_OBJ_FLAG_HIDDEN);

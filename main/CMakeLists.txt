@@ -252,6 +252,9 @@ elseif(CONFIG_BOARD_TYPE_QDTECH_TAB5)
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_30_4)
     set(BUILTIN_ICON_FONT font_material_symbols_30_4)
     set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_64)
+    # The 2.5 MB Noto "common" text font is loaded from the SD card at runtime
+    # (tab5_sd_assets), leaving the assets partition for the MultiNet wake-word model.
+    set(DEFAULT_ASSETS_SKIP_TEXT_FONT ON)
 elseif(CONFIG_BOARD_TYPE_M5STACK_ATOM_S3_ECHO_BASE)
     set(BOARD_DIR "m5stack/atoms3-echo-base")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
@@ -928,7 +931,7 @@ if(CONFIG_QDTECH_TAB5_NATIVE_UI)
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/nabo_assets.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/radio_service.cc)
 else()
-    list(FILTER BOARD_SOURCES EXCLUDE REGEX "/(tab5_vision_service|tab5_native_apps|tab5_icu_page|tab5_music_lyrics|icu_calculators)\\.cc$")
+    list(FILTER BOARD_SOURCES EXCLUDE REGEX "/(tab5_vision_service|tab5_native_apps|tab5_icu_page|tab5_music_lyrics|tab5_muse_inbox|tab5_sd_assets|icu_calculators)\\.cc$")
 endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
@@ -1330,7 +1333,7 @@ function(build_default_assets_bin)
     )
 
     # Add builtin text font if defined
-    if(BUILTIN_TEXT_FONT)
+    if(BUILTIN_TEXT_FONT AND NOT DEFAULT_ASSETS_SKIP_TEXT_FONT)
         list(APPEND BUILD_ARGS "--builtin_text_font" "${BUILTIN_TEXT_FONT}")
         string(REPLACE "_basic_" "_common_" COMMON_TEXT_FONT "${BUILTIN_TEXT_FONT}")
         set(COMMON_TEXT_FONT_FILE "${NOTO_FONTS_PATH}/cbin/${COMMON_TEXT_FONT}.bin")

@@ -83,6 +83,7 @@ void Tab5VisionService::Run() {
     int64_t test_deadline = 0;
     const int64_t started_at = esp_timer_get_time();
     std::unique_ptr<PedestrianDetect> detector;
+    int64_t next_detector_attempt = started_at + 25LL * 1000000;
 
     // The camera, SD host and audio network startup share resources at boot.
     // Sleep in slices so radio/music can stop the CSI stream immediately.
@@ -148,11 +149,23 @@ void Tab5VisionService::Run() {
         }
 
         // AFE buffers settle asynchronously; defer the model until voice is idle.
-        if (!detector && now - started_at >= 25LL * 1000000 &&
+        if (!detector && now >= next_detector_attempt &&
             Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
-            detector = std::make_unique<PedestrianDetect>();
-            vision_ready_.store(true);
-            ESP_LOGI(kTag, "Person detector ready");
+            next_detector_attempt = now + 10LL * 1000000;
+            const size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+            const size_t largest_psram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+            // The vendor constructor assumes model allocation succeeds. The packed model is
+            // about 425 KB and its inference arena is 539 KB; retain room for concurrent UI/audio.
+            if (free_psram >= 1920 * 1024 && largest_psram >= 1280 * 1024) {
+                detector = std::make_unique<PedestrianDetect>(PedestrianDetect::PICO_S8_V1, false);
+                vision_ready_.store(true);
+                ESP_LOGI(kTag, "Person detector ready; PSRAM free=%u largest=%u",
+                         unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+                         unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+            } else {
+                ESP_LOGW(kTag, "Deferring person detector: PSRAM free=%u largest=%u",
+                         unsigned(free_psram), unsigned(largest_psram));
+            }
         }
 
         std::array<uint8_t, kGridWidth * kGridHeight> current{};
@@ -285,6 +298,11 @@ void Tab5VisionService::Run() {
                     last_greeting = now;
                     auto* display = display_;
                     Application::GetInstance().Schedule([display] {
+                        auto& app = Application::GetInstance();
+                        if (app.IsExternalAudioActive() ||
+                            app.GetDeviceState() != kDeviceStateIdle) {
+                            return;
+                        }
                         display->WelcomeBack();
                         Application::GetInstance().PlaySound(std::string_view(
                             reinterpret_cast<const char*>(nabo_greeting_ogg),

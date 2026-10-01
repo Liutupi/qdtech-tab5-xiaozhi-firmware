@@ -92,12 +92,15 @@ Tab5NativeApps::Tab5NativeApps(lv_obj_t* screen) {
     settings_page_ = Card(root_, 0, 0, 1280, 720, 0x0d1b2b, 0x0d1b2b, 0);
     radio_page_ = Card(root_, 0, 0, 1280, 720, 0x0d1b2b, 0x0d1b2b, 0);
     game_page_ = Card(root_, 0, 0, 1280, 720, 0x0d1b2b, 0x0d1b2b, 0);
-    for (auto* page : {home_page_, settings_page_, radio_page_, game_page_})
+    muse_page_ = Card(root_, 0, 0, 1280, 720, 0x0d1b2b, 0x0d1b2b, 0);
+    for (auto* page : {home_page_, settings_page_, radio_page_, game_page_, muse_page_})
         lv_obj_set_style_border_width(page, 0, 0);
     BuildHome();
     BuildSettings();
     BuildRadio();
     BuildGame();
+    BuildMuse();
+    lv_obj_add_flag(muse_page_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(settings_page_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(radio_page_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(game_page_, LV_OBJ_FLAG_HIDDEN);
@@ -110,7 +113,7 @@ void Tab5NativeApps::SetActions(Actions actions) {
 }
 
 void Tab5NativeApps::Show(lv_obj_t* page) {
-    for (auto* candidate : {home_page_, settings_page_, radio_page_, game_page_,
+    for (auto* candidate : {home_page_, settings_page_, radio_page_, game_page_, muse_page_,
                            icu_page_ ? icu_page_->object() : nullptr}) {
         if (!candidate) continue;
         lv_obj_add_flag(candidate, LV_OBJ_FLAG_HIDDEN);
@@ -127,6 +130,12 @@ void Tab5NativeApps::Show(lv_obj_t* page) {
 }
 
 void Tab5NativeApps::OpenApps() { Show(home_page_); }
+
+void Tab5NativeApps::OpenMuse() {
+    Show(muse_page_);
+    Schedule(actions_.muse_refresh);
+    Schedule(actions_.muse_opened);
+}
 
 void Tab5NativeApps::OpenSettings() {
     Show(settings_page_);
@@ -149,7 +158,7 @@ void Tab5NativeApps::OpenNes() {
 void Tab5NativeApps::OpenIr() {
     if (!ir_page_)
         ir_page_ = std::make_unique<Tab5IrRemotePage>(root_, [this] { OpenApps(); });
-    for (auto* candidate : {home_page_, settings_page_, radio_page_, game_page_,
+    for (auto* candidate : {home_page_, settings_page_, radio_page_, game_page_, muse_page_,
                            icu_page_ ? icu_page_->object() : nullptr}) {
         if (!candidate) continue;
         lv_obj_add_flag(candidate, LV_OBJ_FLAG_HIDDEN);
@@ -269,12 +278,147 @@ void Tab5NativeApps::BuildHome() {
         static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenNes();
     }, this);
 
-    auto* ir = Card(home_page_, 54, 650, 1172, 50, 0x142d43, 0x35627d, 18);
-    Label(ir, "红外遥控 · 电视 / 空调", &qd_font_lxgw_28, 0x9bb7ca, 24, 10, 400);
+    auto* ir = Card(home_page_, 54, 650, 554, 50, 0x142d43, 0x35627d, 18);
+    Label(ir, "红外遥控 · 电视 / 空调", &qd_font_lxgw_28, 0x9bb7ca, 24, 10, 500);
     lv_obj_add_flag(ir, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(ir, [](lv_event_t* event) {
         static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenIr();
     }, LV_EVENT_CLICKED, this);
+
+    auto* muse = Card(home_page_, 672, 650, 554, 50, 0x1f2a4d, 0x6c5fd0, 18);
+    Card(muse, 14, 13, 6, 22, 0xa99bff, 0xa99bff, 3);
+    muse_entry_label_ = Label(muse, "Muse 推送", &qd_font_cjk_28, 0xd9d3ff, 32, 8, 500);
+    lv_obj_add_flag(muse, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(muse, [](lv_event_t* event) {
+        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenMuse();
+    }, LV_EVENT_CLICKED, this);
+}
+
+void Tab5NativeApps::BuildMuse() {
+    Label(muse_page_, "Muse 推送", &font_noto_sans_basic_30_4, 0xf5f9fd, 52, 30, 440);
+    muse_status_ = Label(muse_page_, "正在连接 NAS…", &qd_font_cjk_28, 0x9bb7ca, 54, 76, 760);
+    lv_label_set_long_mode(muse_status_, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(muse_status_, 34);
+    Button(muse_page_, "刷新", 800, 34, 180, 60, [](lv_event_t* event) {
+        auto* self = static_cast<Tab5NativeApps*>(lv_event_get_user_data(event));
+        lv_label_set_text(self->muse_status_, "正在刷新…");
+        Schedule(self->actions_.muse_refresh);
+    }, this);
+    Button(muse_page_, "返回应用", 1016, 34, 216, 60, [](lv_event_t* event) {
+        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenApps();
+    }, this);
+
+    muse_list_ = lv_obj_create(muse_page_);
+    lv_obj_set_pos(muse_list_, 54, 128);
+    lv_obj_set_size(muse_list_, 1172, 530);
+    lv_obj_set_style_bg_opa(muse_list_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(muse_list_, 0, 0);
+    lv_obj_set_style_pad_all(muse_list_, 0, 0);
+    lv_obj_set_style_pad_row(muse_list_, 14, 0);
+    lv_obj_set_flex_flow(muse_list_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(muse_list_, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(muse_list_, LV_SCROLLBAR_MODE_AUTO);
+
+    muse_url_ = Label(muse_page_, "", &qd_font_cjk_28, 0x7f8fa3, 54, 670, 1172);
+    lv_label_set_long_mode(muse_url_, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(muse_url_, 34);
+
+    tab5_muse::Snapshot empty;
+    RenderMuseList(empty);
+}
+
+void Tab5NativeApps::RenderMuseList(const tab5_muse::Snapshot& snapshot) {
+    lv_obj_clean(muse_list_);
+    muse_rendered_latest_ = snapshot.latest_id;
+    muse_rendered_count_ = snapshot.messages.size();
+    if (snapshot.messages.empty()) {
+        auto* hint = Card(muse_list_, 0, 0, 1150, 190, 0x142d43, 0x35627d, 24);
+        lv_obj_remove_flag(hint, LV_OBJ_FLAG_SCROLLABLE);
+        Label(hint, "还没有推送", &font_noto_sans_basic_30_4, 0xf5f9fd, 30, 26, 1080);
+        auto* text = Label(hint,
+                           "在 Muse 里添加本 NAS 的 MCP 地址 (见页面底部或 NAS 容器日志)，"
+                           "然后让 Muse 用 tab5_push 把整理好的内容推送过来。",
+                           &qd_font_cjk_28, 0xa8c4d3, 30, 80, 1080);
+        lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
+        return;
+    }
+    for (const auto& m : snapshot.messages) {
+        const bool unread = m.id > snapshot.seen_id;
+        auto* card = lv_obj_create(muse_list_);
+        lv_obj_set_width(card, 1150);
+        lv_obj_set_height(card, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_color(card, lv_color_hex(unread ? 0x1f2a4d : 0x142d43), 0);
+        lv_obj_set_style_border_color(card, lv_color_hex(unread ? 0x8a7cf0 : 0x35627d), 0);
+        lv_obj_set_style_border_width(card, unread ? 2 : 1, 0);
+        lv_obj_set_style_radius(card, 22, 0);
+        lv_obj_set_style_pad_all(card, 22, 0);
+        lv_obj_set_style_pad_row(card, 8, 0);
+        lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+        lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+        auto* title = lv_label_create(card);
+        lv_label_set_text(title, m.title.c_str());
+        lv_obj_set_width(title, 1100);
+        lv_obj_set_style_text_font(title, &font_noto_sans_basic_30_4, 0);
+        lv_obj_set_style_text_color(title, lv_color_hex(0xf5f9fd), 0);
+
+        std::string meta = m.time;
+        if (!m.from.empty())
+            meta += "  ·  " + m.from;
+        if (unread)
+            meta += "  ·  新";
+        auto* meta_label = lv_label_create(card);
+        lv_label_set_text(meta_label, meta.c_str());
+        lv_obj_set_style_text_font(meta_label, &qd_font_cjk_28, 0);
+        lv_obj_set_style_text_color(meta_label, lv_color_hex(unread ? 0xb9adff : 0x7f9bb0), 0);
+
+        auto* body = lv_label_create(card);
+        lv_label_set_text(body, m.body.c_str());
+        lv_obj_set_width(body, 1100);
+        lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_font(body, &font_noto_sans_basic_30_4, 0);
+        lv_obj_set_style_text_color(body, lv_color_hex(0xd6e4ee), 0);
+        lv_obj_set_style_text_line_space(body, 6, 0);
+    }
+    lv_obj_scroll_to_y(muse_list_, 0, LV_ANIM_OFF);
+}
+
+void Tab5NativeApps::SetMuseInbox(const tab5_muse::Snapshot& snapshot) {
+    const int unread = snapshot.Unread();
+    if (muse_entry_label_) {
+        char text[64];
+        if (unread > 0)
+            std::snprintf(text, sizeof(text), "Muse 推送 · %d 条新消息", unread);
+        else
+            std::snprintf(text, sizeof(text), "Muse 推送");
+        lv_label_set_text(muse_entry_label_, text);
+    }
+    if (muse_status_) {
+        char text[160];
+        if (!snapshot.ok && !snapshot.ever_ok)
+            std::snprintf(text, sizeof(text), "%s", snapshot.url.empty()
+                                                       ? "还没有设置 Muse 中转站地址"
+                                                       : "无法连接 Muse 中转站，稍后自动重试");
+        else if (!snapshot.ok)
+            std::snprintf(text, sizeof(text), "NAS 暂时无响应，显示的是上次内容");
+        else
+            std::snprintf(text, sizeof(text), "共 %u 条 · 未读 %d · 每 2 分钟自动刷新",
+                          unsigned(snapshot.messages.size()), unread);
+        lv_label_set_text(muse_status_, text);
+    }
+    if (muse_url_) {
+        const std::string url = snapshot.mcp_url.empty()
+                                    ? std::string("Muse 接入地址：公网隧道未就绪")
+                                    : "Muse 接入地址：" + snapshot.mcp_url;
+        lv_label_set_text(muse_url_, url.c_str());
+    }
+    // Rebuild the cards only when the content changed (or read state flipped on open).
+    if (muse_list_ && (snapshot.latest_id != muse_rendered_latest_ ||
+                       snapshot.messages.size() != muse_rendered_count_ ||
+                       snapshot.seen_id != muse_rendered_seen_)) {
+        muse_rendered_seen_ = snapshot.seen_id;
+        RenderMuseList(snapshot);
+    }
 }
 
 void Tab5NativeApps::BuildSettings() {

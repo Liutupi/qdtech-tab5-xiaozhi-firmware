@@ -1,0 +1,33 @@
+{
+  "legs": {
+    "x": 57,
+    "y": 380,
+    "pivot_x": 93,
+    "pivot_y": 181
+  },
+  "torso": {
+    "x": 14,
+    "y": 222,
+    "pivot_x": 136,
+    "pivot_y": 205
+  },
+  "head": {
+    "x": 20,
+    "y": 0,
+    "pivot_x": 131,
+    "pivot_y": 235
+  },
+  "hand": {
+    "x": -3,
+    "y": 183,
+    "pivot_x": 40,
+    "pivot_y": 67
+  },
+  "cuff": {
+    "x": 10,
+    "y": 228,
+    "pivot_x": 27,
+    "pivot_y": 22
+  },
+  "hand_rest_angle": -200
+}

@@ -152,3 +152,27 @@ ESP-IDF 6.0.2 最新构建 `xiaozhi.bin` 大小 `0x775e40`，SHA-256 `0beadda8a9
 **发布新版本**：修改根目录 `CMakeLists.txt` 的 `PROJECT_VER`，`idf.py build` 后把 `build/xiaozhi.bin` 复制为 `qdtech-tab5-vX.Y.Z-app.bin`，生成 `SHA256SUMS.txt`（`shasum -a 256`），连同 tag `vX.Y.Z` 一起发布到 GitHub Release。`ota_0` 里的升级程序只能通过 USB 更新（`updater/`，`idf.py -C updater build`，写入 `0xc20000`）。
 
 **限制**：升级需要 SD 卡、Wi‑Fi，且设备处于空闲状态（不在对话中）。云端/MCP 下发的固件升级在 Tab5 上被拒绝。国内网络访问 GitHub 可能较慢，失败时可稍后重试，或改用 USB 刷写。
+
+## v1.0.4 / v1.0.5 现状（2026-10-01，Claude 交接）
+
+**两版都已在实机上测试、刷入，但尚未发布**：GitHub 上最新版仍是 v1.0.3。工作区里 v1.0.4、v1.0.5 的改动还没有 git commit；发布时照 `tab5-publish-v1.0.2.command` 复制一份，改成新版本号即可（它会 `git add -A`、打 tag、推送并建 Release）。`*.command` 和 `*.patch` 已在 `.gitignore` 里，不会被提交。
+
+- **构建与刷机**：Mac 上的 `tab5-beta-v1.0.1.command`，其中 `VER` 必须与 `CMakeLists.txt` 里的 `PROJECT_VER` 一致（现在是 1.0.5）。它会编译、USB 刷写，再抓 100 秒串口日志检查是否崩溃（现在也会检查 `assert failed` 和反复重启）。只抓串口日志、不重启用 `tab5-serial-capture.command`（900 秒）。刷写前必须关掉占着串口的抓日志窗口。
+- **Muse 推送（v1.0.4）**
+  - 数据流：Muse → Cloudflare 快速隧道 → NAS 容器 `muse-relay`（项目在 NAS 共享文件夹 `docker/新建文件夹`，代码 `tools/muse-relay/`）→ Tab5 每 2 分钟通过隧道拉取 `/inbox/<token>`。NAS 与 Tab5 不在同一局域网，只能走隧道。
+  - token 只存在 NAS 的 `/data/token.txt` 和 Mac 本地的 `tab5-muse-seturl.command` 里，**不要写进仓库**。
+  - 隧道地址在容器重启后会变：relay 把新主机名发布到 ntfy.sh（topic 由 token 的哈希得出），Tab5 连续两次拉取失败后会自动重新查找。Muse 端则需要手动换成新的 MCP 地址（Tab5 的「Muse 推送」页底部会显示）。
+  - 相关代码：`tab5_muse_inbox.*`，MCP 工具 `self.muse.inbox` / `self.muse.set_url`。
+- **唤醒词（v1.0.5）**：换成 MultiNet `mn7_cn` 自定义唤醒词「ni hao na bo;ni hao xiao zhi」（你好Nabo / 你好小智），多个唤醒词用 `;` 分隔（见 `config.json` 与 Mac 的 `sdkconfig`）。模型打包在 flash 的 assets 分区里。
+- **大字库移到 SD 卡（v1.0.5）**
+  - `font_noto_sans_common_30_4.bin`（2.5 MB）不再打包进 assets（`DEFAULT_ASSETS_SKIP_TEXT_FONT`）。`tab5_sd_assets.*` 首次联网时把它下载到 `/sdcard/tab5/`（经 SHA-256 校验，来源是 GitHub 预发布 `sd-assets-v1` 及 ghfast/gh-proxy 镜像），之后每次开机读入 PSRAM。
+  - 通过 OTA 升级、assets 分区仍带字库的旧设备，会继续使用 flash 里的字库。
+  - 注意：在线升级不会改写 assets 分区，所以新唤醒词只有 USB 刷写后才生效。
+- **踩过的坑**：栈放在 PSRAM 上的任务里，**不能**触碰 flash（NVS 写入、`Assets::GetInstance()` 的 mmap、OTA API），否则会触发 `esp_task_stack_is_sane_cache_disabled` 断言并反复重启。凡是涉及 flash 的操作，都要放到内部 RAM 栈的任务里做，或者通过 `Application::Schedule` 交给主任务。
+- **内存**：v1.0.5 开机 45 秒后，内部 RAM 剩约 120 KB（最低 87 KB），PSRAM 约剩 4.2 MB；字库加载后 PSRAM 再少 2.6 MB。以后加 PSRAM 大户（大缓冲、模型）之前，先看 `MemDiag` 日志。
+- **NAS 上的改动不在仓库里**：直接改在容器 `xiaozhi-netease-nabo` 的 `/app/xiaozhi-ws-mcp.js`（去掉了"已在播放"的拦截、把 Tab5 地址改成 192.168.88.101、加了 `continuous`），原文件的备份就在同一目录下的 `.bak-*`。如果容器按镜像重建，这些改动需要重做。
+
+### 每日推荐连播提速（2026-10-01）
+- 慢的根源：NAS 的 `play_url_arguments` 带整首 `lyrics_json`，大模型要把几千字歌词原样写进 `self.music.play_url` 调用，每首多等 20–30 秒；第二首起模型有时漏掉 `continuous`，放完就停。
+- 固件（v106_c.patch）：`self.music.play_url` 不再收歌词，先出声、后台再按 song_id 查歌词；下一首请求若这一轮对话没给出歌曲，会自动重发（最多 3 次、150 秒内）；自己发起的请求所换来的歌一律按连播处理；请求期间模型调用 stop 不会结束连播。
+- NAS：容器 `xiaozhi-netease-nabo` 的 `/app/xiaozhi-ws-mcp.js` 第 425/431 行改为只传 `song_id`、不传歌词（备份 `.bak-pre-nolyrics`），已重启容器。
