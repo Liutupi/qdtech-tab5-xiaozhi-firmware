@@ -25,3 +25,5 @@ P4 + C6 Wi-Fi 实测总报文 1284 字节可到达，1534 字节及以上未到�
 ## 跨网段网易云点歌
 
 v1.0.7 增加 Muse relay 音乐命令通道：NAS 上的网易云 MCP 容器将 `title`、`artist`、`url`、准确的 `song_id` 和 `continuous` 以 JSON `POST` 到同机 relay 的 `/tab5/music`；Tab5 使用已配置的 Muse inbox 地址，每约 4 秒读取 `/music/<token>`，按命令 ID 去重后播放。relay 代码见 `tools/muse-relay/relay.js`。`/tab5/music` 仅接受本机及已配置的容器网关来源，不能通过公网隧道写入；不同 Docker 网络应相应调整允许的来源。这个通道用于 NAS 和 Tab5 不在同一网段、UDP 无法到达设备的场景。公开仓库未包含用户 NAS 的网易云 MCP 容器脚本；部署时需在该容器的播放结果处理处发送上述 JSON，并确保传递真实歌曲 ID。设备端没有 ID 时仍按歌名和歌手查词，有 ID 但歌曲无定时歌词时不会拿同名其他版本的歌词替代。
+
+连续播放只能由一侧负责。Tab5 收到 `continuous=true` 后，会在歌曲自然结束时通过小智请求下一首；NAS 网易云 MCP 若也保存私有电台的自动播放状态并按歌曲时长启动定时器，会在设备待机时自行把新歌推到 relay。接入此通道时，应关闭 **Tab5 对应账号** 的 NAS 后台定时续播和进程重启续播，保留 Tab5 的自然结束续播；其他账号可维持自己的设置。NAS 脚本不在本仓库，修改和回退路径见 `HANDOFF.md`。
