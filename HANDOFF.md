@@ -389,3 +389,9 @@ NAS 在 `192.168.3.0/24`，Tab5 在 `192.168.88.0/24`；原网易云 MCP 容器�
 用户报告无新任务时突然放歌。NAS `xiaozhi-netease-nabo` 日志直接记录 `private fm autoplay next fetching`、`music queued to relay`、`private fm autoplay scheduled`，说明该容器在后台按歌曲时长自行续播；Tab5 固件收到 `continuous=true` 后也会在歌曲自然结束时请求下一首，两端重复负责连播。Nabo 容器还将 `privateFmAutoplay=true` 保存到 `/app/private-fm-autoplay-<账号哈希>.json`，进程重启后会恢复旧会话；检查时该状态已经持续约一小时。relay 的歌曲命令本身只保留约 90 秒，长期待机后的新歌是 NAS 定时器新投递的，不是 relay 长期保存的旧 URL。
 
 已在 NAS 挂载脚本 `/app/xiaozhi-ws-mcp.js` 添加按账号标记的 `tab5ManagedPlayback`：带 `/app/tab5-managed-<账号哈希>` 标记的 Nabo 账号在载入旧状态和处理新的私有电台请求时都不启动 NAS 自动续播，其他账号仍沿用旧逻辑。Nabo 的保存状态已改为 `enabled=false`，只重启了 `xiaozhi-netease-nabo` 容器。脚本和状态文件分别备份为同目录 `.bak-20261003-no-autoplay`；`node --check` 通过，容器重新运行并连接小智，复核 `enabled=false` 且 relay `/tab5/music` 返回空命令。修复发生在 NAS 共享目录，**不在本仓库的固件或 relay 源码中**；重建 NAS 服务时须保留这项门控。未主动下达播放命令做音频回归，以免再次打扰用户；下一次自然使用应确认语音点歌及一首歌结束后的设备端续播。
+
+### 2026-10-03 每日推荐首曲后停止：NAS 直推参数漏传连播标志
+
+关闭 NAS 自动续播后，用户反馈每日推荐播完第一首便停止。排查 Nabo 容器 `/app/xiaozhi-ws-mcp.js`：`toMcpResult` 虽给 AI 文本结果写了 `continuous: true`，但容器直推 relay 使用 `extractPlayUrlArguments(toolResult)`，优先读取网易云 MCP 的 `play_url_arguments`；该对象没有 `continuous`，原代码只检查 `directArgs.continuous === true`，因此 relay 给 Tab5 的首曲是 `continuous=false`。Tab5 的自然结束回调因此不会请求下一首。这是前一轮只关闭 NAS 计时器、未核对直推字段造成的遗漏。
+
+已在 NAS 挂载脚本的直推参数分支补充：仅带 `tab5ManagedPlayback` 标记的 Nabo 账号、且 `toolResult.playResult.mode === "private_fm"` 时把 `continuous` 置真；单曲点歌和其他账号逻辑不变。NAS 独立自动续播仍关闭，重启后也不会恢复旧会话。修改前备份 `/app/xiaozhi-ws-mcp.js.bak-20261003-continuous-fix`；`node --check` 通过，差异只有该条件一行；已重启 Nabo 容器并确认恢复运行。隔离执行部署函数：模拟私人 FM/Nabo 返回 `true`，私人 FM/其他账号及单曲/Nabo 都返回 `false`；重启后专用标记存在且持久状态 `enabled=false`。此部署修改仍在 NAS 共享目录，未同步到本仓库，后续重部署必须保留。真实首曲自然结束接第二首的实机回归尚待串口和用户反馈确认。
