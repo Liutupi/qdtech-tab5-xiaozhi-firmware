@@ -5,6 +5,7 @@
 #include <esp_log.h>
 
 #include <memory>
+#include <algorithm>
 
 #include "board.h"
 #include "settings.h"
@@ -20,6 +21,7 @@ constexpr const char* kDefaultHost = "192.168.3.200:8787";
 constexpr size_t kMaxJsonBytes = 32 * 1024;
 constexpr int kTimeoutMs = 4000;
 constexpr int kPollSeconds = 120;
+constexpr int kMusicPollMs = 4000;
 constexpr int kFirstPollDelayMs = 20000;  // let Wi-Fi and the XiaoZhi session settle first
 
 std::string HttpGet(const std::string& url, int* status_out) {
@@ -78,17 +80,19 @@ Inbox& Inbox::GetInstance() {
     return instance;
 }
 
-void Inbox::Start(Listener listener) {
+void Inbox::Start(Listener listener, MusicListener music_listener) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (task_)
             return;
         listener_ = std::move(listener);
+        music_listener_ = std::move(music_listener);
         Settings settings("museinbox", false);
         snapshot_.host = settings.GetString("host", kDefaultHost);
         snapshot_.url = settings.GetString("url", "");
         topic_ = settings.GetString("topic", "");
         snapshot_.seen_id = settings.GetInt("seen", 0);
+        last_music_id_ = settings.GetString("music_id", "");
     }
     // HTTP + cJSON parsing need a roomy stack; keep it out of internal SRAM.
     if (xTaskCreatePinnedToCoreWithCaps(TaskEntry, "muse_inbox", 8192, this, 2, &task_, 0,
@@ -198,16 +202,75 @@ bool Inbox::Discover() {
     return true;
 }
 
-void Inbox::TaskEntry(void* arg) {
-    static_cast<Inbox*>(arg)->Run();
-}
+void Inbox::TaskEntry(void* arg) { static_cast<Inbox*>(arg)->Run(); }
 
 void Inbox::Run() {
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kFirstPollDelayMs));
     while (true) {
         Poll();
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kPollSeconds * 1000));
+        for (int i = 0; i < kPollSeconds * 1000 / kMusicPollMs; ++i) {
+            PollMusic();
+            if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kMusicPollMs)) > 0)
+                break;
+        }
     }
+}
+
+bool Inbox::PollMusic() {
+    std::string host, url, last_id;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        host = snapshot_.host;
+        url = snapshot_.url;
+        last_id = last_music_id_;
+    }
+    std::string endpoint;
+    if (url.empty()) {
+        endpoint = "http://" + host + "/tab5/music";
+    } else {
+        const auto path = url.find("/inbox/");
+        if (path == std::string::npos)
+            return false;
+        endpoint = url;
+        endpoint.replace(path, 7, "/music/");
+    }
+    int status = 0;
+    const std::string body = HttpGet(endpoint, &status);
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
+        body.empty() ? nullptr : cJSON_ParseWithLength(body.data(), body.size()), cJSON_Delete);
+    if (status != 200 || !cJSON_IsObject(root.get())) {
+        if (++music_failures_ == 2 && !url.empty())
+            Discover();
+        return false;
+    }
+    music_failures_ = 0;
+    MusicCommand command;
+    command.id = JsonString(root.get(), "id");
+    if (command.id.empty() || command.id == last_id)
+        return true;
+    command.title = JsonString(root.get(), "title");
+    command.artist = JsonString(root.get(), "artist");
+    command.url = JsonString(root.get(), "url");
+    command.song_id = JsonString(root.get(), "song_id");
+    command.continuous = cJSON_IsTrue(cJSON_GetObjectItem(root.get(), "continuous"));
+    if (command.id.size() > 64 || command.title.size() > 360 || command.artist.size() > 360 ||
+        command.url.size() > 1200 ||
+        (command.url.rfind("https://", 0) != 0 && command.url.rfind("http://", 0) != 0) ||
+        command.song_id.size() > 20 ||
+        !std::all_of(command.song_id.begin(), command.song_id.end(),
+                     [](char c) { return c >= '0' && c <= '9'; })) {
+        ESP_LOGW(TAG, "invalid music command ignored");
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_music_id_ = command.id;
+    }
+    SaveLater("music_id", command.id);
+    ESP_LOGI(TAG, "music command id=%s title=%s", command.id.c_str(), command.title.c_str());
+    if (music_listener_)
+        music_listener_(command);
+    return true;
 }
 
 bool Inbox::Poll() {

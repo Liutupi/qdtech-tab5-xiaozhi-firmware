@@ -151,11 +151,15 @@ std::string FindSongId(const std::string& title, const std::string& artist) {
     auto* songs = cJSON_GetObjectItem(result, "songs");
     if (!cJSON_IsArray(songs))
         return {};
-    // Pass 1: exact (normalized) title + any matching artist. Pass 2: normalized title
-    // only. Pass 3: the top result when its title contains ours (e.g. "(Live)" suffix).
+    // When an artist was supplied, a title-only result can belong to another
+    // recording of the same song. Use the relaxed passes only when there is no
+    // artist to check.
     const std::string want_title = Normalize(title);
     const auto want_artists = SplitArtists(artist);
-    for (int pass = 0; pass < 3; ++pass) {
+    if (!artist.empty() && want_artists.empty())
+        return {};
+    const int passes = artist.empty() ? 3 : 1;
+    for (int pass = 0; pass < passes; ++pass) {
         cJSON* song = nullptr;
         cJSON_ArrayForEach (song, songs) {
             auto* name = cJSON_GetObjectItem(song, "name");
@@ -192,8 +196,6 @@ std::string FindSongId(const std::string& title, const std::string& artist) {
             ESP_LOGI(TAG, "Song matched on pass %d id=%s", pass, id_text);
             return id_text;
         }
-        if (pass == 2)
-            break;
     }
     return {};
 }
@@ -242,8 +244,13 @@ std::string Lookup(const std::string& title, const std::string& artist,
     ESP_LOGI(TAG, "Looking up NetEase lyrics title_bytes=%u artist_bytes=%u",
              unsigned(title.size()), unsigned(artist.size()));
     std::string text;
-    if (ValidSongId(song_id))
+    if (ValidSongId(song_id)) {
+        // A known song ID is authoritative. Searching by title after a missing LRC can
+        // select another recording with the same title and display incorrect lyrics.
         text = FetchTimedLrc(song_id);
+        if (text.empty())
+            return {};
+    }
     if (text.empty()) {
         const std::string id = FindSongId(title, artist);
         if (!ValidSongId(id)) {

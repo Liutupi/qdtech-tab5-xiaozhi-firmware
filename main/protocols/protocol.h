@@ -58,14 +58,17 @@ public:
 
     virtual bool Start() = 0;
     virtual bool OpenAudioChannel() = 0;
+    // Called from another task before a queued close. Implementations must only
+    // signal cancellation here; socket teardown belongs to CloseAudioChannel().
+    virtual void CancelOpen() {}
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
-    virtual void SendWakeWordDetected(const std::string& wake_word);
-    virtual void SendStartListening(ListeningMode mode);
-    virtual void SendStopListening();
-    virtual void SendAbortSpeaking(AbortReason reason);
-    virtual void SendMcpMessage(const std::string& message);
+    virtual bool SendWakeWordDetected(const std::string& wake_word);
+    virtual bool SendStartListening(ListeningMode mode);
+    virtual bool SendStopListening();
+    virtual bool SendAbortSpeaking(AbortReason reason);
+    virtual bool SendMcpMessage(const std::string& message);
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

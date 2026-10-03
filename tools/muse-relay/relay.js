@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const PORT = Number(process.env.PORT || 8787);
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const INBOX_FILE = path.join(DATA_DIR, 'inbox.json');
+const MUSIC_FILE = path.join(DATA_DIR, 'music.json');
 const TOKEN_FILE = path.join(DATA_DIR, 'token.txt');
 const TUNNEL_LOG = process.env.TUNNEL_LOG || path.join(DATA_DIR, 'tunnel.log');
 const MAX_MESSAGES = 50;
@@ -44,6 +45,23 @@ function loadInbox() {
   return { next_id: 1, messages: [] };
 }
 let inbox = loadInbox();
+let music = null;
+try { music = JSON.parse(fs.readFileSync(MUSIC_FILE, 'utf8')); } catch {}
+
+function queueMusic(value) {
+  const title = String(value?.title || '').slice(0, 120);
+  const artist = String(value?.artist || '').slice(0, 120);
+  const url = String(value?.url || '');
+  const song_id = String(value?.song_id || '');
+  if (!/^https?:\/\//.test(url) || url.length > 1200 || !/^\d{0,20}$/.test(song_id))
+    throw new Error('invalid music command');
+  music = { id: crypto.randomUUID(), issued_at: Date.now(), title, artist, url,
+            song_id, continuous: value?.continuous === true };
+  fs.writeFileSync(MUSIC_FILE + '.tmp', JSON.stringify(music));
+  fs.renameSync(MUSIC_FILE + '.tmp', MUSIC_FILE);
+  console.log('music queued', JSON.stringify({ id: music.id, title, artist }));
+  return music.id;
+}
 
 function saveInbox() {
   const tmp = INBOX_FILE + '.tmp';
@@ -273,8 +291,23 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, inboxResponse(url));
     }
 
+    // Only the local music container may queue playback; Tab5 fetches it through the tunnel.
+    if (parts[0] === 'music' && req.method === 'GET') {
+      if (!tokenOk(parts[1])) return send(res, 404, 'not found');
+      return send(res, 200, music && Date.now() - music.issued_at < 90000 ? music : {});
+    }
+
     if (parts[0] === 'tab5') {
       if (viaTunnel(req)) return send(res, 404, 'not found');
+      if (parts[1] === 'music' && req.method === 'GET')
+        return send(res, 200, music && Date.now() - music.issued_at < 90000 ? music : {});
+      if (parts[1] === 'music' && req.method === 'POST') {
+        if (!['127.0.0.1', '::1', '::ffff:127.0.0.1', '172.18.0.1', '::ffff:172.18.0.1'].includes(req.socket.remoteAddress))
+          return send(res, 404, 'not found');
+        const body = await readBody(req);
+        if (Buffer.byteLength(body) > 2048) return send(res, 413, 'too large');
+        return send(res, 200, { ok: true, id: queueMusic(JSON.parse(body)) });
+      }
       if (parts[1] === 'inbox' && req.method === 'GET') {
         return send(res, 200, inboxResponse(url));
       }

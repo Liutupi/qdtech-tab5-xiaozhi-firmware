@@ -2,10 +2,10 @@
 #include "sdkconfig.h"
 
 #include <lvgl.h>
+#include <atomic>
+#include <cstddef>
 #include <memory>
 #include <mutex>
-#include <atomic>
-#include <thread>
 #include <vector>
 
 #include <freertos/FreeRTOS.h>
@@ -35,7 +35,13 @@ private:
     int video_fd_ = -1;
     std::atomic_bool streaming_on_{false};
     bool stream_paused_ = false;
+    // Number of MMAP buffers already queued since the last successful STREAMOFF.
+    // A failed resume must continue after them instead of queueing them twice.
+    size_t resume_next_buffer_ = 0;
     std::mutex capture_mutex_;
+    // Protect the captured photo and explanation settings. Vision sampling uses
+    // capture_mutex_ independently and must not wait for a network upload.
+    std::mutex photo_mutex_;
     struct MmapBuffer {
         void* start = nullptr;
         size_t length = 0;
@@ -43,10 +49,16 @@ private:
     std::vector<MmapBuffer> mmap_buffers_;
     std::string explain_url_;
     std::string explain_token_;
-    std::thread encoder_thread_;
 
 public:
-    EspVideo(const esp_video_init_config_t& config);
+    // Optional board preference; all existing callers keep their format order.
+    enum class PixelFormatPreference {
+        Default,
+        PreferRgb565,
+    };
+
+    EspVideo(const esp_video_init_config_t& config,
+             PixelFormatPreference pixel_format_preference = PixelFormatPreference::Default);
     ~EspVideo() override;
 
     virtual void SetExplainUrl(const std::string& url, const std::string& token);

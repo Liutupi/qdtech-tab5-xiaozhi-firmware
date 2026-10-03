@@ -8,8 +8,8 @@
 #include <string>
 #include <vector>
 
-// Polls the NAS "Muse inbox" relay over the LAN. Muse (Meta's cloud agent) pushes short
-// messages to the relay through a public MCP endpoint; the Tab5 only ever talks to the NAS.
+// Polls the NAS "Muse inbox" relay over LAN or its public tunnel. Muse pushes short
+// messages to the relay through a public MCP endpoint; music commands share the relay.
 namespace tab5_muse {
 
 struct Message {
@@ -18,6 +18,15 @@ struct Message {
     std::string body;
     std::string from;
     std::string time;
+};
+
+struct MusicCommand {
+    std::string id;
+    std::string title;
+    std::string artist;
+    std::string url;
+    std::string song_id;
+    bool continuous = false;
 };
 
 struct Snapshot {
@@ -41,9 +50,10 @@ struct Snapshot {
 class Inbox {
 public:
     using Listener = std::function<void(const Snapshot&)>;
+    using MusicListener = std::function<void(const MusicCommand&)>;
 
     static Inbox& GetInstance();
-    void Start(Listener listener);
+    void Start(Listener listener, MusicListener music_listener = {});
     void RequestRefresh();
     void MarkAllSeen();
     Snapshot Current();
@@ -56,13 +66,17 @@ private:
     static void TaskEntry(void* arg);
     void Run();
     bool Poll();
+    bool PollMusic();
     bool Discover();
     int failures_ = 0;
     std::string topic_;
+    std::string last_music_id_;
+    int music_failures_ = 0;
 
     std::mutex mutex_;
     Snapshot snapshot_;
     Listener listener_;
+    MusicListener music_listener_;
     TaskHandle_t task_ = nullptr;
 };
 

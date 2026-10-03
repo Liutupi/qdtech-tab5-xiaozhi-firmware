@@ -1,9 +1,9 @@
 #include "icu_calculators.h"
 
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cerrno>
 
 namespace icu {
 namespace {
@@ -26,6 +26,32 @@ constexpr DrugInfo kDrugs[] = {
 
 bool Finite(double x) { return std::isfinite(x); }
 Result Invalid(const char* reason) { return {false, reason}; }
+
+int GfrCategory(double value) {
+    return value >= 90   ? 0
+           : value >= 60 ? 1
+           : value >= 45 ? 2
+           : value >= 30 ? 3
+           : value >= 15 ? 4
+                         : 5;
+}
+
+int AcrCategory(double value) { return value < 3 ? 0 : value <= 30 ? 1 : 2; }
+
+// The displayed number must classify exactly like the unrounded result.
+// Add decimal places only for values close to a category boundary.
+template <typename Category>
+std::string FormatAtCategory(double value, int minimum_decimals, Category category) {
+    char buffer[64];
+    for (int decimals = minimum_decimals; decimals <= 6; ++decimals) {
+        std::snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
+        const double shown = std::strtod(buffer, nullptr);
+        if (category(shown) == category(value))
+            return buffer;
+    }
+    std::snprintf(buffer, sizeof(buffer), "%.17g", value);
+    return buffer;
+}
 }  // namespace
 
 const DrugInfo& GetDrugInfo(Drug drug) {
@@ -52,12 +78,17 @@ Result Egfr(double age, bool female, double scr_umol_l) {
     const double egfr = 142 * std::pow(std::fmin(ratio, 1.0), alpha)
         * std::pow(std::fmax(ratio, 1.0), -1.200) * std::pow(0.9938, age)
         * (female ? 1.012 : 1.0);
-    const char* category = egfr >= 90 ? "G1" : egfr >= 60 ? "G2" :
-        egfr >= 45 ? "G3a" : egfr >= 30 ? "G3b" : egfr >= 15 ? "G4" : "G5";
+    if (!Finite(egfr))
+        return Invalid("估算值超出可计算范围，请核对血肌酐数值和单位。");
+    const auto shown_egfr = FormatAtCategory(egfr, 1, GfrCategory);
+    constexpr const char* kGfrNames[] = {"G1", "G2", "G3a", "G3b", "G4", "G5"};
+    const char* category = kGfrNames[GfrCategory(egfr)];
     char buffer[420];
     std::snprintf(buffer, sizeof(buffer),
-        "eGFR  %.1f mL/min/1.73m²\nKDIGO 滤过率分层：%s\n\n输入：年龄 %.0f 岁，%s，血肌酐 %.1f μmol/L。\n2021 CKD-EPI 肌酐公式。\n急性肾损伤、肌酐未稳定时估算可能失准；单次数值不能诊断 CKD。",
-        egfr, category, age, female ? "女" : "男", scr_umol_l);
+                  "eGFR  %s mL/min/1.73m²\nKDIGO 滤过率分层：%s\n\n输入：年龄 %.8g 岁，%s，血肌酐 "
+                  "%.8g μmol/L。\n2021 CKD-EPI "
+                  "肌酐公式。\n急性肾损伤、肌酐未稳定时估算可能失准；单次数值不能诊断 CKD。",
+                  shown_egfr.c_str(), category, age, female ? "女" : "男", scr_umol_l);
     return {true, buffer};
 }
 
@@ -68,13 +99,18 @@ Result Uacr(double albumin_mg_l, double creatinine_mmol_l) {
     const double mg_mmol = albumin_mg_l / creatinine_mmol_l;
     // 1 mmol creatinine = 113.12 mg = 0.11312 g.
     const double mg_g = mg_mmol / 0.11312;
+    if (!Finite(mg_mmol) || !Finite(mg_g))
+        return Invalid("uACR 超出可计算范围，请核对尿白蛋白与尿肌酐数值和单位。");
+    const auto shown_mg_mmol = FormatAtCategory(mg_mmol, 2, AcrCategory);
     // KDIGO's displayed mg/g and mg/mmol cutoffs are rounded equivalents.
     // Classify in the input unit so exactly 3 mg/mmol begins A2.
-    const char* category = mg_mmol < 3 ? "A1" : mg_mmol <= 30 ? "A2" : "A3";
+    constexpr const char* kAcrNames[] = {"A1", "A2", "A3"};
+    const char* category = kAcrNames[AcrCategory(mg_mmol)];
     char buffer[320];
     std::snprintf(buffer, sizeof(buffer),
-        "uACR  %.1f mg/g\n       %.2f mg/mmol\nKDIGO 白蛋白尿分层：%s\n\n同一次尿样：尿白蛋白 %.2f mg/L ÷ 尿肌酐 %.2f mmol/L。",
-        mg_g, mg_mmol, category, albumin_mg_l, creatinine_mmol_l);
+                  "uACR  %s mg/mmol\n       %.1f mg/g\nKDIGO 白蛋白尿分层：%s（按 mg/mmol "
+                  "判定）\n\n同一次尿样：尿白蛋白 %.8g mg/L ÷ 尿肌酐 %.8g mmol/L。",
+                  shown_mg_mmol.c_str(), mg_g, category, albumin_mg_l, creatinine_mmol_l);
     return {true, buffer};
 }
 
@@ -84,9 +120,13 @@ Result Oxygen(double fio2, double pao2, double map) {
         !Finite(map) || map < 0 || map > 100)
         return Invalid("FiO₂ 输入 21–100%，PaO₂ 输入 mmHg；平均气道压可留空。");
     const double pf = pao2 / (fio2 / 100.0);
+    if (!Finite(pf))
+        return Invalid("氧合结果超出可计算范围，请核对 PaO₂ 数值和单位。");
     char buffer[360];
     if (map > 0) {
         const double oi = fio2 * map / pao2;
+        if (!Finite(oi))
+            return Invalid("OI 超出可计算范围，请核对平均气道压和 PaO₂ 数值及单位。");
         std::snprintf(buffer, sizeof(buffer),
             "PaO₂/FiO₂  %.1f mmHg\n正式 OI  %.2f\n\n输入：FiO₂ %.1f%%，PaO₂ %.1f mmHg，平均气道压 %.1f cmH₂O。\nOI = FiO₂(%%) × 平均气道压 ÷ PaO₂。\n仅凭比值不能诊断 ARDS。",
             pf, oi, fio2, pao2, map);
@@ -110,11 +150,20 @@ Result BloodGas(double ph, double paco2, double hco3, double sodium, double chlo
     if (albumin > 0 && sodium == 0)
         return Invalid("白蛋白校正阴离子间隙需同时输入 Na⁺ 和 Cl⁻。");
     char buffer[700];
+    const double calculated_ph = 6.1 + std::log10(hco3 / (0.03 * paco2));
+    if (!Finite(calculated_ph))
+        return Invalid("血气输入超出可计算范围，请核对 pH、PaCO₂ 和 HCO₃⁻ 数值及单位。");
+    if (std::fabs(calculated_ph - ph) > 0.15) {
+        std::snprintf(buffer, sizeof(buffer),
+                      "pH、PaCO₂ 与 HCO₃⁻ 的输入关系差异较大（回算 pH "
+                      "%.2f）。请核对是否为同一血气标本及输入单位；暂不解读酸碱与代偿。",
+                      calculated_ph);
+        return {false, buffer};
+    }
     const char* ph_state = ph < 7.35 ? "酸血症" : ph > 7.45 ? "碱血症" : "pH 在参考范围";
     std::snprintf(buffer, sizeof(buffer),
         "pH %.2f：%s\nPaCO₂ %.1f mmHg；HCO₃⁻ %.1f mmol/L", ph, ph_state, paco2, hco3);
     std::string output(buffer);
-    const double calculated_ph = 6.1 + std::log10(hco3 / (0.03 * paco2));
     if (std::fabs(calculated_ph - ph) > 0.08)
         output += "\n输入值与 Henderson–Hasselbalch 关系不符，请核对标本及单位。";
     if (ph < 7.35) {
@@ -179,6 +228,8 @@ Result Pump(Drug drug, double amount, double volume, double rate, double weight)
         return Invalid("该药物需要输入有效体重 kg。");
     const double concentration = amount / volume;
     const double per_hour = concentration * rate;
+    if (!Finite(concentration) || !Finite(per_hour))
+        return Invalid("泵速换算超出可计算范围，请核对药量、总液量和泵速。");
     double standardized = 0;
     switch (drug) {
     case Drug::Norepinephrine: case Drug::Epinephrine: case Drug::Metaraminol:
@@ -192,6 +243,8 @@ Result Pump(Drug drug, double amount, double volume, double rate, double weight)
         standardized = per_hour * 1000; break;
     case Drug::Dexmedetomidine: standardized = per_hour * 1000 / weight; break;
     }
+    if (!Finite(standardized))
+        return Invalid("泵速换算超出可计算范围，请核对药量、总液量、泵速和体重。");
     char weight_text[64] = {};
     if (info.needs_weight)
         std::snprintf(weight_text, sizeof(weight_text), "，体重 %.4g kg", weight);

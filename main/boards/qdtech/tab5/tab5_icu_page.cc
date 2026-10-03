@@ -90,8 +90,11 @@ Tab5IcuPage::Tab5IcuPage(lv_obj_t* parent, std::function<void()> on_back)
         lv_obj_set_pos(field_labels_[i], 14, 10);
         lv_obj_set_width(field_labels_[i], 390);
     }
-    auto* calculate = Button(input, "计算", 22, 476, 418, 49, OnCalculate, this);
-    lv_obj_set_style_bg_color(calculate, lv_color_hex(0x167f8d), 0);
+    calculate_button_ = Button(input, "计算", 22, 476, 418, 49, OnCalculate, this);
+    lv_obj_set_style_bg_color(calculate_button_, lv_color_hex(0x167f8d), 0);
+    voice_note_ = Label(input, "语音计算结果\n输入数值与单位见右侧。\n点下方按钮可改为手动输入。",
+                        &qd_font_lxgw_28, 25, 104, 410, 0xc1dbe8);
+    lv_obj_add_flag(voice_note_, LV_OBJ_FLAG_HIDDEN);
 
     auto* result_panel = Panel(page_, 760, 134, 478, 536, 0x142d43);
     Label(result_panel, "换算结果", &qd_font_lxgw_36, 26, 18, 400, 0xf4f9fc);
@@ -102,42 +105,76 @@ Tab5IcuPage::Tab5IcuPage(lv_obj_t* parent, std::function<void()> on_back)
 
     keypad_ = Panel(page_, 358, 93, 565, 533, 0x1b3a51);
     lv_obj_set_style_border_color(keypad_, lv_color_hex(0x86cddd), 0);
-    keypad_value_ = Label(keypad_, "", &qd_font_lxgw_36, 25, 17, 510, 0xf8fcff);
+    keypad_field_label_ = Label(keypad_, "当前字段", &qd_font_lxgw_28, 25, 8, 510, 0x9bd7e4);
+    keypad_value_ = Label(keypad_, "", &qd_font_lxgw_36, 25, 43, 510, 0xf8fcff);
     for (int i = 0; i < 12; ++i)
-        keys_[i] = Button(keypad_, kKeys[i], 24 + (i % 3) * 173,
-                          74 + (i / 3) * 83, 157, 68, OnKey, this);
-    keys_[12] = Button(keypad_, kKeys[12], 24, 410, 245, 68, OnKey, this);
-    keys_[13] = Button(keypad_, kKeys[13], 286, 410, 245, 68, OnKey, this);
+        keys_[i] =
+            Button(keypad_, kKeys[i], 24 + (i % 3) * 173, 90 + (i / 3) * 83, 157, 68, OnKey, this);
+    keys_[12] = Button(keypad_, kKeys[12], 24, 426, 245, 68, OnKey, this);
+    keys_[13] = Button(keypad_, kKeys[13], 286, 426, 245, 68, OnKey, this);
     lv_obj_add_flag(keypad_, LV_OBJ_FLAG_HIDDEN);
     values_[4][2] = "50";
     SelectMode(0);
 }
 
-void Tab5IcuPage::Open(int mode, const std::string& external_result) {
+void Tab5IcuPage::Open(int mode, const std::string& external_result, bool result_ok) {
     lv_obj_add_flag(keypad_, LV_OBJ_FLAG_HIDDEN);
     if (mode >= 0 && mode < kModes) SelectMode(mode);
-    if (!external_result.empty()) lv_label_set_text(result_, external_result.c_str());
+    if (!external_result.empty()) {
+        for (auto& values : values_)
+            for (auto& value : values)
+                value.clear();
+        values_[4][2] = "50";
+        female_ = false;
+        sex_selected_ = false;
+        drug_ = 0;
+        voice_result_ = true;
+        for (auto* button : field_buttons_)
+            lv_obj_add_flag(button, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(voice_note_, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(lv_obj_get_child(calculate_button_, 0), "手动输入");
+        lv_label_set_text(result_, external_result.c_str());
+        lv_obj_set_style_text_color(result_, lv_color_hex(result_ok ? 0xdbeaf3 : 0xffbdad), 0);
+    } else if (voice_result_) {
+        voice_result_ = false;
+        lv_obj_add_flag(voice_note_, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(lv_obj_get_child(calculate_button_, 0), "计算");
+        InvalidateResult();
+        RefreshFields();
+    }
     lv_obj_remove_flag(page_, LV_OBJ_FLAG_HIDDEN);
 }
 
 void Tab5IcuPage::Clear() {
     for (auto& mode : values_) for (auto& value : mode) value.clear();
     values_[4][2] = "50";
-    lv_label_set_text(result_, "填写左侧数值后点击计算。");
-    lv_obj_set_style_text_color(result_, lv_color_hex(0xdbeaf3), 0);
+    female_ = false;
+    sex_selected_ = false;
+    drug_ = 0;
+    voice_result_ = false;
+    lv_obj_add_flag(voice_note_, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(lv_obj_get_child(calculate_button_, 0), "计算");
+    InvalidateResult();
     lv_obj_add_flag(keypad_, LV_OBJ_FLAG_HIDDEN);
     RefreshFields();
 }
 
 void Tab5IcuPage::SelectMode(int mode) {
     mode_ = mode;
+    voice_result_ = false;
+    lv_obj_add_flag(voice_note_, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(lv_obj_get_child(calculate_button_, 0), "计算");
     for (int i = 0; i < kModes; ++i)
         lv_obj_set_style_bg_color(nav_buttons_[i],
             lv_color_hex(i == mode ? 0x167f8d : 0x22465e), 0);
     lv_label_set_text(title_, kModeNames[mode]);
+    InvalidateResult();
+    RefreshFields();
+}
+
+void Tab5IcuPage::InvalidateResult() {
     lv_label_set_text(result_, "填写左侧数值后点击计算。");
     lv_obj_set_style_text_color(result_, lv_color_hex(0xdbeaf3), 0);
-    RefreshFields();
 }
 
 void Tab5IcuPage::RefreshFields() {
@@ -149,7 +186,10 @@ void Tab5IcuPage::RefreshFields() {
         lv_obj_remove_flag(field_buttons_[i], LV_OBJ_FLAG_HIDDEN);
         const char* value = values_[mode_][i].empty() ? "—" : values_[mode_][i].c_str();
         std::string shown = std::string(kFieldNames[mode_][i]) + "   " + value;
-        if (mode_ == 0 && i == 1) shown = std::string("性别   ") + (female_ ? "女" : "男") + "（点击切换）";
+        if (mode_ == 0 && i == 1)
+            shown = sex_selected_
+                        ? std::string("性别   ") + (female_ ? "女" : "男") + "（点击切换）"
+                        : "性别   —（点击选择）";
         if (mode_ == 4 && i == 0) {
             const auto& info = icu::GetDrugInfo(static_cast<icu::Drug>(drug_));
             shown = std::string(info.name) + "（点击换药）";
@@ -174,16 +214,31 @@ void Tab5IcuPage::OnField(lv_event_t* event) {
     auto* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
     for (int i = 0; i < kFields; ++i) {
         if (target != self->field_buttons_[i]) continue;
-        if (self->mode_ == 0 && i == 1) { self->female_ = !self->female_; self->RefreshFields(); return; }
+        if (self->mode_ == 0 && i == 1) {
+            if (!self->sex_selected_)
+                self->sex_selected_ = true;
+            else
+                self->female_ = !self->female_;
+            self->InvalidateResult();
+            self->RefreshFields();
+            return;
+        }
         if (self->mode_ == 4 && i == 0) {
             self->drug_ = (self->drug_ + 1) % icu::kDrugCount;
             self->values_[4][1].clear();
+            self->InvalidateResult();
             self->RefreshFields();
             return;
         }
         self->editing_ = i;
         self->edit_value_ = self->values_[self->mode_][i];
-        lv_label_set_text(self->keypad_value_, self->edit_value_.empty() ? "输入数值" : self->edit_value_.c_str());
+        std::string field_name = kFieldNames[self->mode_][i];
+        if (self->mode_ == 4 && i == 1)
+            field_name += std::string(" / ") +
+                          icu::GetDrugInfo(static_cast<icu::Drug>(self->drug_)).input_unit;
+        lv_label_set_text(self->keypad_field_label_, field_name.c_str());
+        lv_label_set_text(self->keypad_value_,
+                          self->edit_value_.empty() ? "输入数值" : self->edit_value_.c_str());
         lv_obj_remove_flag(self->keypad_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(self->keypad_);
         return;
@@ -195,7 +250,10 @@ void Tab5IcuPage::OnKey(lv_event_t* event) {
     auto* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
     for (int i = 0; i < 14; ++i) {
         if (target != self->keys_[i]) continue;
+        const auto before = self->edit_value_;
         if (i == 13) {
+            if (self->values_[self->mode_][self->editing_] != self->edit_value_)
+                self->InvalidateResult();
             self->values_[self->mode_][self->editing_] = self->edit_value_;
             lv_obj_add_flag(self->keypad_, LV_OBJ_FLAG_HIDDEN);
             self->RefreshFields();
@@ -205,6 +263,8 @@ void Tab5IcuPage::OnKey(lv_event_t* event) {
             if (self->edit_value_.find('.') == std::string::npos)
                 self->edit_value_ += self->edit_value_.empty() ? "0." : ".";
         } else if (self->edit_value_.size() < 9) self->edit_value_ += kKeys[i];
+        if (before != self->edit_value_)
+            self->InvalidateResult();
         if (i != 13) lv_label_set_text(self->keypad_value_,
             self->edit_value_.empty() ? "输入数值" : self->edit_value_.c_str());
         return;
@@ -222,7 +282,10 @@ void Tab5IcuPage::Calculate() {
     icu::Result result{false, "请完整输入数值，并核对单位。"};
     switch (mode_) {
     case 0:
-        if (Number(0, a) && Number(2, b)) result = icu::Egfr(a, female_, b);
+        if (!sex_selected_)
+            result = {false, "请先点击性别，明确选择男或女。"};
+        else if (Number(0, a) && Number(2, b))
+            result = icu::Egfr(a, female_, b);
         break;
     case 1:
         if (Number(0, a) && Number(1, b)) result = icu::Uacr(a, b);
@@ -245,5 +308,15 @@ void Tab5IcuPage::Calculate() {
 
 void Tab5IcuPage::OnCalculate(lv_event_t* event) {
     auto* self = static_cast<Tab5IcuPage*>(lv_event_get_user_data(event));
-    if (lv_obj_has_flag(self->keypad_, LV_OBJ_FLAG_HIDDEN)) self->Calculate();
+    if (!lv_obj_has_flag(self->keypad_, LV_OBJ_FLAG_HIDDEN))
+        return;
+    if (self->voice_result_) {
+        self->voice_result_ = false;
+        lv_obj_add_flag(self->voice_note_, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(lv_obj_get_child(self->calculate_button_, 0), "计算");
+        self->InvalidateResult();
+        self->RefreshFields();
+        return;
+    }
+    self->Calculate();
 }

@@ -1,0 +1,8 @@
+/* Only the Tab5 raw Think torso experiment assembles this flash resource. */
+.section .rodata.embedded
+.balign 4
+.global _binary_think_torso_262x462_rgb565a8_bin_start
+_binary_think_torso_262x462_rgb565a8_bin_start:
+.incbin "@TAB5_THINK_TORSO_RAW_BIN@"
+.global _binary_think_torso_262x462_rgb565a8_bin_end
+_binary_think_torso_262x462_rgb565a8_bin_end:

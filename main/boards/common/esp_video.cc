@@ -7,9 +7,12 @@
 #include <sys/mman.h>
 #include <sys/param.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <algorithm>
+#include <memory>
+#include <thread>
+#include <utility>
 
 #include "esp_imgfx_color_convert.h"
 #include "esp_video_device.h"
@@ -108,7 +111,8 @@ static void log_available_video_devices() {
 #define CAM_PRINT_FOURCC(pixelformat) (void)0;
 #endif  // CONFIG_XIAOZHI_ENABLE_CAMERA_DEBUG_MODE
 
-EspVideo::EspVideo(const esp_video_init_config_t& config) {
+EspVideo::EspVideo(const esp_video_init_config_t& config,
+                   PixelFormatPreference pixel_format_preference) {
     if (esp_video_init(&config) != ESP_OK) {
         ESP_LOGE(TAG, "esp_video_init failed");
         return;
@@ -200,11 +204,18 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
     fmtdesc.index = 0;
     uint32_t best_fmt = 0;
     int best_rank = 1 << 30;  // large number
+    bool rgb24_available = false;
 
     // esp_video 2.x uses the packed YUYV/UYVY FOURCC values. Keep YUV422P
     // for compatibility with esp_video 1.x, where it was used for YUYV data.
 #if defined(CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE) && defined(CONFIG_SOC_PPA_SUPPORTED)
-    auto get_rank = [](uint32_t fmt) -> int {
+    auto get_rank = [pixel_format_preference](uint32_t fmt) -> int {
+        if (pixel_format_preference == PixelFormatPreference::PreferRgb565) {
+            if (fmt == V4L2_PIX_FMT_RGB565)
+                return -1;
+            if (fmt == V4L2_PIX_FMT_RGB24)
+                return 0;
+        }
         switch (fmt) {
             case V4L2_PIX_FMT_RGB24:
                 return 0;
@@ -225,7 +236,13 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
         }
     };
 #else
-    auto get_rank = [](uint32_t fmt) -> int {
+    auto get_rank = [pixel_format_preference](uint32_t fmt) -> int {
+        if (pixel_format_preference == PixelFormatPreference::PreferRgb565) {
+            if (fmt == V4L2_PIX_FMT_RGB565)
+                return -1;
+            if (fmt == V4L2_PIX_FMT_RGB24)
+                return 0;
+        }
         switch (fmt) {
             case V4L2_PIX_FMT_YUYV:
             case V4L2_PIX_FMT_UYVY:
@@ -255,6 +272,7 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
         ESP_LOGD(TAG, "VIDIOC_ENUM_FMT: pixelformat=0x%08lx, description=%s", fmtdesc.pixelformat,
                  fmtdesc.description);
         CAM_PRINT_FOURCC(fmtdesc.pixelformat);
+        rgb24_available |= fmtdesc.pixelformat == V4L2_PIX_FMT_RGB24;
         int rank = get_rank(fmtdesc.pixelformat);
         if (rank < best_rank) {
             best_rank = rank;
@@ -277,13 +295,27 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
 
     ESP_LOGD(TAG, "selected pixel format: 0x%08lx", setformat.fmt.pix.pixelformat);
 
-    if (ioctl(video_fd_, VIDIOC_S_FMT, &setformat) != 0) {
+    int set_format_ret = ioctl(video_fd_, VIDIOC_S_FMT, &setformat);
+    if (set_format_ret != 0 && pixel_format_preference == PixelFormatPreference::PreferRgb565 &&
+        best_fmt == V4L2_PIX_FMT_RGB565 && rgb24_available) {
+        ESP_LOGW(TAG, "RGB565 camera format rejected (errno=%d); retrying RGB24", errno);
+        setformat = {};
+        setformat.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        setformat.fmt.pix.width = sensor_width_;
+        setformat.fmt.pix.height = sensor_height_;
+        setformat.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB24;
+        set_format_ret = ioctl(video_fd_, VIDIOC_S_FMT, &setformat);
+    }
+    if (set_format_ret != 0) {
         ESP_LOGE(TAG, "VIDIOC_S_FMT failed, errno=%d(%s)", errno, strerror(errno));
         close(video_fd_);
         video_fd_ = -1;
         sensor_format_ = 0;
         return;
     }
+    sensor_width_ = setformat.fmt.pix.width;
+    sensor_height_ = setformat.fmt.pix.height;
+    sensor_format_ = setformat.fmt.pix.pixelformat;
 
 #if CONFIG_XIAOZHI_CAMERA_MIRROR_CONFIGURED
     SetHMirror(kConfiguredHMirror);
@@ -312,6 +344,7 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
         sensor_format_ = 0;
         return;
     }
+    ESP_LOGI(TAG, "Camera MMAP buffers=%u", static_cast<unsigned>(req.count));
     mmap_buffers_.resize(req.count);
     for (uint32_t i = 0; i < req.count; i++) {
         struct v4l2_buffer buf = {};
@@ -325,6 +358,8 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
             sensor_format_ = 0;
             return;
         }
+        ESP_LOGI(TAG, "Camera MMAP buffer[%u]=%lu bytes", static_cast<unsigned>(i),
+                 static_cast<unsigned long>(buf.length));
         void* start =
             mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, video_fd_, buf.m.offset);
         if (start == MAP_FAILED) {
@@ -390,6 +425,11 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
 }
 
 EspVideo::~EspVideo() {
+    {
+        std::lock_guard<std::mutex> photo_lock(photo_mutex_);
+        heap_caps_free(frame_.data);
+        frame_.data = nullptr;
+    }
     if (streaming_on_ && video_fd_ >= 0) {
         int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ioctl(video_fd_, VIDIOC_STREAMOFF, &type);
@@ -408,15 +448,34 @@ EspVideo::~EspVideo() {
 }
 
 void EspVideo::SetExplainUrl(const std::string& url, const std::string& token) {
+    std::lock_guard<std::mutex> photo_lock(photo_mutex_);
     explain_url_ = url;
     explain_token_ = token;
 }
 
 bool EspVideo::Capture() {
+    std::lock_guard<std::mutex> photo_lock(photo_mutex_);
     std::lock_guard<std::mutex> capture_lock(capture_mutex_);
-    if (encoder_thread_.joinable()) {
-        encoder_thread_.join();
-    }
+    // A new capture supersedes the old photo, including when the sensor read
+    // below fails. Explain owns a detached snapshot while its encoder runs.
+    heap_caps_free(frame_.data);
+    frame_.data = nullptr;
+    frame_.len = 0;
+    frame_.format = 0;
+    struct CaptureFailureCleanup {
+        uint8_t*& data;
+        size_t& len;
+        v4l2_pix_fmt_t& format;
+        bool committed = false;
+        ~CaptureFailureCleanup() {
+            if (committed)
+                return;
+            heap_caps_free(data);
+            data = nullptr;
+            len = 0;
+            format = 0;
+        }
+    } cleanup{frame_.data, frame_.len, frame_.format};
 
     if (!streaming_on_ || video_fd_ < 0) {
         ESP_LOGE(TAG, "Capture failed: camera did not initialize (streaming_on_=%d, video_fd_=%d)",
@@ -434,11 +493,6 @@ bool EspVideo::Capture() {
         }
         if (i == 2) {
             // 保存帧副本到PSRAM
-            if (frame_.data) {
-                heap_caps_free(frame_.data);
-                frame_.data = nullptr;
-                frame_.format = 0;
-            }
             frame_.len = buf.bytesused;
             frame_.data =
                 (uint8_t*)heap_caps_malloc(frame_.len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -565,6 +619,7 @@ bool EspVideo::Capture() {
                     break;
                 default:
                     ESP_LOGE(TAG, "unsupported sensor format: 0x%08lx", sensor_format_);
+                    heap_caps_free(rotate_dst);
                     if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
                         ESP_LOGE(TAG, "Cleanup: VIDIOC_QBUF failed");
                     }
@@ -574,6 +629,7 @@ bool EspVideo::Capture() {
             esp_imgfx_err_t imgfx_err = esp_imgfx_rotate_open(&rotate_cfg, &rotate_handle);
             if (imgfx_err != ESP_IMGFX_ERR_OK || rotate_handle == nullptr) {
                 ESP_LOGE(TAG, "esp_imgfx_rotate_create failed");
+                heap_caps_free(rotate_dst);
                 if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
                     ESP_LOGE(TAG, "Cleanup: VIDIOC_QBUF failed");
                 }
@@ -693,9 +749,9 @@ bool EspVideo::Capture() {
                     return false;
             }
 
+            const size_t rotated_size = size_t(frame_.width) * frame_.height * 2;
             uint8_t* rotate_dst = (uint8_t*)heap_caps_malloc(
-                frame_.width * frame_.height * 2,
-                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_CACHE_ALIGNED);
+                rotated_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_CACHE_ALIGNED);
             if (rotate_dst == nullptr) {
                 ESP_LOGE(TAG, "Failed to allocate memory for rotate image");
                 if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
@@ -733,7 +789,7 @@ bool EspVideo::Capture() {
             srm_cfg.in.srm_cm = ppa_color_mode;
 
             srm_cfg.out.buffer = (void*)rotate_dst;
-            srm_cfg.out.buffer_size = frame_.len;
+            srm_cfg.out.buffer_size = rotated_size;
             srm_cfg.out.pic_w = frame_.width;
             srm_cfg.out.pic_h = frame_.height;
             srm_cfg.out.block_offset_x = 0;
@@ -762,7 +818,7 @@ bool EspVideo::Capture() {
             (void)ppa_unregister_client(ppa_client);
 
             frame_.data = rotate_dst;
-            frame_.len = frame_.width * frame_.height * 2;
+            frame_.len = rotated_size;
             frame_.format = V4L2_PIX_FMT_RGB565;
             heap_caps_free(rotate_src);
             rotate_src = nullptr;
@@ -887,6 +943,7 @@ bool EspVideo::Capture() {
             std::make_unique<LvglAllocatedImage>(data, lvgl_image_size, w, h, stride, color_format);
         display->SetPreviewImage(std::move(image));
     }
+    cleanup.committed = true;
     return true;
 }
 
@@ -1005,8 +1062,10 @@ bool EspVideo::SetVisionGainIndex(int index) {
 
 bool EspVideo::PauseStream() {
     std::lock_guard<std::mutex> capture_lock(capture_mutex_);
-    if (stream_paused_) return true;
-    if (!streaming_on_ || video_fd_ < 0) return false;
+    if (stream_paused_)
+        return true;
+    if (!streaming_on_ || video_fd_ < 0)
+        return false;
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(video_fd_, VIDIOC_STREAMOFF, &type) != 0) {
         ESP_LOGW(TAG, "VIDIOC_STREAMOFF failed: %d", errno);
@@ -1014,16 +1073,20 @@ bool EspVideo::PauseStream() {
     }
     stream_paused_ = true;
     streaming_on_ = false;
+    resume_next_buffer_ = 0;
     ESP_LOGI(TAG, "Camera stream paused");
     return true;
 }
 
 bool EspVideo::ResumeStream() {
     std::lock_guard<std::mutex> capture_lock(capture_mutex_);
-    if (!stream_paused_) return streaming_on_.load();
-    if (video_fd_ < 0) return false;
-    // STREAMOFF returns every buffer to the driver; re-queue before STREAMON.
-    for (size_t i = 0; i < mmap_buffers_.size(); ++i) {
+    if (!stream_paused_)
+        return streaming_on_.load();
+    if (video_fd_ < 0)
+        return false;
+    // STREAMOFF frees every buffer. Keep progress across a failed QBUF or
+    // STREAMON: esp_video rejects a second QBUF for an already queued buffer.
+    for (size_t i = resume_next_buffer_; i < mmap_buffers_.size(); ++i) {
         struct v4l2_buffer buf = {};
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
@@ -1032,6 +1095,7 @@ bool EspVideo::ResumeStream() {
             ESP_LOGE(TAG, "VIDIOC_QBUF failed on resume: %d", errno);
             return false;
         }
+        resume_next_buffer_ = i + 1;
     }
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(video_fd_, VIDIOC_STREAMON, &type) != 0) {
@@ -1040,6 +1104,7 @@ bool EspVideo::ResumeStream() {
     }
     stream_paused_ = false;
     streaming_on_ = true;
+    resume_next_buffer_ = 0;
     ESP_LOGI(TAG, "Camera stream resumed");
     return true;
 }
@@ -1099,8 +1164,26 @@ bool EspVideo::SetVFlip(bool enabled) {
  * @warning 如果摄像头缓冲区为空或网络连接失败，将返回错误信息
  */
 std::expected<std::string, std::string> EspVideo::Explain(const std::string& question) {
-    if (explain_url_.empty()) {
+    FrameBuffer frame;
+    std::string explain_url;
+    std::string explain_token;
+    {
+        std::lock_guard<std::mutex> photo_lock(photo_mutex_);
+        frame = frame_;
+        frame_.data = nullptr;
+        frame_.len = 0;
+        frame_.format = 0;
+        explain_url = explain_url_;
+        explain_token = explain_token_;
+    }
+    // Once Explain starts, every return path releases this photo. The JPEG
+    // worker takes ownership below and releases it as soon as encoding ends.
+    std::unique_ptr<uint8_t, decltype(&heap_caps_free)> frame_owner(frame.data, heap_caps_free);
+    if (explain_url.empty()) {
         return std::unexpected("Image explain URL or token is not set");
+    }
+    if (!frame.data || frame.len == 0) {
+        return std::unexpected("No camera frame captured");
     }
 
     // 创建局部的 JPEG 队列, 40 entries is about to store 512 * 40 = 20480 bytes of JPEG data
@@ -1112,12 +1195,12 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
 
     // We spawn a thread to encode the image to JPEG using optimized encoder (cost about 500ms and
     // 8KB SRAM)
-    encoder_thread_ = std::thread([this, jpeg_queue]() {
-        uint16_t w = frame_.width ? frame_.width : 320;
-        uint16_t h = frame_.height ? frame_.height : 240;
-        v4l2_pix_fmt_t enc_fmt = frame_.format;
+    std::thread encoder_thread([frame, jpeg_queue, frame_owner = std::move(frame_owner)]() {
+        uint16_t w = frame.width ? frame.width : 320;
+        uint16_t h = frame.height ? frame.height : 240;
+        v4l2_pix_fmt_t enc_fmt = frame.format;
         bool ok = image_to_jpeg_cb(
-            frame_.data, frame_.len, w, h, enc_fmt, 80,
+            frame_owner.get(), frame.len, w, h, enc_fmt, 80,
             [](void* arg, size_t index, const void* data, size_t len) -> size_t {
                 auto jpeg_queue = static_cast<QueueHandle_t>(arg);
                 JpegChunk chunk = {.data = nullptr, .len = len};
@@ -1144,7 +1227,7 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
         }
     });
 
-    auto drain_jpeg_queue = [this, jpeg_queue]() {
+    auto drain_jpeg_queue = [&encoder_thread, jpeg_queue]() {
         JpegChunk chunk;
         while (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) == pdPASS) {
             if (chunk.data != nullptr) {
@@ -1153,24 +1236,32 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
                 break;
             }
         }
-        encoder_thread_.join();
+        encoder_thread.join();
         vQueueDelete(jpeg_queue);
     };
 
     auto network = Board::GetInstance().GetNetwork();
+    if (!network) {
+        drain_jpeg_queue();
+        return std::unexpected("Network unavailable");
+    }
     auto http = network->CreateHttp(3);
+    if (!http) {
+        drain_jpeg_queue();
+        return std::unexpected("Failed to create HTTP client");
+    }
     // 构造multipart/form-data请求体
     std::string boundary = "----ESP32_CAMERA_BOUNDARY";
 
     // 配置HTTP客户端，使用分块传输编码
     http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
-    if (!explain_token_.empty()) {
-        http->SetHeader("Authorization", "Bearer " + explain_token_);
+    if (!explain_token.empty()) {
+        http->SetHeader("Authorization", "Bearer " + explain_token);
     }
     http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
     http->SetHeader("Transfer-Encoding", "chunked");
-    if (auto opened = http->Open("POST", explain_url_); !opened) {
+    if (auto opened = http->Open("POST", explain_url); !opened) {
         ESP_LOGE(TAG, "Failed to connect to explain URL: %s", opened.error().ToString().c_str());
         drain_jpeg_queue();
         return std::unexpected("Failed to connect to explain URL");
@@ -1234,7 +1325,7 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
         total_sent += chunk.len;
     }
     // Wait for the encoder thread to finish
-    encoder_thread_.join();
+    encoder_thread.join();
     // 清理队列
     vQueueDelete(jpeg_queue);
 
@@ -1278,6 +1369,6 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
     ESP_LOGI(
         TAG,
         "Explain image size=%d bytes, compressed size=%d, remain stack size=%d, question=%s\n%s",
-        (int)frame_.len, (int)total_sent, (int)remain_stack_size, question.c_str(), result.c_str());
+        (int)frame.len, (int)total_sent, (int)remain_stack_size, question.c_str(), result.c_str());
     return result;
 }

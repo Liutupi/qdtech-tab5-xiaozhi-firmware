@@ -10,7 +10,7 @@ class Tab5IcuPage {
 public:
     explicit Tab5IcuPage(lv_obj_t* parent, std::function<void()> on_back);
     lv_obj_t* object() const { return page_; }
-    void Open(int mode = -1, const std::string& external_result = "");
+    void Open(int mode = -1, const std::string& external_result = "", bool result_ok = true);
     void Clear();
 
 private:
@@ -22,7 +22,10 @@ private:
     lv_obj_t* field_labels_[kFields] = {};
     lv_obj_t* nav_buttons_[kModes] = {};
     lv_obj_t* result_ = nullptr;
+    lv_obj_t* voice_note_ = nullptr;
+    lv_obj_t* calculate_button_ = nullptr;
     lv_obj_t* keypad_ = nullptr;
+    lv_obj_t* keypad_field_label_ = nullptr;
     lv_obj_t* keypad_value_ = nullptr;
     lv_obj_t* keys_[14] = {};
     std::array<std::array<std::string, kFields>, kModes> values_{};
@@ -31,19 +34,22 @@ private:
     int editing_ = -1;
     int drug_ = 0;
     bool female_ = false;
+    bool sex_selected_ = false;
+    bool voice_result_ = false;
     std::string edit_value_;
 
     static lv_obj_t* Panel(lv_obj_t* parent, int x, int y, int w, int h, uint32_t color);
-    static lv_obj_t* Label(lv_obj_t* parent, const char* text, const lv_font_t* font,
-                           int x, int y, int w, uint32_t color);
-    static lv_obj_t* Button(lv_obj_t* parent, const char* text,
-                            int x, int y, int w, int h, lv_event_cb_t callback, void* user);
+    static lv_obj_t* Label(lv_obj_t* parent, const char* text, const lv_font_t* font, int x, int y,
+                           int w, uint32_t color);
+    static lv_obj_t* Button(lv_obj_t* parent, const char* text, int x, int y, int w, int h,
+                            lv_event_cb_t callback, void* user);
     static void OnNavigation(lv_event_t* event);
     static void OnField(lv_event_t* event);
     static void OnKey(lv_event_t* event);
     static void OnCalculate(lv_event_t* event);
     void SelectMode(int mode);
     void RefreshFields();
+    void InvalidateResult();
     void Calculate();
     bool Number(int index, double& output, bool optional = false) const;
 };

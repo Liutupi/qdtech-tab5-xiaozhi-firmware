@@ -18,6 +18,8 @@ main/mmap_generate_emoji.h
 .cache
 *.pyc
 *.bin
+!assets/nabo/portrait_matte_434x558_rgb565.bin
+!assets/nabo/think_torso_262x462_rgb565a8.bin
 mmap_generate_*.h
 .clangd
 

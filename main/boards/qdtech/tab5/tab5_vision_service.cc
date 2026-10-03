@@ -7,6 +7,7 @@
 #include <memory>
 #include <string_view>
 
+
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
@@ -27,14 +28,18 @@ constexpr int kGridWidth = 32;
 constexpr int kGridHeight = 24;
 constexpr int64_t kSleepAfterUs = 90LL * 1000000;
 constexpr int64_t kGreetingCooldownUs = 120LL * 1000000;
+constexpr int64_t kGreetingRequestLifetimeUs = 8LL * 1000000;
 }
 
 void Tab5VisionService::Start(EspVideo* camera, QdtechTab5Display* display) {
     if (started_ || !camera || !display) return;
     camera_ = camera;
     display_ = display;
-    started_ = xTaskCreate(TaskEntry, "nabo_vision", 24576, this, 4, nullptr) == pdPASS;
-    if (!started_) ESP_LOGE(kTag, "Failed to start camera vision task");
+    // A measured person-detection run used about 4.4 KB of stack. Retain
+    // more than 7 KB of headroom while returning 12 KB of internal RAM.
+    started_ = xTaskCreate(TaskEntry, "nabo_vision", 12288, this, 3, nullptr) == pdPASS;
+    if (!started_)
+        ESP_LOGE(kTag, "Failed to start camera vision task");
 }
 
 void Tab5VisionService::RequestPresenceTest() {
@@ -52,20 +57,42 @@ void Tab5VisionService::TaskEntry(void* arg) {
     vTaskDelete(nullptr);
 }
 
+void Tab5VisionService::TryGreeting(int64_t detected_at_us) {
+    if (!greeting_owed_.load(std::memory_order_acquire) ||
+        greeting_queued_.exchange(true, std::memory_order_acq_rel))
+        return;
+    Application::GetInstance().Schedule([this, detected_at_us] {
+        auto& app = Application::GetInstance();
+        const int64_t now = esp_timer_get_time();
+        if (greeting_owed_.load(std::memory_order_acquire) &&
+            now - detected_at_us < kGreetingRequestLifetimeUs && !app.IsExternalAudioActive() &&
+            app.GetDeviceState() == kDeviceStateIdle) {
+            display_->WelcomeBack();
+            app.PlaySound(std::string_view(reinterpret_cast<const char*>(nabo_greeting_ogg),
+                                           nabo_greeting_ogg_len));
+            last_greeting_us_.store(now, std::memory_order_release);
+            greeting_owed_.store(false, std::memory_order_release);
+        }
+        // When an audio conversation wins the race, retain the greeting intent.
+        // The next confirmed person frame retries after audio becomes idle.
+        greeting_queued_.store(false, std::memory_order_release);
+    });
+}
+
 void Tab5VisionService::Run() {
     constexpr size_t kRgbBytes = size_t(kWidth) * kHeight * 3;
-    auto* rgb = static_cast<uint8_t*>(heap_caps_malloc(
-        kRgbBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!rgb) {
-        ESP_LOGE(kTag, "No PSRAM for vision frame");
-        return;
-    }
+    auto* rgb =
+        static_cast<uint8_t*>(heap_caps_malloc(kRgbBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    int64_t next_rgb_attempt = 0;
+    if (!rgb)
+        ESP_LOGW(kTag, "No PSRAM for vision frame; will retry while UI stays responsive");
     std::array<uint8_t, kGridWidth * kGridHeight> previous{};
     bool have_previous = false;
     bool sleeping = false;
     bool camera_paused = false;
     bool person_present = false;
     bool test_pending = false;
+    bool test_deferred_for_audio = false;
     bool test_saw_person = false;
     unsigned motion_history = 0;
     unsigned person_frames = 0;
@@ -76,7 +103,6 @@ void Tab5VisionService::Run() {
     int64_t last_activity = esp_timer_get_time();
     int64_t last_confirmed_motion = 0;
     int64_t last_person_seen = 0;
-    int64_t last_greeting = 0;
     int64_t last_gain_adjust = 0;
     int64_t last_person_scan = 0;
     int64_t test_wait_start = 0;
@@ -91,30 +117,82 @@ void Tab5VisionService::Run() {
         const int64_t wait_until = esp_timer_get_time() + 7LL * 1000 * 1000;
         while (esp_timer_get_time() < wait_until) {
             if (Application::GetInstance().IsExternalAudioActive()) {
-                if (!camera_paused) {
-                    camera_->PauseStream();
-                    camera_paused = true;
-                }
+                if (!camera_paused)
+                    camera_paused = camera_->PauseStream();
             }
             vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
-    const bool manual_gain = camera_->ConfigureVisionLowLight();
-    if (!manual_gain) ESP_LOGW(kTag, "Camera manual exposure or gain unavailable");
+    bool manual_gain = camera_->ConfigureVisionLowLight();
+    if (!manual_gain)
+        ESP_LOGW(kTag, "Camera manual exposure or gain unavailable");
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        const int64_t now = esp_timer_get_time();
+        if (interaction_requested_.exchange(false)) {
+            last_activity = now;
+            sleeping = false;
+            display_->SetSleeping(false);
+        }
+        const bool new_test = test_requested_.exchange(false);
+        if (new_test) {
+            test_pending = true;
+            test_wait_start = now;
+            test_deadline = 0;
+            test_saw_person = false;
+            last_activity = now;
+            sleeping = false;
+            display_->SetSleeping(false);
+        }
+        const bool chatting = Application::GetInstance().GetDeviceState() != kDeviceStateIdle;
+        const bool radio_active = Application::GetInstance().IsExternalAudioActive();
+        if (chatting || radio_active)
+            last_activity = now;
+        if ((chatting || radio_active) && (test_pending || test_deadline) &&
+            (!test_deferred_for_audio || new_test)) {
+            test_pending = true;
+            test_wait_start = now;
+            test_deadline = 0;
+            test_saw_person = false;
+            test_deferred_for_audio = true;
+            display_->SetVisionPreview(nullptr);
+            display_->SetVisionMessage(
+                radio_active ? "播放中暂停感应" : "对话中暂停感应",
+                radio_active ? "停止播放后将自动开始感应测试。" : "对话结束后将自动开始感应测试。");
+        }
         // Camera CSI + motion grid compete with radio/music/NES on a tight
         // DMA and power budget. Fully stop the stream while external audio
         // (radio, music, or the emulator) runs.
-        if (Application::GetInstance().IsExternalAudioActive()) {
+        if (radio_active) {
+            have_previous = false;
             if (!camera_paused) {
-                camera_->PauseStream();
-                camera_paused = true;
-                have_previous = false;
-                ESP_LOGI(kTag, "Camera off while radio/music plays");
+                camera_paused = camera_->PauseStream();
+                if (camera_paused) {
+                    ESP_LOGI(kTag, "Camera off while radio/music plays");
+                }
             }
             continue;
+        }
+        if (chatting) {
+            have_previous = false;
+            continue;
+        }
+        if (test_deferred_for_audio) {
+            test_deferred_for_audio = false;
+            test_wait_start = now;
+        }
+        if (test_pending && now - test_wait_start > 60LL * 1000000) {
+            test_pending = false;
+            display_->SetVisionPreview(nullptr);
+            display_->SetVisionMessage("感应暂不可用", "摄像头未准备好，请稍后再试。");
+        }
+        if (test_deadline && now > test_deadline) {
+            test_deadline = 0;
+            display_->SetVisionPreview(nullptr);
+            display_->SetVisionMessage(test_saw_person ? "检测到有人" : "暂未检测到人",
+                                       test_saw_person ? "有人靠近时，Nabo 会主动问候。"
+                                                       : "请让人出现在画面中，再试一次。");
         }
         if (camera_paused) {
             if (!camera_->ResumeStream()) {
@@ -123,16 +201,28 @@ void Tab5VisionService::Run() {
                 continue;
             }
             camera_paused = false;
-            camera_->ConfigureVisionLowLight();
+            manual_gain = camera_->ConfigureVisionLowLight();
             if (manual_gain && camera_->SetVisionGainIndex(gain_index)) {
                 // keep the last indoor gain after re-enabling the sensor
             }
             have_previous = false;
             ESP_LOGI(kTag, "Camera on after radio/music stopped");
         }
+        if (!rgb) {
+            if (now < next_rgb_attempt)
+                continue;
+            rgb = static_cast<uint8_t*>(
+                heap_caps_malloc(kRgbBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (!rgb) {
+                next_rgb_attempt = now + 10LL * 1000000;
+                ESP_LOGW(kTag, "Vision frame allocation still unavailable");
+                continue;
+            }
+            ESP_LOGI(kTag, "Vision frame allocation recovered");
+        }
         uint16_t width = 0, height = 0;
-        if (!camera_->CaptureVisionFrame(rgb, kRgbBytes, width, height) ||
-            width != kWidth || height != kHeight) {
+        if (!camera_->CaptureVisionFrame(rgb, kRgbBytes, width, height) || width != kWidth ||
+            height != kHeight) {
             if (++failed_frames % 30 == 0)
                 ESP_LOGW(kTag, "Camera sample unavailable (%u)", failed_frames);
             continue;
@@ -141,25 +231,21 @@ void Tab5VisionService::Run() {
             ESP_LOGI(kTag, "Camera sampling recovered after %u misses", failed_frames);
             failed_frames = 0;
         }
-        const int64_t now = esp_timer_get_time();
-        if (interaction_requested_.exchange(false)) {
-            last_activity = now;
-            sleeping = false;
-            display_->SetSleeping(false);
-        }
-
         // AFE buffers settle asynchronously; defer the model until voice is idle.
         if (!detector && now >= next_detector_attempt &&
+            !Application::GetInstance().IsExternalAudioActive() &&
             Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
             next_detector_attempt = now + 10LL * 1000000;
             const size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
             const size_t largest_psram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
             // The vendor constructor assumes model allocation succeeds. The packed model is
-            // about 425 KB and its inference arena is 539 KB; retain room for concurrent UI/audio.
-            if (free_psram >= 1920 * 1024 && largest_psram >= 1280 * 1024) {
+            // about 425 KB and its inference arena is 539 KB. Leave room for concurrent
+            // UI/audio after the LZ4 pose assets have been mapped into PSRAM.
+            if (free_psram >= 1792 * 1024 && largest_psram >= 1280 * 1024) {
                 detector = std::make_unique<PedestrianDetect>(PedestrianDetect::PICO_S8_V1, false);
                 vision_ready_.store(true);
-                ESP_LOGI(kTag, "Person detector ready; PSRAM free=%u largest=%u",
+                ESP_LOGI(kTag, "Person detector ready; PSRAM before=%u after=%u largest=%u",
+                         unsigned(free_psram),
                          unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                          unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
             } else {
@@ -223,47 +309,34 @@ void Tab5VisionService::Run() {
         }
         if (++sample_count % 10 == 0)
             ESP_LOGI(kTag, "Camera active: scene change %d/768, asleep=%d", changed, sleeping);
+        if (sample_count % 60 == 0)
+            ESP_LOGI(kTag,
+                     "Vision memory: stack_min_free=%u internal_free=%u largest_internal=%u "
+                     "psram_free=%u",
+                     unsigned(uxTaskGetStackHighWaterMark(nullptr)),
+                     unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                     unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                     unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
 
-        if (test_requested_.exchange(false)) {
-            test_pending = true;
-            test_wait_start = now;
-            test_deadline = 0;
-            test_saw_person = false;
-            last_activity = now;
-            sleeping = false;
-            display_->SetSleeping(false);
-        }
         if (test_pending && detector) {
             test_pending = false;
             test_deadline = now + 20LL * 1000000;
             display_->SetVisionMessage("感应测试", "让人进入左侧取景中央。");
             ESP_LOGI(kTag, "Person presence test started");
-        } else if (test_pending && now - test_wait_start > 60LL * 1000000) {
-            test_pending = false;
-            display_->SetVisionPreview(nullptr);
-            display_->SetVisionMessage("感应暂不可用", "摄像头未准备好，请稍后再试。");
-        }
-        if (test_deadline && now > test_deadline) {
-            test_deadline = 0;
-            display_->SetVisionPreview(nullptr);
-            display_->SetVisionMessage(test_saw_person ? "检测到有人" : "暂未检测到人",
-                                       test_saw_person ? "有人靠近时，Nabo 会主动问候。" :
-                                       "请让人出现在画面中，再试一次。");
         }
         if (test_pending || test_deadline) {
             last_activity = now;
             display_->SetVisionPreview(rgb);
         }
 
-        const bool chatting = Application::GetInstance().GetDeviceState() != kDeviceStateIdle;
-        const bool radio_active = Application::GetInstance().IsExternalAudioActive();
-        if (chatting || radio_active) last_activity = now;
         if (!chatting && !sleeping && now - last_activity > kSleepAfterUs) {
             sleeping = true;
             display_->SetSleeping(true);
             ESP_LOGI(kTag, "No activity for 90s; Nabo sleeping");
         }
-        if (!detector || radio_active || (chatting && !test_deadline)) continue;
+        if (!detector || Application::GetInstance().IsExternalAudioActive() ||
+            Application::GetInstance().GetDeviceState() != kDeviceStateIdle)
+            continue;
         const int64_t scan_interval =
             test_deadline || (last_confirmed_motion && now - last_confirmed_motion < 10LL * 1000000) ||
             (person_frames && !person_present) ? 1000000 :
@@ -294,26 +367,17 @@ void Tab5VisionService::Run() {
                     display_->SetSleeping(false);
                 }
                 ESP_LOGI(kTag, "Person arrived");
-                if (!last_greeting || now - last_greeting >= kGreetingCooldownUs) {
-                    last_greeting = now;
-                    auto* display = display_;
-                    Application::GetInstance().Schedule([display] {
-                        auto& app = Application::GetInstance();
-                        if (app.IsExternalAudioActive() ||
-                            app.GetDeviceState() != kDeviceStateIdle) {
-                            return;
-                        }
-                        display->WelcomeBack();
-                        Application::GetInstance().PlaySound(std::string_view(
-                            reinterpret_cast<const char*>(nabo_greeting_ogg),
-                            nabo_greeting_ogg_len));
-                    });
-                }
+                const int64_t last_greeting = last_greeting_us_.load(std::memory_order_acquire);
+                greeting_owed_.store(!last_greeting || now - last_greeting >= kGreetingCooldownUs,
+                                     std::memory_order_release);
             }
+            if (person_present)
+                TryGreeting(now);
         } else {
             person_frames = 0;
             if (person_present && now - last_person_seen > 15LL * 1000000) {
                 person_present = false;
+                greeting_owed_.store(false, std::memory_order_release);
                 ESP_LOGI(kTag, "Person left the camera view");
             }
         }

@@ -19,17 +19,35 @@
 LV_FONT_DECLARE(qd_font_lxgw_28);
 LV_FONT_DECLARE(qd_font_lxgw_36);
 LV_FONT_DECLARE(qd_font_cjk_28);
-LV_FONT_DECLARE(font_noto_sans_basic_30_4);
 
 namespace {
-const lv_font_t* MusicTextFont() {
+bool SameMuseList(const tab5_muse::Snapshot& a, const tab5_muse::Snapshot& b) {
+    if (a.latest_id != b.latest_id || a.seen_id != b.seen_id ||
+        a.messages.size() != b.messages.size())
+        return false;
+    for (size_t i = 0; i < a.messages.size(); ++i) {
+        const auto& left = a.messages[i];
+        const auto& right = b.messages[i];
+        if (left.id != right.id || left.title != right.title || left.body != right.body ||
+            left.from != right.from || left.time != right.time)
+            return false;
+    }
+    return true;
+}
+
+std::shared_ptr<LvglFont> MusicTextFontOwner() {
     auto* theme = LvglThemeManager::GetInstance().GetTheme("dark");
     if (theme) {
         auto font = theme->GetTextFont();
         if (font && font->font())
-            return font->font();
+            return font;
     }
-    return &font_noto_sans_basic_30_4;
+    return nullptr;
+}
+
+const lv_font_t* MusicTextFont() {
+    auto owner = MusicTextFontOwner();
+    return owner ? owner->font() : &qd_font_cjk_28;
 }
 }  // namespace
 
@@ -81,6 +99,15 @@ lv_obj_t* Tab5NativeApps::Button(lv_obj_t* parent, const char* text, int x, int 
     return button;
 }
 
+void Tab5NativeApps::SetLabelTextIfChanged(lv_obj_t* label, const char* text) {
+    if (!label)
+        return;
+    const char* next = text ? text : "";
+    const char* current = lv_label_get_text(label);
+    if (!current || std::strcmp(current, next) != 0)
+        lv_label_set_text(label, next);
+}
+
 void Tab5NativeApps::Schedule(std::function<void()> action) {
     if (action) Application::GetInstance().Schedule(std::move(action));
 }
@@ -113,6 +140,11 @@ void Tab5NativeApps::SetActions(Actions actions) {
 }
 
 void Tab5NativeApps::Show(lv_obj_t* page) {
+    if (page && IsVisible() && !lv_obj_has_flag(page, LV_OBJ_FLAG_HIDDEN)) {
+        game_page_visible_.store(page == game_page_, std::memory_order_release);
+        return;
+    }
+    game_page_visible_.store(false, std::memory_order_release);
     for (auto* candidate : {home_page_, settings_page_, radio_page_, game_page_, muse_page_,
                            icu_page_ ? icu_page_->object() : nullptr}) {
         if (!candidate) continue;
@@ -127,11 +159,23 @@ void Tab5NativeApps::Show(lv_obj_t* page) {
     }
     lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
+    game_page_visible_.store(page == game_page_, std::memory_order_release);
 }
 
 void Tab5NativeApps::OpenApps() { Show(home_page_); }
 
 void Tab5NativeApps::OpenMuse() {
+    // Opening the inbox marks the current batch read. Render that state once
+    // before showing the page; the later persistence callback need not rebuild it.
+    if (muse_snapshot_.seen_id < muse_snapshot_.latest_id) {
+        muse_snapshot_.seen_id = muse_snapshot_.latest_id;
+        muse_list_dirty_ = true;
+        SetLabelTextIfChanged(muse_entry_label_, "打开 Muse");
+    }
+    if (muse_list_dirty_ || muse_rendered_font_ != MusicTextFont()) {
+        RenderMuseList(muse_snapshot_);
+        muse_list_dirty_ = false;
+    }
     Show(muse_page_);
     Schedule(actions_.muse_refresh);
     Schedule(actions_.muse_opened);
@@ -142,10 +186,16 @@ void Tab5NativeApps::OpenSettings() {
     RefreshSettings();
 }
 
-void Tab5NativeApps::OpenRadio() {
+void Tab5NativeApps::OpenRadio(bool start_playback) {
+    const bool was_visible = IsRadioVisible();
+    // BuildRadio keeps its static fonts while hidden. The theme font can be replaced by
+    // the SD font after startup, so bind the current owner before LVGL lays out this page.
+    SyncRadioTextFont();
     Show(radio_page_);
-    RefreshStations();
-    Schedule(actions_.start_radio);
+    if (!was_visible)
+        RefreshStations();
+    if (start_playback)
+        Schedule(actions_.start_radio);
 }
 
 void Tab5NativeApps::OpenNes() {
@@ -156,6 +206,7 @@ void Tab5NativeApps::OpenNes() {
 }
 
 void Tab5NativeApps::OpenIr() {
+    game_page_visible_.store(false, std::memory_order_release);
     if (!ir_page_)
         ir_page_ = std::make_unique<Tab5IrRemotePage>(root_, [this] { OpenApps(); });
     for (auto* candidate : {home_page_, settings_page_, radio_page_, game_page_, muse_page_,
@@ -170,6 +221,18 @@ void Tab5NativeApps::OpenIr() {
 
 void Tab5NativeApps::Tick() {
     UpdateWave();
+    if (IsRadioVisible() && music_font_ != MusicTextFont())
+        SyncRadioTextFont();
+    if (IsVisible() && muse_page_ && !lv_obj_has_flag(muse_page_, LV_OBJ_FLAG_HIDDEN) &&
+        muse_rendered_font_ != MusicTextFont()) {
+        RenderMuseList(muse_snapshot_);
+        muse_list_dirty_ = false;
+    }
+    // If the emulator could not publish its first fallback frame while LVGL
+    // was busy, the next UI tick still makes the failure visible.
+    if (game_fallback_error_.load() && IsVisible() && game_page_ &&
+        !lv_obj_has_flag(game_page_, LV_OBJ_FLAG_HIDDEN))
+        SetLabelTextIfChanged(game_status_, "画面内存不足，游戏已停止");
     // Gamepad-only UI: poll the pad on the game page.
     if (IsVisible() && game_page_ && !lv_obj_has_flag(game_page_, LV_OBJ_FLAG_HIDDEN)) {
         static uint8_t last_pad = 0;
@@ -192,8 +255,11 @@ void Tab5NativeApps::Tick() {
                 Schedule(actions_.nes_play_pause);
                 ShowGamePlay();
             }
-            // Tick runs with the display lock — safe to repaint the list.
-            RefreshGameRoms();
+            // The list changes only when the scanner or selection changes.
+            const int count = actions_.nes_rom_count ? actions_.nes_rom_count() : 0;
+            const int selected = actions_.nes_rom_index ? actions_.nes_rom_index() : 0;
+            if (count != game_list_count_ || selected != game_list_index_)
+                RefreshGameRoms();
         }
         constexpr uint8_t kExitCombo = kNesBtnSelect | kNesBtnStart;
         const bool exit_pressed = playing ? ((pad & kExitCombo) == kExitCombo && (pressed & kExitCombo))
@@ -219,16 +285,23 @@ void Tab5NativeApps::Tick() {
     }
 }
 
-void Tab5NativeApps::OpenIcu(int mode, const std::string& external_result) {
+void Tab5NativeApps::OpenIcu(int mode, const std::string& external_result, bool result_ok) {
     if (!icu_page_) icu_page_ = std::make_unique<Tab5IcuPage>(root_, [this] { OpenApps(); });
     Show(icu_page_->object());
-    icu_page_->Open(mode, external_result);
+    icu_page_->Open(mode, external_result, result_ok);
 }
 
-void Tab5NativeApps::Close() { lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN); }
+void Tab5NativeApps::Close() {
+    game_page_visible_.store(false, std::memory_order_release);
+    lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
+}
 
 bool Tab5NativeApps::IsVisible() const {
     return root_ && !lv_obj_has_flag(root_, LV_OBJ_FLAG_HIDDEN);
+}
+
+bool Tab5NativeApps::IsRadioVisible() const {
+    return IsVisible() && !lv_obj_has_flag(radio_page_, LV_OBJ_FLAG_HIDDEN);
 }
 
 bool Tab5NativeApps::IsSettingsVisible() const {
@@ -238,64 +311,61 @@ bool Tab5NativeApps::IsSettingsVisible() const {
 void Tab5NativeApps::BuildHome() {
     Label(home_page_, "土皮助手", &qd_font_lxgw_36, 0xf5f9fd, 52, 27, 450);
     Label(home_page_, "应用与设置", &qd_font_lxgw_28, 0x9bb7ca, 54, 76, 500);
-    Button(home_page_, "返回 Nabo", 1016, 34, 216, 60, [](lv_event_t* event) {
-        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->Close();
-    }, this);
+    Button(
+        home_page_, "返回 Nabo", 1016, 34, 216, 60,
+        [](lv_event_t* event) {
+            static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->Close();
+        },
+        this);
 
-    auto* settings = Card(home_page_, 54, 142, 554, 220, 0x142d43, 0x35627d, 30);
-    Card(settings, 25, 24, 7, 48, 0x64cfe8, 0x64cfe8, 3);
-    Label(settings, "设置", &qd_font_lxgw_36, 0xf5f9fd, 51, 22, 420);
-    Label(settings, "网络 · 亮度 · 音量", &qd_font_lxgw_28,
-          0xa8c4d3, 52, 79, 440);
-    Button(settings, "打开设置", 52, 142, 450, 58, [](lv_event_t* event) {
+    // The six destinations share one large touch target. Keep every label inside
+    // the card and let taps on text bubble to the card's click handler.
+    auto entry = [this](int x, int y, uint32_t accent, const char* title, const char* detail,
+                        const char* action, lv_event_cb_t callback) -> lv_obj_t* {
+        auto* card = Card(home_page_, x, y, 554, 174, 0x142d43, 0x35627d, 26);
+        lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(card, lv_color_hex(0x234761), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(card, lv_color_hex(accent), LV_STATE_PRESSED);
+        auto* accent_bar = Card(card, 24, 21, 7, 44, accent, accent, 3);
+        lv_obj_remove_flag(accent_bar, LV_OBJ_FLAG_CLICKABLE);
+        auto* heading = Label(card, title, &qd_font_lxgw_36, 0xf5f9fd, 51, 15, 470);
+        auto* description = Label(card, detail, &qd_font_lxgw_28, 0xa8c4d3, 52, 69, 470);
+        auto* affordance = Label(card, action, &qd_font_lxgw_28, accent, 52, 122, 470);
+        for (auto* label : {heading, description, affordance}) {
+            lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+            lv_obj_set_width(label, 470);
+            lv_obj_set_height(label, 42);
+            lv_obj_add_flag(label, LV_OBJ_FLAG_EVENT_BUBBLE);
+        }
+        lv_obj_add_event_cb(card, callback, LV_EVENT_CLICKED, this);
+        return affordance;
+    };
+
+    entry(54, 140, 0x64cfe8, "设置", "网络 · 亮度 · 音量", "打开设置", [](lv_event_t* event) {
         static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenSettings();
-    }, this);
-
-    auto* radio = Card(home_page_, 672, 142, 554, 220, 0x142d43, 0x35627d, 30);
-    Card(radio, 25, 24, 7, 48, 0xf7c84d, 0xf7c84d, 3);
-    Label(radio, "网络电台", &qd_font_lxgw_36, 0xf5f9fd, 51, 22, 440);
-    Label(radio, "选台 · 播放 · 切换", &qd_font_lxgw_28,
-          0xa8c4d3, 52, 79, 440);
-    Button(radio, "打开电台", 52, 142, 450, 58, [](lv_event_t* event) {
+    });
+    entry(672, 140, 0xf7c84d, "网络电台", "选台 · 播放 · 切换", "打开电台", [](lv_event_t* event) {
         static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenRadio();
-    }, this);
-
-    auto* icu = Card(home_page_, 54, 389, 554, 239, 0x142d43, 0x35627d, 30);
-    Card(icu, 26, 25, 7, 49, 0x89c8a7, 0x89c8a7, 3);
-    Label(icu, "ICU 数值工具", &qd_font_lxgw_36, 0xf5f9fd, 52, 23, 420);
-    Label(icu, "肾功能 · 氧合 · 血气 · 静脉泵",
-          &qd_font_lxgw_28, 0xa8c4d3, 53, 86, 440);
-    Button(icu, "打开计算", 52, 155, 450, 58, [](lv_event_t* event) {
-        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenIcu();
-    }, this);
-
-    auto* game = Card(home_page_, 672, 389, 554, 239, 0x142d43, 0x35627d, 30);
-    Card(game, 26, 25, 7, 49, 0xe87c64, 0xe87c64, 3);
-    Label(game, "红白机 NES", &qd_font_lxgw_36, 0xf5f9fd, 52, 23, 420);
-    Label(game, "USB 手柄 · SD 卡 ROM · 720p 适配",
-          &qd_font_lxgw_28, 0xa8c4d3, 53, 86, 440);
-    Button(game, "进入游戏", 52, 155, 450, 58, [](lv_event_t* event) {
-        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenNes();
-    }, this);
-
-    auto* ir = Card(home_page_, 54, 650, 554, 50, 0x142d43, 0x35627d, 18);
-    Label(ir, "红外遥控 · 电视 / 空调", &qd_font_lxgw_28, 0x9bb7ca, 24, 10, 500);
-    lv_obj_add_flag(ir, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(ir, [](lv_event_t* event) {
+    });
+    entry(54, 326, 0x89c8a7, "ICU 数值工具", "肾功能 · 氧合 · 血气 · 静脉泵", "打开计算",
+          [](lv_event_t* event) {
+              static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenIcu();
+          });
+    entry(672, 326, 0xe87c64, "NES", "红白机 · USB 控制 · SD 卡 ROM", "进入游戏",
+          [](lv_event_t* event) {
+              static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenNes();
+          });
+    entry(54, 512, 0x86a8e8, "IR", "TV · 空调 · 红外遥控", "打开遥控", [](lv_event_t* event) {
         static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenIr();
-    }, LV_EVENT_CLICKED, this);
-
-    auto* muse = Card(home_page_, 672, 650, 554, 50, 0x1f2a4d, 0x6c5fd0, 18);
-    Card(muse, 14, 13, 6, 22, 0xa99bff, 0xa99bff, 3);
-    muse_entry_label_ = Label(muse, "Muse 推送", &qd_font_cjk_28, 0xd9d3ff, 32, 8, 500);
-    lv_obj_add_flag(muse, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(muse, [](lv_event_t* event) {
-        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenMuse();
-    }, LV_EVENT_CLICKED, this);
+    });
+    muse_entry_label_ =
+        entry(672, 512, 0xa99bff, "Muse", "NAS 消息推送", "打开 Muse", [](lv_event_t* event) {
+            static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenMuse();
+        });
 }
 
 void Tab5NativeApps::BuildMuse() {
-    Label(muse_page_, "Muse 推送", &font_noto_sans_basic_30_4, 0xf5f9fd, 52, 30, 440);
+    Label(muse_page_, "Muse 推送", &qd_font_lxgw_28, 0xf5f9fd, 52, 30, 440);
     muse_status_ = Label(muse_page_, "正在连接 NAS…", &qd_font_cjk_28, 0x9bb7ca, 54, 76, 760);
     lv_label_set_long_mode(muse_status_, LV_LABEL_LONG_DOT);
     lv_obj_set_height(muse_status_, 34);
@@ -323,18 +393,20 @@ void Tab5NativeApps::BuildMuse() {
     lv_label_set_long_mode(muse_url_, LV_LABEL_LONG_DOT);
     lv_obj_set_height(muse_url_, 34);
 
-    tab5_muse::Snapshot empty;
-    RenderMuseList(empty);
+    RenderMuseList(muse_snapshot_);
 }
 
 void Tab5NativeApps::RenderMuseList(const tab5_muse::Snapshot& snapshot) {
+    // LVGL styles hold raw font pointers. Keep the old owner through lv_obj_clean,
+    // then pin the new owner until this list is rebuilt or destroyed.
+    auto previous_font_owner = std::move(muse_font_owner_);
+    muse_font_owner_ = MusicTextFontOwner();
+    muse_rendered_font_ = muse_font_owner_ ? muse_font_owner_->font() : &qd_font_cjk_28;
     lv_obj_clean(muse_list_);
-    muse_rendered_latest_ = snapshot.latest_id;
-    muse_rendered_count_ = snapshot.messages.size();
     if (snapshot.messages.empty()) {
         auto* hint = Card(muse_list_, 0, 0, 1150, 190, 0x142d43, 0x35627d, 24);
         lv_obj_remove_flag(hint, LV_OBJ_FLAG_SCROLLABLE);
-        Label(hint, "还没有推送", &font_noto_sans_basic_30_4, 0xf5f9fd, 30, 26, 1080);
+        Label(hint, "还没有推送", &qd_font_cjk_28, 0xf5f9fd, 30, 26, 1080);
         auto* text = Label(hint,
                            "在 Muse 里添加本 NAS 的 MCP 地址 (见页面底部或 NAS 容器日志)，"
                            "然后让 Muse 用 tab5_push 把整理好的内容推送过来。",
@@ -359,7 +431,7 @@ void Tab5NativeApps::RenderMuseList(const tab5_muse::Snapshot& snapshot) {
         auto* title = lv_label_create(card);
         lv_label_set_text(title, m.title.c_str());
         lv_obj_set_width(title, 1100);
-        lv_obj_set_style_text_font(title, &font_noto_sans_basic_30_4, 0);
+        lv_obj_set_style_text_font(title, muse_rendered_font_, 0);
         lv_obj_set_style_text_color(title, lv_color_hex(0xf5f9fd), 0);
 
         std::string meta = m.time;
@@ -376,7 +448,7 @@ void Tab5NativeApps::RenderMuseList(const tab5_muse::Snapshot& snapshot) {
         lv_label_set_text(body, m.body.c_str());
         lv_obj_set_width(body, 1100);
         lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
-        lv_obj_set_style_text_font(body, &font_noto_sans_basic_30_4, 0);
+        lv_obj_set_style_text_font(body, muse_rendered_font_, 0);
         lv_obj_set_style_text_color(body, lv_color_hex(0xd6e4ee), 0);
         lv_obj_set_style_text_line_space(body, 6, 0);
     }
@@ -388,36 +460,39 @@ void Tab5NativeApps::SetMuseInbox(const tab5_muse::Snapshot& snapshot) {
     if (muse_entry_label_) {
         char text[64];
         if (unread > 0)
-            std::snprintf(text, sizeof(text), "Muse 推送 · %d 条新消息", unread);
+            std::snprintf(text, sizeof(text), "打开 Muse · %d 条新消息", unread);
         else
-            std::snprintf(text, sizeof(text), "Muse 推送");
-        lv_label_set_text(muse_entry_label_, text);
+            std::snprintf(text, sizeof(text), "打开 Muse");
+        SetLabelTextIfChanged(muse_entry_label_, text);
     }
     if (muse_status_) {
         char text[160];
         if (!snapshot.ok && !snapshot.ever_ok)
-            std::snprintf(text, sizeof(text), "%s", snapshot.url.empty()
-                                                       ? "还没有设置 Muse 中转站地址"
-                                                       : "无法连接 Muse 中转站，稍后自动重试");
+            std::snprintf(text, sizeof(text), "%s",
+                          snapshot.url.empty() ? "还没有设置 Muse 中转站地址"
+                                               : "无法连接 Muse 中转站，稍后自动重试");
         else if (!snapshot.ok)
             std::snprintf(text, sizeof(text), "NAS 暂时无响应，显示的是上次内容");
         else
             std::snprintf(text, sizeof(text), "共 %u 条 · 未读 %d · 每 2 分钟自动刷新",
                           unsigned(snapshot.messages.size()), unread);
-        lv_label_set_text(muse_status_, text);
+        SetLabelTextIfChanged(muse_status_, text);
     }
     if (muse_url_) {
         const std::string url = snapshot.mcp_url.empty()
                                     ? std::string("Muse 接入地址：公网隧道未就绪")
                                     : "Muse 接入地址：" + snapshot.mcp_url;
-        lv_label_set_text(muse_url_, url.c_str());
+        SetLabelTextIfChanged(muse_url_, url.c_str());
     }
-    // Rebuild the cards only when the content changed (or read state flipped on open).
-    if (muse_list_ && (snapshot.latest_id != muse_rendered_latest_ ||
-                       snapshot.messages.size() != muse_rendered_count_ ||
-                       snapshot.seen_id != muse_rendered_seen_)) {
-        muse_rendered_seen_ = snapshot.seen_id;
-        RenderMuseList(snapshot);
+    // Keep the newest data while the inbox is hidden. Building up to 12 cards
+    // here would otherwise block the LVGL task for a page nobody can see.
+    if (!SameMuseList(snapshot, muse_snapshot_)) {
+        muse_snapshot_ = snapshot;
+        muse_list_dirty_ = true;
+    }
+    if (muse_list_dirty_ && IsVisible() && !lv_obj_has_flag(muse_page_, LV_OBJ_FLAG_HIDDEN)) {
+        RenderMuseList(muse_snapshot_);
+        muse_list_dirty_ = false;
     }
 }
 
@@ -445,8 +520,8 @@ void Tab5NativeApps::BuildSettings() {
     brightness_value_ = Label(brightness, "70%", &qd_font_lxgw_28,
                               0x83d6e8, 430, 39, 100);
     brightness_slider_ = lv_slider_create(brightness);
-    lv_obj_set_pos(brightness_slider_, 42, 135);
-    lv_obj_set_size(brightness_slider_, 468, 26);
+    lv_obj_set_pos(brightness_slider_, 42, 124);
+    lv_obj_set_size(brightness_slider_, 468, 48);
     lv_slider_set_range(brightness_slider_, 5, 100);
     lv_obj_set_style_bg_color(brightness_slider_, lv_color_hex(0x31546c), LV_PART_MAIN);
     lv_obj_set_style_bg_color(brightness_slider_, lv_color_hex(0x70d0e8), LV_PART_INDICATOR);
@@ -470,8 +545,8 @@ void Tab5NativeApps::BuildSettings() {
     volume_value_ = Label(volume, "70%", &qd_font_lxgw_28,
                           0x83d6e8, 460, 39, 100);
     volume_slider_ = lv_slider_create(volume);
-    lv_obj_set_pos(volume_slider_, 42, 135);
-    lv_obj_set_size(volume_slider_, 494, 26);
+    lv_obj_set_pos(volume_slider_, 42, 124);
+    lv_obj_set_size(volume_slider_, 494, 48);
     lv_slider_set_range(volume_slider_, 0, 100);
     lv_obj_set_style_bg_color(volume_slider_, lv_color_hex(0x31546c), LV_PART_MAIN);
     lv_obj_set_style_bg_color(volume_slider_, lv_color_hex(0xf7c84d), LV_PART_INDICATOR);
@@ -553,8 +628,10 @@ void Tab5NativeApps::BuildRadio() {
         }, this);
         station_rows_[i] = row;
         station_names_[i] = lv_obj_get_child(row, 0);
-        lv_obj_set_pos(station_names_[i], 15, 7);
-        lv_obj_set_size(station_names_[i], 302, 34);
+        // The full theme font has a 43 px line height; keep its glyphs
+        // inside the 48 px touch row instead of clipping them at 34 px.
+        lv_obj_set_pos(station_names_[i], 15, 2);
+        lv_obj_set_size(station_names_[i], 302, 44);
         lv_obj_set_style_text_align(station_names_[i], LV_TEXT_ALIGN_LEFT, 0);
         lv_label_set_long_mode(station_names_[i], LV_LABEL_LONG_MODE_DOTS);
     }
@@ -596,16 +673,16 @@ void Tab5NativeApps::BuildRadio() {
         this);
     lv_obj_set_style_bg_color(ask_song, lv_color_hex(0x7a4fd6), 0);
     ask_song_label_ = lv_obj_get_child(ask_song, 0);
-    // Dynamic song/station titles use Noto (much broader CJK) so random
-    // NetEase names do not turn into boxes/garbage from the LXGW subset.
-    radio_station_ =
-        Label(player, "选择一个电台", &font_noto_sans_basic_30_4, 0xf5f9fd, 38, 68, 708);
-    lv_obj_set_height(radio_station_, 60);
-    radio_state_ = Label(player, "待播放", &qd_font_lxgw_28, 0xf7c84d, 38, 119, 700);
-    auto* wave_panel = Card(player, 28, 158, 728, 120, 0x0c2133, 0x346078, 22);
+    // Use bundled CJK until the full theme font is ready for dynamic titles.
+    radio_station_ = Label(player, "选择一个电台", &qd_font_cjk_28, 0xf5f9fd, 38, 68, 708);
+    // Noto's 43 px line height needs 86 px for two lines of song title.
+    lv_obj_set_height(radio_station_, 90);
+    lv_label_set_long_mode(radio_station_, LV_LABEL_LONG_DOT);
+    radio_state_ = Label(player, "待播放", &qd_font_lxgw_28, 0xf7c84d, 38, 162, 700);
+    auto* wave_panel = Card(player, 28, 199, 728, 80, 0x0c2133, 0x346078, 22);
     radio_wave_ = lv_obj_create(wave_panel);
-    lv_obj_set_pos(radio_wave_, 18, 10);
-    lv_obj_set_size(radio_wave_, 692, 98);
+    lv_obj_set_pos(radio_wave_, 18, 6);
+    lv_obj_set_size(radio_wave_, 692, 68);
     lv_obj_set_style_bg_opa(radio_wave_, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(radio_wave_, 0, 0);
     lv_obj_set_style_pad_all(radio_wave_, 0, 0);
@@ -615,15 +692,14 @@ void Tab5NativeApps::BuildRadio() {
         wave_heights_[i] = 5;
         wave_colors_[i] = lv_color_hsv_to_rgb((205 + i * 330 / kWaveBars) % 360, 78, 95);
     }
-    radio_meta_ = Label(player, "", &qd_font_lxgw_28, 0x9bb7ca, 38, 282, 700);
-    lv_obj_set_height(radio_meta_, 28);
+    radio_meta_ = Label(player, "", &qd_font_lxgw_28, 0x9bb7ca, 38, 283, 700);
+    lv_obj_set_height(radio_meta_, 34);
     lv_label_set_long_mode(radio_meta_, LV_LABEL_LONG_DOT);
-    auto* lyric_panel = Card(player, 28, 311, 728, 132, 0x0c2133, 0x346078, 16);
-    // Single current line only — no prev/next stack and no marquee scroll.
+    auto* lyric_panel = Card(player, 28, 322, 728, 121, 0x0c2133, 0x346078, 16);
+    // Show the current lyric in up to two centered lines, without scrolling.
     radio_lyric_previous_ = nullptr;
     radio_lyric_next_ = nullptr;
-    radio_lyric_ = Label(lyric_panel, "等待歌词", &font_noto_sans_basic_30_4,
-                         0xf5f9fd, 18, 42, 692);
+    radio_lyric_ = Label(lyric_panel, "等待歌词", &qd_font_cjk_28, 0xf5f9fd, 18, 36, 692);
     lv_obj_set_height(radio_lyric_, 48);
     lv_label_set_long_mode(radio_lyric_, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(radio_lyric_, LV_TEXT_ALIGN_CENTER, 0);
@@ -691,7 +767,7 @@ void Tab5NativeApps::UpdateWave() {
     bool changed = false;
     for (int i = 0; i < kWaveBars; ++i) {
         const int ripple = 28 - std::abs((i * 13 + int(wave_phase_) * 5) % 56 - 28);
-        const int target = radio_playing_ ? std::clamp(10 + level * (20 + ripple) / 45, 6, 88) : 5;
+        const int target = radio_playing_ ? std::clamp(10 + level * (20 + ripple) / 45, 6, 64) : 5;
         const int next = (int(wave_heights_[i]) * 2 + target + 1) / 3;
         changed |= next != wave_heights_[i];
         wave_heights_[i] = static_cast<uint8_t>(next);
@@ -709,44 +785,14 @@ void Tab5NativeApps::BuildGame() {
     lv_obj_clear_flag(stage, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(stage, LV_OBJ_FLAG_CLICKABLE);
 
-    game_src_pixels_ = static_cast<uint16_t*>(
-        heap_caps_malloc(256 * 240 * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     constexpr int kW = 960, kH = 720;
-    if (game_src_pixels_) {
-        memset(game_src_pixels_, 0, 256 * 240 * sizeof(uint16_t));
-        const size_t scaled_bytes = size_t(kW) * kH * sizeof(uint16_t);
-        bool ok = true;
-        for (int i = 0; i < 3; ++i) {
-            game_scaled_[i] = static_cast<uint16_t*>(
-                heap_caps_malloc(scaled_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-            if (!game_scaled_[i]) {
-                ok = false;
-                break;
-            }
-            memset(game_scaled_[i], 0, scaled_bytes);
-        }
-        if (!ok) {
-            for (int i = 0; i < 3; ++i) {
-                heap_caps_free(game_scaled_[i]);
-                game_scaled_[i] = nullptr;
-            }
-            heap_caps_free(game_src_pixels_);
-            game_src_pixels_ = nullptr;
-        } else {
-            game_write_idx_ = 0;
-            game_display_idx_ = 1;
-            game_img_.header.magic = LV_IMAGE_HEADER_MAGIC;
-            game_img_.header.cf = LV_COLOR_FORMAT_RGB565;
-            game_img_.header.w = kW;
-            game_img_.header.h = kH;
-            game_img_.header.stride = kW * sizeof(uint16_t);
-            game_img_.data = reinterpret_cast<const uint8_t*>(game_scaled_[game_display_idx_]);
-            game_img_.data_size = scaled_bytes;
-            game_canvas_ = lv_image_create(stage);
-            lv_obj_set_pos(game_canvas_, (1280 - kW) / 2, 0);
-            lv_obj_set_size(game_canvas_, kW, kH);
-            lv_image_set_src(game_canvas_, &game_img_);
-        }
+    // Create only the small LVGL object at boot. A normal Tab5 uses the two
+    // panel framebuffers directly and never needs the 4 MiB fallback frames.
+    game_canvas_ = lv_image_create(stage);
+    if (game_canvas_) {
+        lv_obj_set_pos(game_canvas_, (1280 - kW) / 2, 0);
+        lv_obj_set_size(game_canvas_, kW, kH);
+        lv_obj_add_flag(game_canvas_, LV_OBJ_FLAG_HIDDEN);
     }
 
     game_status_ = Label(stage, "手柄：↑↓ 选 ROM · ○ 开始 · Select 返回",
@@ -767,6 +813,53 @@ void Tab5NativeApps::BuildGame() {
     RefreshGameRoms();
 }
 
+bool Tab5NativeApps::EnsureGameFallbackBuffers() {
+    if (game_scaled_[0] && game_scaled_[1] && game_scaled_[2])
+        return true;
+    if (!game_canvas_)
+        return false;
+
+    constexpr int kW = 960, kH = 720;
+    constexpr size_t kFrameBytes = size_t(kW) * kH * sizeof(uint16_t);
+    uint16_t* allocated[3] = {};
+    for (auto& frame : allocated) {
+        frame = static_cast<uint16_t*>(
+            heap_caps_malloc(kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!frame) {
+            for (auto* previous : allocated)
+                if (previous)
+                    heap_caps_free(previous);
+            return false;
+        }
+    }
+    for (int i = 0; i < 3; ++i)
+        game_scaled_[i] = allocated[i];
+    game_write_idx_ = 0;
+    game_img_.header.magic = LV_IMAGE_HEADER_MAGIC;
+    game_img_.header.cf = LV_COLOR_FORMAT_RGB565;
+    game_img_.header.w = kW;
+    game_img_.header.h = kH;
+    game_img_.header.stride = kW * sizeof(uint16_t);
+    game_img_.data_size = kFrameBytes;
+    ESP_LOGI("Tab5NativeApps", "NES LVGL fallback allocated %u bytes",
+             unsigned(3 * kFrameBytes));
+    return true;
+}
+
+void Tab5NativeApps::FailGameFallback() {
+    if (game_fallback_error_.exchange(true))
+        return;
+    game_playing_ui_.store(false);
+    ESP_LOGE("Tab5NativeApps", "NES LVGL fallback unavailable: PSRAM free=%u largest=%u",
+             unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+             unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+    if (lvgl_port_lock(100)) {
+        ShowGameSelect();
+        lvgl_port_unlock();
+    }
+    Schedule(actions_.stop_nes);
+}
+
 void Tab5NativeApps::ShowGameSelect() {
     game_playing_ui_.store(false);
     if (game_status_) {
@@ -782,10 +875,12 @@ void Tab5NativeApps::ShowGameSelect() {
     if (game_status_) {
         lv_label_set_text(game_status_, "手柄：↑↓ 选 ROM · ○ 开始 · Select 返回");
     }
-    if (game_canvas_ && tab5_nes_video::Available()) {
+    if (game_canvas_) {
         lv_obj_add_flag(game_canvas_, LV_OBJ_FLAG_HIDDEN);
     }
     RefreshGameRoms();
+    if (game_fallback_error_.load())
+        SetLabelTextIfChanged(game_status_, "画面内存不足，游戏已停止");
 }
 
 void Tab5NativeApps::ShowGamePlay() {
@@ -817,15 +912,21 @@ void Tab5NativeApps::RefreshGameRoms() {
     if (!game_select_panel_) return;
     const int count = actions_.nes_rom_count ? actions_.nes_rom_count() : 0;
     const int sel = actions_.nes_rom_index ? actions_.nes_rom_index() : 0;
-    if (game_rom_label_ && actions_.nes_rom_name) {
-        lv_label_set_text(game_rom_label_, actions_.nes_rom_name(sel).c_str());
-    }
+    game_list_count_ = count;
+    game_list_index_ = sel;
     if (count <= 0) {
+        SetLabelTextIfChanged(game_rom_label_, "");
+        for (auto* row : game_rom_rows_)
+            if (row)
+                lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
         if (game_status_) {
-            lv_label_set_text(game_status_, "SD /nes 未找到 ROM");
+            SetLabelTextIfChanged(game_status_, "SD /nes 未找到 ROM");
         }
         return;
     }
+    if (game_rom_label_ && actions_.nes_rom_name)
+        SetLabelTextIfChanged(game_rom_label_,
+                              actions_.nes_rom_name(std::clamp(sel, 0, count - 1)).c_str());
     // Window of 8 rows centered on selection.
     const int rows = 8;
     int start = sel - rows / 2;
@@ -843,7 +944,7 @@ void Tab5NativeApps::RefreshGameRoms() {
             char text[80];
             snprintf(text, sizeof(text), "%s%s", idx == sel ? "▶ " : "",
                      actions_.nes_rom_name(idx).c_str());
-            lv_label_set_text(game_rom_names_[i], text);
+            SetLabelTextIfChanged(game_rom_names_[i], text);
         }
         lv_obj_set_style_bg_color(
             game_rom_rows_[i],
@@ -857,11 +958,17 @@ void Tab5NativeApps::RefreshGameRoms() {
 void Tab5NativeApps::DrawNes(lv_event_t* event) { (void)event; }
 
 void Tab5NativeApps::SetNesFrame(const uint16_t* pixels, uint16_t width, uint16_t height) {
-    if (!pixels || !game_canvas_) return;
+    if (!pixels || tab5_nes_video::Active()) return;
     if (width != 256 || height != 240) return;
-    if (!game_scaled_[0] || !game_scaled_[1] || !game_scaled_[2]) return;
-    if (!IsVisible() || lv_obj_has_flag(game_page_, LV_OBJ_FLAG_HIDDEN)) return;
-    if (!game_playing_ui_.load()) return;
+    if (!game_page_visible_.load(std::memory_order_acquire) ||
+        !game_playing_ui_.load() || game_fallback_error_.load()) return;
+    // The direct panel path never reaches this callback. Allocate only after
+    // its indexed-frame presenter has actually fallen back to RGB565 frames.
+    if (!EnsureGameFallbackBuffers()) {
+        FailGameFallback();
+        return;
+    }
+    if (!game_page_visible_.load(std::memory_order_acquire) || !game_playing_ui_.load()) return;
 
     // Scale into the free write slot (never the one LVGL is drawing).
     auto* dst = game_scaled_[game_write_idx_];
@@ -881,30 +988,40 @@ void Tab5NativeApps::SetNesFrame(const uint16_t* pixels, uint16_t width, uint16_
         memcpy(r0 + 2 * kDw, r0, size_t(kDw) * sizeof(uint16_t));
     }
 
-    // Publish immediately under the LVGL lock so every emu frame can show.
-    // Triple buffer keeps the displayed surface immutable while we draw the
-    // next one on the other slots.
+    // Publish only after taking the LVGL lock. A missed lock drops this frame
+    // without recycling the buffer LVGL is still displaying.
     const int ready = game_write_idx_;
-    const int previous = game_display_idx_;
-    game_display_idx_ = ready;
-    game_write_idx_ = previous >= 0 ? previous : (ready + 1) % 3;
     if (lvgl_port_lock(2)) {
-        game_img_.data = reinterpret_cast<const uint8_t*>(game_scaled_[ready]);
-        lv_image_set_src(game_canvas_, &game_img_);
-        lv_obj_invalidate(game_canvas_);
+        if (game_playing_ui_.load() && IsVisible() &&
+            !lv_obj_has_flag(game_page_, LV_OBJ_FLAG_HIDDEN)) {
+            game_img_.data = reinterpret_cast<const uint8_t*>(game_scaled_[ready]);
+            lv_image_set_src(game_canvas_, &game_img_);
+            if (lv_obj_has_flag(game_canvas_, LV_OBJ_FLAG_HIDDEN)) {
+                lv_obj_remove_flag(game_canvas_, LV_OBJ_FLAG_HIDDEN);
+                if (game_status_) {
+                    lv_obj_set_pos(game_status_, 24, 16);
+                    lv_obj_set_width(game_status_, 900);
+                    SetLabelTextIfChanged(game_status_, "游戏中 · Select+Start 返回");
+                }
+            }
+            lv_obj_invalidate(game_canvas_);
+            game_write_idx_ = (ready + 1) % 3;
+        }
         lvgl_port_unlock();
     }
 }
 
 void Tab5NativeApps::SetNesStatus(const char* status) {
     if (!game_status_) return;
+    if (game_fallback_error_.load()) return;
     // Keep the in-game hint; "Loading/Playing" states arrive right after it.
     if (game_playing_ui_.load() && tab5_nes_video::Available()) return;
-    lv_label_set_text(game_status_, status && *status ? status : "—");
+    SetLabelTextIfChanged(game_status_, status && *status ? status : "—");
 }
 
 void Tab5NativeApps::SetNesPlaying(bool playing) {
     if (playing) {
+        game_fallback_error_.store(false);
         ShowGamePlay();
     } else {
         // Emulator idle/failed/stopped — restore the ROM list.
@@ -920,31 +1037,57 @@ void Tab5NativeApps::SetMusicLyric(const char* title, const char* artist, const 
 
 void Tab5NativeApps::SetMusicLyricLine(const char* line) {
     // Lyrics only — never touch the NOW PLAYING title (that is the station/song name).
+    if (!radio_lyric_)
+        return;
+    const char* text = line && *line ? line : "等待歌词";
+    SetLabelTextIfChanged(radio_lyric_, text);
+    lv_point_t size{};
+    lv_text_get_size(&size, text, lv_obj_get_style_text_font(radio_lyric_, LV_PART_MAIN),
+                     lv_obj_get_style_text_letter_space(radio_lyric_, LV_PART_MAIN),
+                     lv_obj_get_style_text_line_space(radio_lyric_, LV_PART_MAIN), 692,
+                     LV_TEXT_FLAG_NONE);
+    const int height = std::clamp<int>(size.y, 48, 90);
+    lv_obj_set_height(radio_lyric_, height);
+    lv_obj_set_y(radio_lyric_, (121 - height) / 2);
+}
+
+void Tab5NativeApps::SyncRadioTextFont() {
+    auto next_owner = MusicTextFontOwner();
+    const lv_font_t* font = next_owner ? next_owner->font() : &qd_font_cjk_28;
+    if (music_font_ == font)
+        return;
+    // A new theme can replace the previous shared owner while this page is hidden.
+    // Keep it alive until every LVGL style has been rebound to the new font.
+    auto previous_owner = std::move(music_font_owner_);
+    music_font_owner_ = std::move(next_owner);
+    music_font_ = font;
+    if (radio_station_)
+        lv_obj_set_style_text_font(radio_station_, font, 0);
+    for (auto* lyric : {radio_lyric_previous_, radio_lyric_, radio_lyric_next_}) {
+        if (lyric)
+            lv_obj_set_style_text_font(lyric, font, 0);
+    }
+    for (auto* station_name : station_names_) {
+        if (station_name)
+            lv_obj_set_style_text_font(station_name, font, 0);
+    }
     if (radio_lyric_)
-        lv_label_set_text(radio_lyric_, line && *line ? line : "等待歌词");
+        SetMusicLyricLine(lv_label_get_text(radio_lyric_));
 }
 
 void Tab5NativeApps::SetMusicLyricsWindow(const char* title, const char* artist,
                                           const char* previous, const char* current,
                                           const char* next) {
-    const lv_font_t* font = MusicTextFont();
-    if (music_font_ != font) {
-        music_font_ = font;
-        if (radio_station_)
-            lv_obj_set_style_text_font(radio_station_, font, 0);
-        for (auto* lyric : {radio_lyric_previous_, radio_lyric_, radio_lyric_next_}) {
-            if (lyric)
-                lv_obj_set_style_text_font(lyric, font, 0);
-        }
-    }
+    if (IsRadioVisible())
+        SyncRadioTextFont();
     if (title && *title) {
-        char head[96];
-        std::snprintf(head, sizeof(head), "%s%s%s", title, (artist && *artist) ? " - " : "",
-                      (artist && *artist) ? artist : "");
-        if (radio_station_)
-            lv_label_set_text(radio_station_, head);
-        if (radio_next_label_)
-            lv_label_set_text(radio_next_label_, "下一首");
+        std::string head(title);
+        if (artist && *artist) {
+            head += " - ";
+            head += artist;
+        }
+        SetLabelTextIfChanged(radio_station_, head.c_str());
+        SetLabelTextIfChanged(radio_next_label_, "下一首");
     }
     SetMusicLyricLine(current);
 }
@@ -955,27 +1098,22 @@ void Tab5NativeApps::SetVoiceStatus(const char* text, bool active) {
     if (!text || !*text) {
         lv_obj_add_flag(radio_voice_, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_label_set_text(radio_voice_, text);
+        SetLabelTextIfChanged(radio_voice_, text);
         lv_obj_clear_flag(radio_voice_, LV_OBJ_FLAG_HIDDEN);
     }
-    if (ask_song_label_)
-        lv_label_set_text(ask_song_label_, active ? "对话中" : "点歌");
+    SetLabelTextIfChanged(ask_song_label_, active ? "对话中" : "点歌");
 }
 
 void Tab5NativeApps::ClearMusicLyrics() {
-    if (radio_next_label_)
-        lv_label_set_text(radio_next_label_, "下一台");
-    if (radio_lyric_previous_)
-        lv_label_set_text(radio_lyric_previous_, "");
-    if (radio_lyric_)
-        lv_label_set_text(radio_lyric_, "等待歌词");
-    if (radio_lyric_next_)
-        lv_label_set_text(radio_lyric_next_, "");
+    SetLabelTextIfChanged(radio_next_label_, "下一台");
+    SetLabelTextIfChanged(radio_lyric_previous_, "");
+    SetMusicLyricLine(nullptr);
+    SetLabelTextIfChanged(radio_lyric_next_, "");
 }
 
 void Tab5NativeApps::RefreshWifi() {
     if (actions_.wifi_summary)
-        lv_label_set_text(wifi_label_, actions_.wifi_summary().c_str());
+        SetLabelTextIfChanged(wifi_label_, actions_.wifi_summary().c_str());
 }
 
 void Tab5NativeApps::RefreshSettings() {
@@ -1010,7 +1148,7 @@ void Tab5NativeApps::RefreshStations() {
         const std::string name = actions_.station_name ? actions_.station_name(index) : "";
         char text[120];
         std::snprintf(text, sizeof(text), "%02d  %s", index + 1, name.c_str());
-        lv_label_set_text(station_names_[row], text);
+        SetLabelTextIfChanged(station_names_[row], text);
         const bool selected = name == current_station_name_;
         lv_obj_set_style_bg_color(station_rows_[row],
                                   lv_color_hex(selected ? 0x397b87 : 0x254c66), 0);
@@ -1019,7 +1157,7 @@ void Tab5NativeApps::RefreshStations() {
     }
     char page[32];
     std::snprintf(page, sizeof(page), "%d / %d", station_page_ + 1, pages);
-    lv_label_set_text(station_page_label_, page);
+    SetLabelTextIfChanged(station_page_label_, page);
 }
 
 void Tab5NativeApps::SetRadioState(const char* station, const char* state,
@@ -1027,17 +1165,16 @@ void Tab5NativeApps::SetRadioState(const char* station, const char* state,
     // Must be called with the display lock held. Never Schedule LVGL work to
     // main without that lock: lv_inv_area asserts if invalidate runs during
     // rendering and wedges the main task (watchdog + dead play queue).
-    const bool station_changed = station && *station &&
-                                 current_station_name_ != station;
-    const std::string state_key = state ? state : "";
-    const bool state_changed = state_key != current_radio_state_key_;
+    const bool station_changed = station && *station && current_station_name_ != station;
     if (station && *station) {
-        current_station_name_ = station;
+        if (station_changed)
+            current_station_name_ = station;
         // Always refresh the title so selecting a station cannot leave it blank
         // after a music track previously owned this label.
-        lv_label_set_text(radio_station_, station);
+        SetLabelTextIfChanged(radio_station_, station);
     }
-    if (meta) lv_label_set_text(radio_meta_, meta);
+    if (meta)
+        SetLabelTextIfChanged(radio_meta_, meta);
     const char* localized = "待播放";
     if (state) {
         if (std::strcmp(state, "Playing") == 0) localized = "播放中";
@@ -1050,15 +1187,13 @@ void Tab5NativeApps::SetRadioState(const char* station, const char* state,
         else if (std::strcmp(state, "Waiting WiFi") == 0) localized = "等待网络";
         else if (std::strcmp(state, "Unavailable") == 0) localized = "暂不可用";
     }
-    lv_label_set_text(radio_state_, localized);
-    radio_playing_ = state && (std::strcmp(state, "Playing") == 0 ||
-                               std::strcmp(state, "Buffering") == 0 ||
-                               std::strcmp(state, "Connecting") == 0);
-    lv_label_set_text(radio_play_label_, radio_playing_ ? "暂停" : "播放");
-    // Directory rebuild is expensive and floods invalidate areas; only do it
-    // when the selection or playback phase actually changes.
-    if (station_changed || state_changed) {
-        current_radio_state_key_ = state_key;
+    SetLabelTextIfChanged(radio_state_, localized);
+    radio_playing_ = state && std::strcmp(state, "Playing") == 0;
+    const bool play_requested = actions_.radio_play_requested
+                                    ? actions_.radio_play_requested()
+                                    : radio_playing_;
+    SetLabelTextIfChanged(radio_play_label_, play_requested ? "暂停" : "播放");
+    // Row selection changes only when the station changes.
+    if (station_changed)
         RefreshStations();
-    }
 }

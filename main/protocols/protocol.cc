@@ -63,23 +63,23 @@ void Protocol::SetError(const std::string& message, const std::string& detail) {
     SetError(message + "\n" + detail);
 }
 
-void Protocol::SendAbortSpeaking(AbortReason reason) {
+bool Protocol::SendAbortSpeaking(AbortReason reason) {
     std::string message = "{\"session_id\":\"" + session_id_ + "\",\"type\":\"abort\"";
     if (reason == kAbortReasonWakeWordDetected) {
         message += ",\"reason\":\"wake_word_detected\"";
     }
     message += "}";
-    SendText(message);
+    return SendText(message);
 }
 
-void Protocol::SendWakeWordDetected(const std::string& wake_word) {
+bool Protocol::SendWakeWordDetected(const std::string& wake_word) {
     std::string json = "{\"session_id\":\"" + session_id_ +
                        "\",\"type\":\"listen\",\"state\":\"detect\",\"text\":\"" + wake_word +
                        "\"}";
-    SendText(json);
+    return SendText(json);
 }
 
-void Protocol::SendStartListening(ListeningMode mode) {
+bool Protocol::SendStartListening(ListeningMode mode) {
     std::string message = "{\"session_id\":\"" + session_id_ + "\"";
     message += ",\"type\":\"listen\",\"state\":\"start\"";
     if (mode == kListeningModeRealtime) {
@@ -90,19 +90,19 @@ void Protocol::SendStartListening(ListeningMode mode) {
         message += ",\"mode\":\"manual\"";
     }
     message += "}";
-    SendText(message);
+    return SendText(message);
 }
 
-void Protocol::SendStopListening() {
+bool Protocol::SendStopListening() {
     std::string message =
         "{\"session_id\":\"" + session_id_ + "\",\"type\":\"listen\",\"state\":\"stop\"}";
-    SendText(message);
+    return SendText(message);
 }
 
-void Protocol::SendMcpMessage(const std::string& payload) {
+bool Protocol::SendMcpMessage(const std::string& payload) {
     std::string message =
         "{\"session_id\":\"" + session_id_ + "\",\"type\":\"mcp\",\"payload\":" + payload + "}";
-    SendText(message);
+    return SendText(message);
 }
 
 bool Protocol::IsTimeout() const {

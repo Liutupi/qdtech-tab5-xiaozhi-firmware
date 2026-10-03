@@ -1,0 +1,41 @@
+#ifndef TCP_H
+#define TCP_H
+
+#include "network_error.h"
+
+#include <atomic>
+#include <functional>
+#include <string>
+
+class Tcp {
+public:
+    virtual ~Tcp() = default;
+    virtual NetworkResult<> Connect(const std::string& host, int port) = 0;
+    virtual void Disconnect() = 0;
+    virtual int Send(const std::string& data) = 0;
+    // Signal a blocked Send/Connect to stop. This must not wait for a sender
+    // or receive task; the owner still calls Disconnect() to release resources.
+    virtual void Interrupt() {}
+
+    virtual void OnStream(std::function<void(const std::string& data)> callback) {
+        stream_callback_ = callback;
+    }
+
+    virtual void OnDisconnected(std::function<void()> callback) { disconnect_callback_ = callback; }
+
+    bool connected() const { return connected_.load(); }
+
+protected:
+    NetworkResult<> Fail(NetworkError err) {
+        last_error_ = err;
+        return std::unexpected(err);
+    }
+
+    std::function<void(const std::string& data)> stream_callback_;
+    std::function<void()> disconnect_callback_;
+    NetworkError last_error_{};
+    // ESP receive tasks and their owners both read and update this flag.
+    std::atomic_bool connected_{false};
+};
+
+#endif  // TCP_H

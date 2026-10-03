@@ -30,7 +30,7 @@ class NaboImageCodecTest(unittest.TestCase):
             # Include actual generated bodies, not just synthetic byte streams.
             import re
             source = (ROOT / 'main/boards/qdtech/tab5/nabo_assets.c').read_text()
-            for name in ('wink', 'encourage'):
+            for name in ('think', 'wink', 'encourage', 'curious', 'comfort'):
                 match = re.search(r'static const uint8_t nabo_' + name +
                                   r'_torso_data\[\].*?= \{(.*?)\};', source, re.S)
                 data = bytes(int(value, 16) for value in re.findall(r'0x([0-9a-fA-F]{2})', match[1]))

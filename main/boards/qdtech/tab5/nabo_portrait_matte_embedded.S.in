@@ -1,0 +1,8 @@
+/* Only the Tab5 portrait experiment assembles this flash resource. */
+.section .rodata.embedded
+.balign 4
+.global _binary_portrait_matte_434x558_rgb565_bin_start
+_binary_portrait_matte_434x558_rgb565_bin_start:
+.incbin "@TAB5_PORTRAIT_MATTE_BIN@"
+.global _binary_portrait_matte_434x558_rgb565_bin_end
+_binary_portrait_matte_434x558_rgb565_bin_end:

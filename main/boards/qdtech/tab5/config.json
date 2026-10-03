@@ -9,6 +9,8 @@
                 "CONFIG_BOARD_TYPE_QDTECH_TAB5=y",
                 "CONFIG_HTTPD_WS_SUPPORT=y",
                 "CONFIG_COMPILER_OPTIMIZATION_SIZE=y",
+                "CONFIG_LV_USE_FONT_COMPRESSED=y",
+                "CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=n",
                 "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/qdtech_tab5.csv\"",
                 "CONFIG_LV_USE_GIF=y",
                 "CONFIG_LV_USE_QRCODE=y",
@@ -41,6 +43,7 @@
             "sdkconfig_append": [
                 "CONFIG_BOARD_TYPE_QDTECH_TAB5=y",
                 "CONFIG_QDTECH_TAB5_NATIVE_UI=y",
+                "CONFIG_QDTECH_TAB5_IDLE_BALANCED_WIFI_EXPERIMENT=y",
                 "CONFIG_HTTPD_WS_SUPPORT=y",
                 "CONFIG_COMPILER_OPTIMIZATION_SIZE=y",
                 "CONFIG_ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP=n",
@@ -70,7 +73,9 @@
                 "CONFIG_SR_MN_CN_MULTINET7_QUANT=y",
                 "CONFIG_LV_USE_LZ4=y",
                 "CONFIG_LV_USE_LZ4_INTERNAL=y",
-                "CONFIG_LV_BIN_DECODER_RAM_LOAD=y"
+                "CONFIG_LV_BIN_DECODER_RAM_LOAD=y",
+                "CONFIG_QDTECH_TAB5_PORTRAIT_MATTE_EXPERIMENT=y",
+                "CONFIG_QDTECH_TAB5_RAW_THINK_TORSO_EXPERIMENT=n"
             ]
         },
         {
@@ -79,6 +84,7 @@
                 "CONFIG_BOARD_TYPE_QDTECH_TAB5=y",
                 "CONFIG_HTTPD_WS_SUPPORT=y",
                 "CONFIG_COMPILER_OPTIMIZATION_SIZE=y",
+                "CONFIG_LV_USE_FONT_COMPRESSED=y",
                 "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/qdtech_tab5.csv\"",
                 "CONFIG_LV_USE_GIF=y",
                 "CONFIG_LV_USE_QRCODE=y",

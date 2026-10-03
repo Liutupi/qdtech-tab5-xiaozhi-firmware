@@ -1128,6 +1128,47 @@ config QDTECH_TAB5_NATIVE_UI
         Render directly at 1280x720 and run the focused XiaoZhi interface.
         The legacy 480x320 desktop and its optional services are omitted.
 
+config QDTECH_TAB5_IDLE_BALANCED_WIFI_EXPERIMENT
+    bool "Experiment with balanced Wi-Fi power save while Tab5 is idle"
+    depends on QDTECH_TAB5_NATIVE_UI && IDF_TARGET_ESP32P4
+    default n
+    help
+        Use minimum modem sleep instead of maximum modem sleep in the native
+        Tab5 idle state. Measure network latency and USB power draw before
+        enabling this experiment in a release build.
+
+config QDTECH_TAB5_PPA_FLUSH_EXPERIMENT
+    bool "Experiment with PPA rotation for large Tab5 native display flushes"
+    depends on QDTECH_TAB5_NATIVE_UI && IDF_TARGET_ESP32P4 && !LVGL_PORT_ENABLE_PPA
+    default n
+    help
+        Use ESP32-P4 PPA to rotate large RGB565 dirty areas for the native
+        Tab5 interface. Small areas and PPA failures use software rotation.
+        This experiment is disabled in all release variants by default.
+
+config QDTECH_TAB5_PORTRAIT_MATTE_EXPERIMENT
+    bool "Experiment with a precomposed Tab5 Nabo portrait"
+    depends on QDTECH_TAB5_NATIVE_UI && IDF_TARGET_ESP32P4
+    default n
+    help
+        Embed a 434x558 opaque RGB565 portrait composed over the native
+        home card. The original portrait is omitted from this build; an
+        invalid resource shows the existing sleep art and logs an error.
+        The rounded edge is an offline approximation; check it on screen.
+        The original portrait remains available by disabling this option.
+
+config QDTECH_TAB5_RAW_THINK_TORSO_EXPERIMENT
+    bool "Experiment with an uncompressed Tab5 Nabo Think torso"
+    depends on QDTECH_TAB5_NATIVE_UI && IDF_TARGET_ESP32P4 && LV_USE_LZ4
+    default n
+    help
+        Embed the Think torso as the same RGB565A8 pixels without LZ4 and
+        select it only for that pose. This isolates decoder cost while keeping
+        geometry and alpha unchanged. Device measurements with the current P4
+        build show about 359 KiB more PSRAM in use, related to rodata mapping.
+        The original compressed image stays available as a runtime fallback;
+        enabling this experiment adds about 355 KiB of application flash data.
+
 menu "TAIJIPAI_S3_CONFIG"
     depends on BOARD_TYPE_TAIJI_PI_S3
     choice I2S_TYPE_TAIJIPI_S3

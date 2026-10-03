@@ -917,6 +917,9 @@ file(GLOB BOARD_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/*.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/*.c
 )
+# The precomposed portrait is opt-in even though it lives beside board sources.
+list(FILTER BOARD_SOURCES EXCLUDE REGEX "/nabo_portrait_matte\\.c$")
+list(FILTER BOARD_SOURCES EXCLUDE REGEX "/nabo_think_torso_raw\\.c$")
 if(CONFIG_QDTECH_TAB5_NATIVE_UI)
     # The native interface uses the board hardware and XiaoZhi core, without
     # compiling the fixed-size desktop, its apps, or their image assets.
@@ -930,6 +933,54 @@ if(CONFIG_QDTECH_TAB5_NATIVE_UI)
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_clock_72.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/nabo_assets.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/radio_service.cc)
+    if(CONFIG_QDTECH_TAB5_PORTRAIT_MATTE_EXPERIMENT)
+        set(TAB5_PORTRAIT_MATTE_BIN
+            ${CMAKE_CURRENT_SOURCE_DIR}/../assets/nabo/portrait_matte_434x558_rgb565.bin)
+        # Reconfigure before recompiling if the binary changes, so the hash
+        # check also runs for incremental builds.
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${TAB5_PORTRAIT_MATTE_BIN}")
+        file(SIZE "${TAB5_PORTRAIT_MATTE_BIN}" TAB5_PORTRAIT_MATTE_SIZE)
+        file(SHA256 "${TAB5_PORTRAIT_MATTE_BIN}" TAB5_PORTRAIT_MATTE_SHA256)
+        if(NOT TAB5_PORTRAIT_MATTE_SIZE EQUAL 484344 OR
+           NOT TAB5_PORTRAIT_MATTE_SHA256 STREQUAL
+               "92dddf460ef03dc5357c9553ea487b0dd0080e1730835599c377630ce34f0724")
+            message(FATAL_ERROR "Tab5 portrait matte asset failed size/SHA256 validation")
+        endif()
+        set(TAB5_PORTRAIT_MATTE_ASM
+            ${CMAKE_CURRENT_BINARY_DIR}/nabo_portrait_matte_embedded.S)
+        configure_file(
+            ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/nabo_portrait_matte_embedded.S.in
+            ${TAB5_PORTRAIT_MATTE_ASM} @ONLY)
+        set_source_files_properties(${TAB5_PORTRAIT_MATTE_ASM}
+            PROPERTIES GENERATED TRUE OBJECT_DEPENDS ${TAB5_PORTRAIT_MATTE_BIN})
+        list(APPEND BOARD_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/nabo_portrait_matte.c
+            ${TAB5_PORTRAIT_MATTE_ASM})
+    endif()
+    if(CONFIG_QDTECH_TAB5_RAW_THINK_TORSO_EXPERIMENT)
+        set(TAB5_THINK_TORSO_RAW_BIN
+            ${CMAKE_CURRENT_SOURCE_DIR}/../assets/nabo/think_torso_262x462_rgb565a8.bin)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${TAB5_THINK_TORSO_RAW_BIN}")
+        file(SIZE "${TAB5_THINK_TORSO_RAW_BIN}" TAB5_THINK_TORSO_RAW_SIZE)
+        file(SHA256 "${TAB5_THINK_TORSO_RAW_BIN}" TAB5_THINK_TORSO_RAW_SHA256)
+        if(NOT TAB5_THINK_TORSO_RAW_SIZE EQUAL 363132 OR
+           NOT TAB5_THINK_TORSO_RAW_SHA256 STREQUAL
+               "5bf63c9165fc2b179b851e8c7fe22370b1e9157b90daf2e58ab05c5d61eb43f6")
+            message(FATAL_ERROR "Tab5 raw Think torso failed size/SHA256 validation")
+        endif()
+        set(TAB5_THINK_TORSO_RAW_ASM
+            ${CMAKE_CURRENT_BINARY_DIR}/nabo_think_torso_raw_embedded.S)
+        configure_file(
+            ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/nabo_think_torso_raw_embedded.S.in
+            ${TAB5_THINK_TORSO_RAW_ASM} @ONLY)
+        set_source_files_properties(${TAB5_THINK_TORSO_RAW_ASM}
+            PROPERTIES GENERATED TRUE OBJECT_DEPENDS ${TAB5_THINK_TORSO_RAW_BIN})
+        list(APPEND BOARD_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/nabo_think_torso_raw.c
+            ${TAB5_THINK_TORSO_RAW_ASM})
+    endif()
 else()
     list(FILTER BOARD_SOURCES EXCLUDE REGEX "/(tab5_vision_service|tab5_native_apps|tab5_icu_page|tab5_music_lyrics|tab5_muse_inbox|tab5_sd_assets|icu_calculators)\\.cc$")
 endif()

@@ -2,13 +2,14 @@
 #include "button.h"
 #include "display/lcd_display.h"
 #if CONFIG_QDTECH_TAB5_NATIVE_UI
-#include "icu_calculators.h"
-#include "tab5_music_lyrics.h"
-#include "tab5_muse_inbox.h"
-#include "tab5_sd_assets.h"
 #include "assets.h"
+#include "icu_calculators.h"
 #include "lvgl_font.h"
+#include "tab5_muse_inbox.h"
+#include "tab5_music_lyrics.h"
+#include "tab5_music_track_gate.h"
 #include "tab5_native_display.h"
+#include "tab5_sd_assets.h"
 #include "tab5_vision_service.h"
 #else
 #include "desktop_ui.h"
@@ -286,8 +287,21 @@ private:
     std::mutex native_radio_mutex_;
     std::atomic<bool> native_radio_ready_{false};
     std::atomic<uint32_t> music_request_generation_{0};
+    std::mutex music_track_mutex_;
+    tab5_music_track_gate::CurrentTrack music_track_;
     bool native_tools_registered_ = false;
     std::atomic<bool> music_udp_started_{false};
+    struct MusicUdpRequest {
+        std::string title;
+        std::string artist;
+        std::string url;
+        std::string lyrics;
+        std::string song_id;
+    };
+    std::mutex music_udp_mutex_;
+    MusicUdpRequest music_udp_pending_;
+    bool music_udp_has_pending_ = false;
+    bool music_udp_dispatch_scheduled_ = false;
     // Continuous (private FM / daily recommendation) playback: when a song started with
     // continuous=true ends naturally, Tab5 asks the assistant for the next song itself.
     // The NAS cannot reach Tab5 directly (different subnet / NAT), so the request must
@@ -388,21 +402,33 @@ private:
     }
 
     void OnMusicEndedNaturally() {
-        if (!music_continuous_.exchange(false))
-            return;
-        RequestNextSong(800);
+        // The radio callback runs on the decoder task while submission_mutex_
+        // still protects this event's source stream generation. Do not wait for
+        // music_track_mutex_ here; the main task checks the token later.
+        const uint32_t stream_generation = radio_service_.GetStreamGeneration();
+        const uint32_t generation = music_request_generation_.load();
+        const uint32_t play_count = music_play_count_.load();
+        // RequestNextSong updates the display and timer. Keep both off the
+        // decoder task, and discard this event if Stop/Next or a new song won.
+        Application::GetInstance().Schedule([this, stream_generation, generation, play_count] {
+            std::lock_guard<std::mutex> guard(music_track_mutex_);
+            if (radio_service_.GetStreamGeneration() != stream_generation ||
+                music_request_generation_.load() != generation ||
+                !music_track_.IsCurrent(generation) || music_play_count_.load() != play_count ||
+                !music_continuous_session_.load() || !music_continuous_.exchange(false))
+                return;
+            RequestNextSong(800);
+        });
     }
 
-    // Skip button: only meaningful inside a continuous session.
-    bool SkipToNextSong() {
-        if (!music_continuous_session_.load())
-            return false;
+    // All source replacements use the same lock as StartMusicNow. Otherwise a
+    // Stop/Next can run while StartMusicNow waits for LVGL, and its older URL
+    // can be submitted after the newer command.
+    template <typename Action>
+    void ReplaceMusicSource(Action&& action) {
+        std::lock_guard<std::mutex> guard(music_track_mutex_);
         ++music_request_generation_;
-        music_continuous_.store(false);  // the stop below must not count as a natural end
-        if (native_radio_ready_.load())
-            radio_service_.Stop();
-        RequestNextSong(600);
-        return true;
+        action();
     }
 
     void RequestNextSong(int delay_ms) {
@@ -428,7 +454,7 @@ private:
         SetNextSongStatus("正在获取下一首…");
     }
 
-    // Called for every play_url (MCP or UDP). Returns the effective continuous flag.
+    // Called under music_track_mutex_ for every play_url (MCP or UDP).
     bool NoteMusicPlayRequest(bool continuous) {
         if (music_next_pending_.load())
             continuous = true;  // the answer to our own next-song request
@@ -448,13 +474,45 @@ private:
         std::string song_id;
     };
 
-    std::string StartMusicNow(const std::string& title, const std::string& artist,
-                              const std::string& url, const std::string& lyrics) {
+    bool ApplyLegacyMusicLyricLine(const std::string& title, const std::string& artist,
+                                   const std::string& line) {
+        std::lock_guard<std::mutex> guard(music_track_mutex_);
+        if (!music_track_.Accepts(music_request_generation_.load(), title, artist))
+            return false;
+        // The track title and artist are set by play_url. An older lyric packet
+        // must never be able to replace them, even if its line is accepted.
+        static_cast<QdtechTab5Display*>(display_)->SetMusicInfo("", "", line.c_str());
+        return true;
+    }
+
+    bool ApplyMusicLyricsForTrack(uint32_t generation, const std::string& title,
+                                  const std::string& artist, const std::string& lyrics) {
+        std::lock_guard<std::mutex> guard(music_track_mutex_);
+        if (music_request_generation_.load() != generation ||
+            !music_track_.Accepts(generation, title, artist))
+            return false;
+        return static_cast<QdtechTab5Display*>(display_)->SetMusicLyrics(lyrics.c_str(),
+                                                                         title.c_str());
+    }
+
+    bool ApplyMusicLyricsFromTool(const std::string& title, const std::string& artist,
+                                  const std::string& lyrics) {
+        return ApplyMusicLyricsForTrack(music_request_generation_.load(), title, artist, lyrics);
+    }
+
+    std::string StartMusicNow(uint32_t generation, const std::string& title,
+                              const std::string& artist, const std::string& url,
+                              const std::string& lyrics) {
+        std::lock_guard<std::mutex> guard(music_track_mutex_);
+        if (music_request_generation_.load() != generation)
+            return "Music URL was NOT started: superseded by a newer request.";
         auto* display = static_cast<QdtechTab5Display*>(display_);
+        music_track_.Begin(generation, title, artist);
         display->BeginMusicTrack(title.c_str(), artist.c_str());
         display->SetMusicInfo(title.c_str(), artist.c_str(), "正在连接音源…");
         const auto result = radio_service_.PlayUrlFromTool(title, artist, url);
         if (result.rfind("Music URL was NOT started", 0) == 0) {
+            music_track_.InvalidateIfCurrent(generation);
             display->StopMusicTrack();
             return result;
         }
@@ -478,30 +536,35 @@ private:
                 if (!lyrics.empty()) {
                     Application::GetInstance().Schedule(
                         [board, generation, title = std::move(request->title),
-                         lyrics = std::move(lyrics)] {
+                         artist = std::move(request->artist), lyrics = std::move(lyrics)] {
                             if (board->music_request_generation_.load() != generation)
                                 return;
-                            static_cast<QdtechTab5Display*>(board->display_)
-                                ->SetMusicLyrics(lyrics.c_str(), title.c_str());
+                            board->ApplyMusicLyricsForTrack(generation, title, artist, lyrics);
                         });
                 }
             }
         }
-        vTaskDelete(nullptr);
+        // Created WithCaps: plain vTaskDelete would leak the TCB and PSRAM stack every song.
+        vTaskDeleteWithCaps(nullptr);
     }
 
     std::string PlayMusicRequest(const std::string& title_value, const std::string& artist,
                                  const std::string& url, const std::string& lyrics,
-                                 const std::string& song_id) {
+                                 const std::string& song_id, bool continuous) {
         EnsureNativeRadio();
         const auto title = title_value.empty() ? std::string("Music URL") : title_value;
         if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0)
             return std::string("Music URL was NOT started: invalid HTTP(S) URL.");
-        const uint32_t generation = ++music_request_generation_;
+        uint32_t generation;
+        {
+            std::lock_guard<std::mutex> guard(music_track_mutex_);
+            NoteMusicPlayRequest(continuous);
+            generation = ++music_request_generation_;
+        }
         tab5_lrc::Document supplied_lyrics;
         if (tab5_lrc::Parse(lyrics, supplied_lyrics) && supplied_lyrics.timed)
-            return StartMusicNow(title, artist, url, lyrics);
-        auto result = StartMusicNow(title, artist, url, "");
+            return StartMusicNow(generation, title, artist, url, lyrics);
+        auto result = StartMusicNow(generation, title, artist, url, "");
         if (result.rfind("Music URL was NOT started", 0) == 0)
             return result;
         auto* request = new (std::nothrow)
@@ -539,23 +602,54 @@ private:
             char stamp[24];
             snprintf(stamp, sizeof(stamp), "[%02ld:%02ld.%02ld]", ms / 60000, (ms / 1000) % 60,
                      (ms % 1000) / 10);
+            if (lrc.size() + strlen(stamp) + strlen(text->valuestring) + 1 > 15000)
+                break;
             lrc += stamp;
             lrc += text->valuestring;
             lrc += '\n';
-            if (lrc.size() > 15000)
-                break;
         }
         cJSON_Delete(root);
         return lrc;
     }
 
+    // Keep one latest UDP request plus at most one small callback in the main queue.
+    // Process only one song per callback so a busy NAS cannot monopolize the main loop.
+    void DispatchLatestMusicUdp() {
+        MusicUdpRequest request;
+        {
+            std::lock_guard<std::mutex> lock(music_udp_mutex_);
+            if (!music_udp_has_pending_) {
+                music_udp_dispatch_scheduled_ = false;
+                return;
+            }
+            request = std::move(music_udp_pending_);
+            music_udp_has_pending_ = false;
+        }
+
+        PlayMusicRequest(request.title, request.artist, request.url, request.lyrics,
+                         request.song_id, false);
+
+        bool schedule_next;
+        {
+            std::lock_guard<std::mutex> lock(music_udp_mutex_);
+            schedule_next = music_udp_has_pending_;
+            if (!schedule_next)
+                music_udp_dispatch_scheduled_ = false;
+        }
+        if (schedule_next)
+            Application::GetInstance().Schedule([this] { DispatchLatestMusicUdp(); });
+    }
+
     static void MusicUdpTask(void* arg) {
         auto* board = static_cast<QdtechTab5Board*>(arg);
         constexpr size_t kBufferSize = 24 * 1024;
+        constexpr size_t kMaxTitleBytes = 256;
+        constexpr size_t kMaxArtistBytes = 256;
+        constexpr size_t kMaxUrlBytes = 2048;
         char* buffer = static_cast<char*>(heap_caps_malloc(kBufferSize, MALLOC_CAP_SPIRAM));
         if (!buffer) {
             ESP_LOGE("Tab5Udp", "no memory for UDP buffer");
-            vTaskDelete(nullptr);
+            vTaskDeleteWithCaps(nullptr);
             return;
         }
         for (;;) {
@@ -575,6 +669,11 @@ private:
                 const int len = recvfrom(sock, buffer, kBufferSize - 1, 0, nullptr, nullptr);
                 if (len <= 0)
                     break;
+                // The setup AP can be reached by nearby devices; local music
+                // control is available only after joining the configured Wi-Fi.
+                auto& wifi = WifiManager::GetInstance();
+                if (!wifi.IsConnected() || wifi.IsConfigMode())
+                    continue;
                 buffer[len] = 0;
                 cJSON* root = cJSON_Parse(buffer);
                 if (!root)
@@ -586,20 +685,57 @@ private:
                     cJSON* title = cJSON_GetObjectItem(root, "title");
                     cJSON* artist = cJSON_GetObjectItem(root, "artist");
                     cJSON* lyrics_json = cJSON_GetObjectItem(root, "lyrics_json");
-                    std::string t = cJSON_IsString(title) ? title->valuestring : "";
-                    std::string a = cJSON_IsString(artist) ? artist->valuestring : "";
-                    std::string u = url->valuestring;
-                    std::string lrc =
-                        LyricsJsonToLrc(cJSON_IsString(lyrics_json) ? lyrics_json->valuestring
-                                                                    : nullptr);
-                    ESP_LOGI("Tab5Udp", "play_url title=%s lyrics=%uB", t.c_str(),
-                             static_cast<unsigned>(lrc.size()));
-                    Application::GetInstance().Schedule(
-                        [board, t = std::move(t), a = std::move(a), u = std::move(u),
-                         lrc = std::move(lrc)] {
-                            board->NoteMusicPlayRequest(false);
-                            board->PlayMusicRequest(t, a, u, lrc, "");
-                        });
+                    cJSON* song_id = cJSON_GetObjectItem(root, "song_id");
+                    const char* title_text = cJSON_IsString(title) ? title->valuestring : "";
+                    const char* artist_text = cJSON_IsString(artist) ? artist->valuestring : "";
+                    const char* url_text = url->valuestring ? url->valuestring : "";
+                    // Reject oversized fields instead of cutting through a UTF-8 character.
+                    if (strlen(title_text) > kMaxTitleBytes ||
+                        strlen(artist_text) > kMaxArtistBytes || strlen(url_text) > kMaxUrlBytes) {
+                        ESP_LOGW("Tab5Udp", "oversized play_url packet rejected");
+                        cJSON_Delete(root);
+                        continue;
+                    }
+                    if (strncmp(url_text, "http://", 7) != 0 &&
+                        strncmp(url_text, "https://", 8) != 0) {
+                        ESP_LOGW("Tab5Udp", "empty or non-HTTP(S) play_url rejected");
+                        cJSON_Delete(root);
+                        continue;
+                    }
+                    // Invalid optional IDs are ignored; playback and supplied lyrics still work.
+                    const char* song_id_text =
+                        cJSON_IsString(song_id) ? song_id->valuestring : nullptr;
+                    std::string valid_song_id;
+                    if (song_id_text) {
+                        const size_t id_len = strnlen(song_id_text, 19);
+                        if (id_len >= 1 && id_len <= 18 &&
+                            std::all_of(song_id_text, song_id_text + id_len,
+                                        [](char ch) { return ch >= '0' && ch <= '9'; })) {
+                            valid_song_id.assign(song_id_text, id_len);
+                        } else {
+                            ESP_LOGW("Tab5Udp", "invalid song_id ignored");
+                        }
+                    }
+                    MusicUdpRequest request{
+                        title_text, artist_text, url_text, {}, std::move(valid_song_id)};
+                    request.lyrics = LyricsJsonToLrc(
+                        cJSON_IsString(lyrics_json) ? lyrics_json->valuestring : nullptr);
+                    ESP_LOGI("Tab5Udp", "play_url title=%s lyrics=%uB", request.title.c_str(),
+                             static_cast<unsigned>(request.lyrics.size()));
+                    bool schedule_dispatch = false;
+                    {
+                        std::lock_guard<std::mutex> lock(board->music_udp_mutex_);
+                        board->music_udp_pending_ = std::move(request);
+                        board->music_udp_has_pending_ = true;
+                        if (!board->music_udp_dispatch_scheduled_) {
+                            board->music_udp_dispatch_scheduled_ = true;
+                            schedule_dispatch = true;
+                        }
+                    }
+                    if (schedule_dispatch) {
+                        Application::GetInstance().Schedule(
+                            [board] { board->DispatchLatestMusicUdp(); });
+                    }
                 }
                 // Per-line lyric packets are ignored: Tab5 shows its own timed lyrics.
                 cJSON_Delete(root);
@@ -656,17 +792,16 @@ private:
         if (native_radio_ready_.load())
             return;
         auto* native_display = static_cast<QdtechTab5Display*>(display_);
-        radio_service_.Start(
-            nullptr, [this, native_display](const char* station, const char* state, const char* meta) {
-                native_display->UpdateMusicPlaybackState(station, state);
-                native_display->SetRadioState(station, state, meta);
-                if (state && meta && std::strcmp(state, "Stopped") == 0 &&
-                    std::strstr(meta, "Music ended"))
-                    OnMusicEndedNaturally();
-            });
+        radio_service_.Start(nullptr, [this, native_display](const char* station, const char* state,
+                                                             const char* meta) {
+            native_display->PostRadioState(station, state, meta);
+            if (state && meta && std::strcmp(state, "Stopped") == 0 &&
+                std::strstr(meta, "Music ended"))
+                OnMusicEndedNaturally();
+        });
         native_radio_ready_.store(radio_service_.IsStarted());
         if (native_radio_ready_.load()) {
-            native_display->SetRadioState(
+            native_display->PostRadioState(
                 radio_service_.GetStationName(radio_service_.GetCurrentIndex()), "Ready",
                 "Tap Play");
         }
@@ -689,24 +824,26 @@ private:
                     "show the radio screen. Optionally choose a station by name.",
                     PropertyList({Property("station", kPropertyTypeString, std::string(""))}),
                     [this](const PropertyList& properties) -> ReturnValue {
-                        ++music_request_generation_;
-                        EnsureNativeRadio();
                         const auto station = properties["station"].value<std::string>();
-                        if (!station.empty())
-                            radio_service_.SelectStation(station);
-                        radio_service_.Play();
-                        static_cast<QdtechTab5Display*>(display_)->ShowRadioPage();
+                        ReplaceMusicSource([this, &station] {
+                            EnsureNativeRadio();
+                            if (!station.empty())
+                                radio_service_.SelectStation(station);
+                            radio_service_.Play();
+                            static_cast<QdtechTab5Display*>(display_)->ShowRadioPage();
+                        });
                         return true;
                     });
         mcp.AddTool("self.radio.stop", "Stop internet radio playback.", PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
                         // While Tab5 itself asked for the next song, a stop from the model is
                         // just its "stop before play" habit: keep the session alive.
-                        if (!music_next_pending_.load())
-                            EndContinuousSession();
-                        ++music_request_generation_;
-                        if (native_radio_ready_.load())
-                            radio_service_.Stop();
+                        ReplaceMusicSource([this] {
+                            if (!music_next_pending_.load())
+                                EndContinuousSession();
+                            if (native_radio_ready_.load())
+                                radio_service_.Stop();
+                        });
                         return true;
                     });
         mcp.AddTool("self.nes.status",
@@ -725,9 +862,11 @@ private:
                     "/sdcard/nes. Use a USB gamepad (e.g. SN30 Pro) to play.",
                     PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
-                        radio_service_.Stop();
-                        fc_emulator_service_.SetActive(true);
-                        fc_emulator_service_.PlayPause();
+                        ReplaceMusicSource([this] {
+                            radio_service_.Stop();
+                            fc_emulator_service_.SetActive(true);
+                            fc_emulator_service_.PlayPause();
+                        });
                         return UsbGamepadConnected()
                                    ? std::string("NES started. USB gamepad connected.")
                                    : std::string(
@@ -742,18 +881,20 @@ private:
                     });
         mcp.AddTool("self.radio.next", "Play the next internet radio station.", PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
-                        ++music_request_generation_;
-                        EnsureNativeRadio();
-                        radio_service_.Next();
-                        static_cast<QdtechTab5Display*>(display_)->ShowRadioPage();
+                        ReplaceMusicSource([this] {
+                            EnsureNativeRadio();
+                            radio_service_.Next();
+                            static_cast<QdtechTab5Display*>(display_)->ShowRadioPage();
+                        });
                         return true;
                     });
         mcp.AddTool("self.radio.previous", "Play the previous internet radio station.",
                     PropertyList(), [this](const PropertyList&) -> ReturnValue {
-                        ++music_request_generation_;
-                        EnsureNativeRadio();
-                        radio_service_.Prev();
-                        static_cast<QdtechTab5Display*>(display_)->ShowRadioPage();
+                        ReplaceMusicSource([this] {
+                            EnsureNativeRadio();
+                            radio_service_.Prev();
+                            static_cast<QdtechTab5Display*>(display_)->ShowRadioPage();
+                        });
                         return true;
                     });
         mcp.AddTool(
@@ -776,6 +917,30 @@ private:
                 const auto b2 = p["body2"].value<std::string>();
                 const char* titles[3] = {t0.c_str(), t1.c_str(), t2.c_str()};
                 const char* bodies[3] = {b0.c_str(), b1.c_str(), b2.c_str()};
+                auto valid = [](const std::string& text, size_t max_characters) {
+                    if (text.empty() || text.size() > max_characters * 4)
+                        return false;
+                    size_t characters = 0;
+                    for (unsigned char ch : text) {
+                        if (ch < 0x20 || ch == 0x7f)
+                            return false;
+                        if ((ch & 0xc0) != 0x80)
+                            ++characters;
+                    }
+                    return characters <= max_characters;
+                };
+                const std::string* card_titles[3] = {&t0, &t1, &t2};
+                const std::string* card_bodies[3] = {&b0, &b1, &b2};
+                unsigned cards = 0;
+                for (int i = 0; i < 3; ++i) {
+                    if (card_titles[i]->empty() && card_bodies[i]->empty())
+                        continue;
+                    if (!valid(*card_titles[i], 14) || !valid(*card_bodies[i], 36))
+                        return std::string("Invalid daily card text or length");
+                    ++cards;
+                }
+                if (cards == 0)
+                    return std::string("At least one daily card is required");
                 if (!display_)
                     return std::string("Display not ready");
                 static_cast<QdtechTab5Display*>(display_)->SetDailyCards(titles, bodies);
@@ -885,11 +1050,10 @@ private:
                           Property("song_id", kPropertyTypeString, std::string("")),
                           Property("continuous", kPropertyTypeBoolean, false)}),
             [this](const PropertyList& p) -> ReturnValue {
-                NoteMusicPlayRequest(p["continuous"].value<bool>());
-                return PlayMusicRequest(p["title"].value<std::string>(),
-                                        p["artist"].value<std::string>(),
-                                        p["url"].value<std::string>(), std::string(),
-                                        p["song_id"].value<std::string>());
+                return PlayMusicRequest(
+                    p["title"].value<std::string>(), p["artist"].value<std::string>(),
+                    p["url"].value<std::string>(), std::string(), p["song_id"].value<std::string>(),
+                    p["continuous"].value<bool>());
             });
         mcp.AddTool(
             "self.muse.inbox",
@@ -942,63 +1106,64 @@ private:
             "Display complete timed LRC lyrics for the currently playing Tab5 song. Retrieve real "
             "LRC from the connected NAS/NetEase MCP first, then pass its raw [mm:ss.xx] lines as "
             "lyrics. Call after self.music.play_url when lyrics were not included there. Do not "
-            "fabricate lyrics.",
+            "fabricate lyrics. Include the exact title and artist from play_url so delayed lyrics "
+            "cannot overwrite another song.",
             PropertyList({Property("title", kPropertyTypeString, std::string("")),
+                          Property("artist", kPropertyTypeString, std::string("")),
                           Property("lyrics", kPropertyTypeString)}),
             [this](const PropertyList& p) -> ReturnValue {
                 const auto title = p["title"].value<std::string>();
+                const auto artist = p["artist"].value<std::string>();
                 const auto lyrics = p["lyrics"].value<std::string>();
-                return static_cast<QdtechTab5Display*>(display_)->SetMusicLyrics(lyrics.c_str(),
-                                                                                 title.c_str())
+                return ApplyMusicLyricsFromTool(title, artist, lyrics)
                            ? "Lyrics shown and synchronized on Tab5."
-                           : "Lyrics not shown: supply valid LRC for the current song (max 16 KB).";
+                           : "Lyrics not shown: supply the current song title and valid LRC (max "
+                             "16 KB).";
             });
         // The NAS NetEase MCP pushes lyric lines under this name (older protocol).
         mcp.AddTool("self.music.show_lyric",
-                    "Show the current lyric line on the Tab5 screen (NAS lyric sync).",
+                    "Show the current lyric line on Tab5. Include the exact title and artist from "
+                    "play_url; delayed lines for another song are ignored.",
                     PropertyList({Property("title", kPropertyTypeString, std::string("")),
                                   Property("artist", kPropertyTypeString, std::string("")),
                                   Property("line", kPropertyTypeString, std::string("")),
                                   Property("udp_port", kPropertyTypeInteger, 0, 0, 65535)}),
                     [this](const PropertyList& p) -> ReturnValue {
-                        static_cast<QdtechTab5Display*>(display_)->SetMusicInfo(
-                            p["title"].value<std::string>().c_str(),
-                            p["artist"].value<std::string>().c_str(),
-                            p["line"].value<std::string>().c_str());
-                        return true;
+                        return ApplyLegacyMusicLyricLine(p["title"].value<std::string>(),
+                                                         p["artist"].value<std::string>(),
+                                                         p["line"].value<std::string>());
                     });
         mcp.AddTool("self.music.set_lyric",
-                    "Show the current lyric line on the Tab5 screen after music starts.",
+                    "Show the current lyric line on Tab5 after music starts. Include the exact "
+                    "title and artist from play_url; delayed lines for another song are ignored.",
                     PropertyList({Property("title", kPropertyTypeString, std::string("")),
                                   Property("artist", kPropertyTypeString, std::string("")),
                                   Property("line", kPropertyTypeString, std::string(""))}),
                     [this](const PropertyList& p) -> ReturnValue {
-                        static_cast<QdtechTab5Display*>(display_)->SetMusicInfo(
-                            p["title"].value<std::string>().c_str(),
-                            p["artist"].value<std::string>().c_str(),
-                            p["line"].value<std::string>().c_str());
-                        return true;
+                        return ApplyLegacyMusicLyricLine(p["title"].value<std::string>(),
+                                                         p["artist"].value<std::string>(),
+                                                         p["line"].value<std::string>());
                     });
         mcp.AddTool("self.music.stop", "Stop song playback.", PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
-                        if (music_next_pending_.load()) {
-                            // Answering our own next-song request: nothing to stop yet.
-                            ++music_request_generation_;
+                        ReplaceMusicSource([this] {
+                            if (music_next_pending_.load()) {
+                                // Answering our own next-song request: nothing to stop yet.
+                                if (native_radio_ready_.load())
+                                    radio_service_.Stop();
+                                return;
+                            }
+                            EndContinuousSession();
                             if (native_radio_ready_.load())
                                 radio_service_.Stop();
-                            return true;
-                        }
-                        EndContinuousSession();
-                        ++music_request_generation_;
-                        if (native_radio_ready_.load())
-                            radio_service_.Stop();
-                        static_cast<QdtechTab5Display*>(display_)->StopMusicTrack();
-                        static_cast<QdtechTab5Display*>(display_)->SetMusicInfo("已停止", "",
-                                                                                "点歌或收听电台");
+                            static_cast<QdtechTab5Display*>(display_)->StopMusicTrack();
+                            static_cast<QdtechTab5Display*>(display_)->SetMusicInfo(
+                                "已停止", "", "点歌或收听电台");
+                        });
                         return true;
                     });
         auto show_icu = [this](int mode, const icu::Result& result) -> ReturnValue {
-            static_cast<QdtechTab5Display*>(display_)->ShowIcuPage(mode, result.text);
+            static_cast<QdtechTab5Display*>(display_)->ShowIcuPage(mode, result.text, result.ok);
             return result.text;
         };
         mcp.AddTool("self.icu.open",
@@ -1105,6 +1270,14 @@ private:
     bool time_weather_started_ = false;
     bool product_tools_registered_ = false;
 
+    void SetDesktopMusicInfo(const char* title, const char* artist, const char* line) {
+        if (!display_ || !lvgl_port_lock(250))
+            return;
+        static_cast<QdtechTab5Display*>(display_)->GetDesktopUI()->SetMusicLyric(title, artist,
+                                                                                 line);
+        lvgl_port_unlock();
+    }
+
     void RegisterProductTools() {
         if (product_tools_registered_) return;
         product_tools_registered_ = true;
@@ -1156,40 +1329,37 @@ private:
         mcp.AddTool("self.radio.previous", "Play the previous radio station.", PropertyList(),
             [this](const PropertyList&) -> ReturnValue { radio_service_.Prev(); return true; });
         mcp.AddTool("self.music.play_url", "Play a direct HTTP MP3 URL on the Tab5 speaker.",
-            PropertyList({Property("title", kPropertyTypeString, std::string("Music")),
-                          Property("artist", kPropertyTypeString, std::string("")),
-                          Property("url", kPropertyTypeString)}),
-            [this](const PropertyList& p) -> ReturnValue {
-                const auto title = p["title"].value<std::string>();
-                const auto artist = p["artist"].value<std::string>();
-                if (display_) {
-                    static_cast<QdtechTab5Display*>(display_)->SetMusicInfo(
-                        title.c_str(), artist.c_str(), "正在连接音源…");
-                }
-                return radio_service_.PlayUrlFromTool(title, artist,
-                    p["url"].value<std::string>());
-            });
-        mcp.AddTool("self.music.set_lyric",
+                    PropertyList({Property("title", kPropertyTypeString, std::string("Music")),
+                                  Property("artist", kPropertyTypeString, std::string("")),
+                                  Property("url", kPropertyTypeString)}),
+                    [this](const PropertyList& p) -> ReturnValue {
+                        const auto title = p["title"].value<std::string>();
+                        const auto artist = p["artist"].value<std::string>();
+                        SetDesktopMusicInfo(title.c_str(), artist.c_str(), "正在连接音源…");
+                        return radio_service_.PlayUrlFromTool(title, artist,
+                                                              p["url"].value<std::string>());
+                    });
+        mcp.AddTool(
+            "self.music.set_lyric",
             "Show the current lyric line on the Tab5 screen. Call after self.music.play_url.",
             PropertyList({Property("title", kPropertyTypeString, std::string("")),
                           Property("artist", kPropertyTypeString, std::string("")),
                           Property("line", kPropertyTypeString, std::string(""))}),
             [this](const PropertyList& p) -> ReturnValue {
-                if (display_) {
-                    static_cast<QdtechTab5Display*>(display_)->SetMusicInfo(
-                        p["title"].value<std::string>().c_str(),
-                        p["artist"].value<std::string>().c_str(),
-                        p["line"].value<std::string>().c_str());
-                }
+                SetDesktopMusicInfo(p["title"].value<std::string>().c_str(),
+                                    p["artist"].value<std::string>().c_str(),
+                                    p["line"].value<std::string>().c_str());
                 return true;
             });
-        mcp.AddTool("self.music.stop", "Stop MP3 URL playback.", PropertyList(),
+        mcp.AddTool(
+            "self.music.stop", "Stop MP3 URL playback.", PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
-                if (display_) {
-                    static_cast<QdtechTab5Display*>(display_)->SetMusicInfo(
-                        "已停止", "", "点歌或收听电台");
+                if (display_ && lvgl_port_lock(250)) {
+                    static_cast<QdtechTab5Display*>(display_)->GetDesktopUI()->ClearMusicLyric();
+                    lvgl_port_unlock();
                 }
-                return radio_service_.Stop();
+                radio_service_.Stop();
+                return true;
             });
     }
 #endif
@@ -1742,7 +1912,13 @@ private:
             .csi = &csi_config,
         };
 
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+        // Native UI keeps camera sensing active alongside LVGL and audio. Prefer
+        // the smaller RGB565 CSI buffers, with RGB24 fallback in EspVideo.
+        camera_ = new EspVideo(video_config, EspVideo::PixelFormatPreference::PreferRgb565);
+#else
         camera_ = new EspVideo(video_config);
+#endif
         g_tab5_camera = camera_;
     }
 
@@ -1787,6 +1963,20 @@ public:
         // UsbGamepadHostStart() is invoked from StartNetwork().
     }
 
+    // Keep BALANCED Wi-Fi power save while external audio plays. The native-only
+    // experiment also keeps it while idle to measure incoming network latency.
+    void SetPowerSaveLevel(PowerSaveLevel level) override {
+        if (level == PowerSaveLevel::LOW_POWER) {
+#if CONFIG_QDTECH_TAB5_IDLE_BALANCED_WIFI_EXPERIMENT
+            level = PowerSaveLevel::BALANCED;
+#else
+            if (Application::GetInstance().IsExternalAudioActive())
+                level = PowerSaveLevel::BALANCED;
+#endif
+        }
+        WifiBoard::SetPowerSaveLevel(level);
+    }
+
     void StartNetwork() override {
         WifiBoard::StartNetwork();
         // Native UI has no TimeWeatherService; start SNTP here so the clock
@@ -1814,31 +2004,38 @@ public:
         // but dead / flash on tap").
         xTaskCreate(
             [](void* arg) {
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
                 auto* self = static_cast<QdtechTab5Board*>(arg);
+#endif
                 // Let ESP-Hosted finish claiming the shared SDMMC host first.
                 vTaskDelay(pdMS_TO_TICKS(800));
                 if (!Tab5SdReady()) {
                     Tab5SdMountAndRegisterFs();
                 }
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
                 if (self->display_ && Tab5SdReady()) {
                     // lv_binfont_create touches LVGL heap — hold the port lock.
                     lvgl_port_lock(0);
                     static_cast<QdtechTab5Display*>(self->display_)->LoadSdFallbackFont();
                     lvgl_port_unlock();
                 }
+#endif
                 // Learned IR codes: load now (SD mounted or not) so the remote page and the
                 // voice tool do not wait for the card later.
                 ir::Store::GetInstance().Load();
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
                 // Assets::GetInstance() may mmap the flash partition, which needs an
                 // internal-RAM stack — decide here, before handing off to the PSRAM task.
                 if (Tab5SdReady()) {
                     void* ptr = nullptr;
                     size_t size = 0;
-                    if (Assets::GetInstance().GetAssetData(tab5_sd_assets::TextFont().name, ptr, size))
+                    if (Assets::GetInstance().GetAssetData(tab5_sd_assets::TextFont().name, ptr,
+                                                           size))
                         ESP_LOGI(TAG, "text font is in the flash assets; SD copy not needed");
                     else
                         StartSdAssetsTask(self);
                 }
+#endif
                 vTaskDelete(nullptr);
             },
             "tab5_sd_font", 10 * 1024, this, 2, nullptr);
@@ -1856,9 +2053,10 @@ public:
             auto* native_display = static_cast<QdtechTab5Display*>(display_);
             Tab5NativeApps::Actions actions;
             actions.reconfigure_wifi = [this] {
-                ++music_request_generation_;
-                if (native_radio_ready_.load())
-                    radio_service_.Stop();
+                ReplaceMusicSource([this] {
+                    if (native_radio_ready_.load())
+                        radio_service_.Stop();
+                });
                 EnterWifiConfigMode();
             };
             actions.wifi_summary = [] {
@@ -1887,32 +2085,42 @@ public:
                     codec->SetOutputVolume(std::clamp(value, 0, 100));
             };
             actions.start_radio = [this] { EnsureNativeRadio(); };
+            actions.radio_play_requested = [this] { return radio_service_.IsPlayRequested(); };
             actions.radio_play_pause = [this] {
-                ++music_request_generation_;
-                EnsureNativeRadio();
-                radio_service_.PlayPause();
+                ReplaceMusicSource([this] {
+                    EnsureNativeRadio();
+                    radio_service_.PlayPause();
+                });
             };
             actions.radio_stop = [this] {
-                EndContinuousSession();
-                ++music_request_generation_;
-                if (native_radio_ready_.load())
-                    radio_service_.Stop();
+                ReplaceMusicSource([this] {
+                    EndContinuousSession();
+                    if (native_radio_ready_.load())
+                        radio_service_.Stop();
+                });
             };
             actions.radio_next = [this] {
-                if (SkipToNextSong())
-                    return;
-                EndContinuousSession();
-                ++music_request_generation_;
-                EnsureNativeRadio();
-                radio_service_.Next();
+                ReplaceMusicSource([this] {
+                    if (music_continuous_session_.load()) {
+                        music_continuous_.store(false);  // intentional skip, not a natural end
+                        if (native_radio_ready_.load())
+                            radio_service_.Stop();
+                        RequestNextSong(600);
+                        return;
+                    }
+                    EndContinuousSession();
+                    EnsureNativeRadio();
+                    radio_service_.Next();
+                });
             };
             actions.ask_song = [this] {
                 // Silence the speaker first so the microphone hears the request,
                 // then open a voice turn once the player has released the audio path.
-                EndContinuousSession();
-                ++music_request_generation_;
-                if (native_radio_ready_.load())
-                    radio_service_.Stop();
+                ReplaceMusicSource([this] {
+                    EndContinuousSession();
+                    if (native_radio_ready_.load())
+                        radio_service_.Stop();
+                });
                 if (!ask_song_timer_) {
                     esp_timer_create_args_t args = {};
                     args.callback = [](void*) {
@@ -1934,16 +2142,18 @@ public:
                 esp_timer_start_once(ask_song_timer_, 600 * 1000);
             };
             actions.radio_previous = [this] {
-                EndContinuousSession();
-                ++music_request_generation_;
-                EnsureNativeRadio();
-                radio_service_.Prev();
+                ReplaceMusicSource([this] {
+                    EndContinuousSession();
+                    EnsureNativeRadio();
+                    radio_service_.Prev();
+                });
             };
             actions.radio_select = [this](int index) {
-                EndContinuousSession();
-                ++music_request_generation_;
-                EnsureNativeRadio();
-                radio_service_.SelectStationIndex(index);
+                ReplaceMusicSource([this, index] {
+                    EndContinuousSession();
+                    EnsureNativeRadio();
+                    radio_service_.SelectStationIndex(index);
+                });
             };
             actions.station_count = [this] {
                 // Catalog load does not need the player task.
@@ -1957,19 +2167,22 @@ public:
                 return native_radio_ready_.load() ? radio_service_.GetAudioLevel() : 0;
             };
             actions.start_nes = [this] {
-                ++music_request_generation_;
-                radio_service_.Stop();
-                // Game mode: free camera + claim audio so vision/MQTT stay off.
-                if (camera_) camera_->PauseStream();
-                Application::GetInstance().SetExternalAudioActive(true);
-                UsbGamepadSetOnConnect([] {
-                    if (g_tab5_camera) g_tab5_camera->PauseStream();
+                ReplaceMusicSource([this] {
+                    radio_service_.Stop();
+                    // Game mode: free camera + claim audio so vision/MQTT stay off.
+                    if (camera_)
+                        camera_->PauseStream();
+                    Application::GetInstance().SetExternalAudioActive(true);
+                    UsbGamepadSetOnConnect([] {
+                        if (g_tab5_camera)
+                            g_tab5_camera->PauseStream();
+                    });
+                    // USB host needs contiguous internal SRAM. Start it before the
+                    // FC task claims another block; retry is idempotent.
+                    UsbGamepadHostStart();
+                    fc_emulator_service_.SetActive(true);
+                    fc_emulator_service_.PlayPause();
                 });
-                // USB host needs contiguous internal SRAM. Start it before the
-                // FC task claims another block; retry is idempotent.
-                UsbGamepadHostStart();
-                fc_emulator_service_.SetActive(true);
-                fc_emulator_service_.PlayPause();
             };
             actions.stop_nes = [this] {
                 // Stop the emulator but keep the page/session so the next
@@ -1996,13 +2209,16 @@ public:
             actions.muse_refresh = [] { tab5_muse::Inbox::GetInstance().RequestRefresh(); };
             actions.muse_opened = [] { tab5_muse::Inbox::GetInstance().MarkAllSeen(); };
             native_display->SetAppsActions(std::move(actions), [this] {
-                EnsureNativeRadio();
-                radio_service_.Play();
+                ReplaceMusicSource([this] {
+                    EnsureNativeRadio();
+                    radio_service_.Play();
+                });
             });
-            Tab5Ota::GetInstance().SetStatusCallback([native_display](const Tab5Ota::Status& status) {
-                native_display->SetFirmwareStatus(status.text, status.button, status.progress,
-                                                  status.busy);
-            });
+            Tab5Ota::GetInstance().SetStatusCallback(
+                [native_display](const Tab5Ota::Status& status) {
+                    native_display->SetFirmwareStatus(status.text, status.button, status.progress,
+                                                      status.busy);
+                });
             RegisterNativeTools();
             tab5_muse::Inbox::GetInstance().Start(
                 [native_display, announced = std::make_shared<std::atomic<int>>(-1)](
@@ -2010,24 +2226,34 @@ public:
                     // First successful poll after boot only records the baseline; later
                     // increases of latest_id with unread messages are "new arrivals".
                     const int previous = announced->exchange(snapshot.latest_id);
-                    const bool new_arrival = previous >= 0 && snapshot.latest_id > previous &&
-                                             snapshot.Unread() > 0;
+                    const bool new_arrival =
+                        previous >= 0 && snapshot.latest_id > previous && snapshot.Unread() > 0;
                     native_display->SetMuseInbox(snapshot, new_arrival);
+                },
+                [this](const tab5_muse::MusicCommand& command) {
+                    Application::GetInstance().Schedule([this, command] {
+                        const auto result =
+                            PlayMusicRequest(command.title, command.artist, command.url, "",
+                                             command.song_id, command.continuous);
+                        ESP_LOGI("Tab5Music", "relay play_url: %s", result.c_str());
+                    });
                 });
-            native_display->SetPresenceTestAction([this] { vision_service_.RequestPresenceTest(); });
+            native_display->SetPresenceTestAction(
+                [this] { vision_service_.RequestPresenceTest(); });
             native_display->SetInteractionAction([this] { vision_service_.NotifyInteraction(); });
-            if (camera_) vision_service_.Start(camera_, native_display);
+            if (camera_)
+                vision_service_.Start(camera_, native_display);
             // NES + USB gamepad (SN30 Pro). Frames can later bind to a native page.
             fc_emulator_service_.Start({
-                .set_state = [native_display](const char* title, const char* detail, const char*) {
-                    char buf[160];
-                    snprintf(buf, sizeof(buf), "%s%s%s", title ? title : "",
-                             (detail && *detail) ? " · " : "", detail ? detail : "");
-                    native_display->SetNesStatus(buf);
-                },
-                .set_mode = [native_display](bool playing) {
-                    native_display->SetNesPlaying(playing);
-                },
+                .set_state =
+                    [native_display](const char* title, const char* detail, const char*) {
+                        char buf[160];
+                        snprintf(buf, sizeof(buf), "%s%s%s", title ? title : "",
+                                 (detail && *detail) ? " · " : "", detail ? detail : "");
+                        native_display->SetNesStatus(buf);
+                    },
+                .set_mode =
+                    [native_display](bool playing) { native_display->SetNesPlaying(playing); },
             });
             fc_emulator_service_.SetDirectFrameCallback(
                 [native_display](const uint16_t* pixels, uint16_t width, uint16_t height) -> bool {

@@ -21,6 +21,15 @@ static constexpr bool kUseAfeForVoiceProcessing = true;
 static constexpr bool kUseAfeForVoiceProcessing = false;
 #endif
 
+#if CONFIG_BOARD_TYPE_QDTECH_TAB5
+// The Tab5 display task runs at priority 4 and can render for over 100 ms.
+// Keep the AFE fetch consumer above it so the priority-8 input/feed producer
+// cannot fill the AFE ring buffer while Nabo animates.
+static constexpr UBaseType_t kAfeProcessingTaskPriority = 5;
+#else
+static constexpr UBaseType_t kAfeProcessingTaskPriority = 3;
+#endif
+
 AfeAudioEngine::AfeAudioEngine() { event_group_ = xEventGroupCreate(); }
 
 AfeAudioEngine::~AfeAudioEngine() {
@@ -225,8 +234,8 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
             engine->ProcessingTask();
             vTaskDelete(nullptr);
         },
-        "audio_afe", kProcessingTaskStackSize, this, 3, processing_task_stack_,
-        processing_task_buffer_);
+        "audio_afe", kProcessingTaskStackSize, this, kAfeProcessingTaskPriority,
+        processing_task_stack_, processing_task_buffer_);
     if (processing_task_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create AFE processing task, internal free=%u largest=%u",
                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL),

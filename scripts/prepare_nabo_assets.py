@@ -371,7 +371,8 @@ def main() -> None:
     for reaction, (parts, _) in reactions.items():
         for name, image in parts.items():
             definitions.append(image_definition(f"nabo_{reaction}_{name}", image,
-                lz4=reaction in ("wink", "encourage") and name == "torso"))
+                lz4=reaction in ("think", "wink", "encourage", "curious", "comfort")
+                and name == "torso"))
     from preview_nabo_reactions import render_reactions
     render_reactions(ROOT, {name: reactions[name] for name in
                             ("listen", "think", "happy", "music")}, version=6)

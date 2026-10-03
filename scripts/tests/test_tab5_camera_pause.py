@@ -50,6 +50,7 @@ public:
     std::mutex capture_mutex_;
     std::atomic<bool> streaming_on_{true};
     bool stream_paused_=false;
+    size_t resume_next_buffer_=0;
     int video_fd_=1;
     uint16_t sensor_width_=320, sensor_height_=240;
     int sensor_format_=V4L2_PIX_FMT_RGB24;
