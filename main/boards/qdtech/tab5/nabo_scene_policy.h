@@ -9,6 +9,11 @@ struct Selection {
     int clip;
     unsigned frame;
 };
+// A stopped manual capture can retain its last VAD bit. Ignore that stale bit
+// only for an established reply wait; all other scene gates keep their behavior.
+inline bool VoiceBlocksScene(bool waiting, bool voice_detected, bool capture_running) {
+    return voice_detected && (!waiting || capture_running);
+}
 inline Selection Select(uint64_t now, Output scene, SceneInput input) {
     if (input.hidden || input.gesture || input.voice || input.music || input.playback ||
         input.speaking)
@@ -23,4 +28,25 @@ inline Selection Select(uint64_t now, Output scene, SceneInput input) {
         return {0, scene.frame};
     return {-1, 0};
 }
+// Starts the accepted 50-frame source at zero on every eligible work entry.
+// Other clips keep their original clocks and generation semantics.
+class WorkClock {
+public:
+    Selection Apply(uint64_t now, Selection selection) {
+        if (selection.clip != 3) {
+            active_ = false;
+            return selection;
+        }
+        if (!active_) {
+            active_ = true;
+            since_ = now;
+        }
+        selection.frame = unsigned((now - since_) / 40) % 50;
+        return selection;
+    }
+
+private:
+    uint64_t since_ = 0;
+    bool active_ = false;
+};
 }  // namespace nabo_scene

@@ -262,7 +262,7 @@ bool Tab5SdScene::Tick(uint64_t now, Input input) {
         lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
     else
         lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
-    const auto selection = nabo_scene::Select(now, scene, input);
+    const auto selection = work_clock_.Apply(now, nabo_scene::Select(now, scene, input));
     const int clip = selection.clip;
     const unsigned frame = selection.frame;
     if (scene.generation != last_generation_ || clip != last_clip_) {

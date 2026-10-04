@@ -27,6 +27,7 @@ private:
     Tab5SdSceneReader* reader_ = nullptr;
     nabo_scene::Controller controller_{nabo_scene::kWakeMatches};
     tab5_home::Animation speech_face_;
+    nabo_scene::WorkClock work_clock_;
     lv_image_dsc_t descriptors_[2]{};
     nabo_sd::SceneMailbox::Lease current_{};
     const lv_image_dsc_t* source_ = nullptr;

@@ -37,7 +37,7 @@ def application_harness(source):
 #define MAIN_EVENT_PLAYBACK_DRAINED 1
 static void xEventGroupSetBits(int, int) {}
 
-enum DeviceState { kDeviceStateIdle, kDeviceStateConnecting, kDeviceStateListening };
+#include "reply_wait_state.h"
 enum ListeningMode { kListeningModeAutoStop, kListeningModeManualStop };
 enum class PowerSaveLevel { PERFORMANCE, LOW_POWER };
 struct Camera { void PauseStream() {} };
@@ -147,6 +147,7 @@ public:
     bool play_popup_on_listening_ = false;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AudioService audio_service_;
+    ReplyWaitState reply_wait_;
     BackgroundTask background;
     std::deque<std::function<void()>> main_jobs;
     mutable std::mutex protocol_mutex_;
@@ -190,7 +191,11 @@ int main() {
     Application before(p2);
     int stale_intent = 0;
     before.QueueProtocolOpen([&] { ++stale_intent; });
+    before.reply_wait_.Voice(true);
+    before.reply_wait_.Voice(false);
+    if (!before.reply_wait_.Recognized(0, kDeviceStateListening)) return 9;
     before.RequestProtocolClose(false, false);
+    if (before.reply_wait_.Waiting(1, kDeviceStateListening)) return 10;
     before.background.RunAll();
     before.RunMain();
     if (p2->opens != 0 || p2->closes != 1 || stale_intent != 0) return 2;
@@ -237,7 +242,11 @@ int main() {
     Application listening(p4);
     listening.state = kDeviceStateListening;
     listening.external = true;
+    listening.reply_wait_.Voice(true);
+    listening.reply_wait_.Voice(false);
+    if (!listening.reply_wait_.Recognized(0, kDeviceStateListening)) return 11;
     listening.StartListeningAudio();
+    if (listening.reply_wait_.Waiting(1, kDeviceStateListening)) return 12;
     if (!listening.pending_listening_start_ || p4->starts ||
         listening.audio_service_.voice_enables) return 7;
     listening.external = false;
@@ -256,7 +265,7 @@ class ApplicationHandoffTests(unittest.TestCase):
             test = Path(directory) / 'application.cc'
             binary = Path(directory) / 'application'
             test.write_text(application_harness(source))
-            subprocess.run(['c++', '-std=c++17', '-pthread', str(test), '-o', str(binary)],
+            subprocess.run(['c++', '-std=c++17', '-pthread', '-I', str(root / 'main'), str(test), '-o', str(binary)],
                            check=True, capture_output=True, text=True)
             result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)

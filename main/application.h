@@ -17,13 +17,14 @@
 #include <string>
 #include <vector>
 
-#include "protocol.h"
-#include "ota.h"
 #include "audio_service.h"
+#include "background_task.h"
 #include "device_state.h"
 #include "device_state_machine.h"
 #include "notify/notify_player.h"
-#include "background_task.h"
+#include "ota.h"
+#include "protocol.h"
+#include "reply_wait_state.h"
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -74,7 +75,11 @@ public:
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
-    
+    bool IsWaitingForReply() {
+        return reply_wait_.Waiting(uint32_t(esp_timer_get_time() / 1000), GetDeviceState(),
+                                   !audio_service_.IsPlaybackIdle());
+    }
+
     /**
      * Request state transition
      * Returns true if transition was successful
@@ -189,6 +194,7 @@ private:
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
+    ReplyWaitState reply_wait_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;

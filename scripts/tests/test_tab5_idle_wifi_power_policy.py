@@ -51,8 +51,7 @@ class Tab5IdleWifiPowerPolicyTests(unittest.TestCase):
 
 enum class PowerSaveLevel { LOW_POWER, BALANCED, PERFORMANCE };
 enum class WifiPowerSaveLevel { LOW_POWER, BALANCED, PERFORMANCE };
-constexpr int kDeviceStateIdle = 0;
-constexpr int kDeviceStateListening = 1;
+#include "reply_wait_state.h"
 
 class WifiManager {
 public:
@@ -112,6 +111,7 @@ public:
     void StartListeningAudio() {}
     std::atomic<bool> external_audio_active_{false};
     FakeAudioService audio_service_;
+    ReplyWaitState reply_wait_;
     bool pending_listening_start_ = false;
     std::vector<std::function<void()>> pending;
 };
@@ -138,7 +138,11 @@ int main() {
     QdtechTab5Board tab5;
     Board::current = &tab5;
 
+    app.reply_wait_.Voice(true);
+    app.reply_wait_.Voice(false);
+    if (!app.reply_wait_.Recognized(0, kDeviceStateIdle)) return 8;
     app.SetExternalAudioActive(true);
+    if (app.reply_wait_.Waiting(1, kDeviceStateIdle)) return 9;
     if (wifi.last != WifiPowerSaveLevel::BALANCED) return 1;
     tab5.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
     if (wifi.last != WifiPowerSaveLevel::BALANCED) return 2;
@@ -178,7 +182,7 @@ int main() {
                 subprocess.run(
                     ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                      f"-DCONFIG_QDTECH_TAB5_IDLE_BALANCED_WIFI_EXPERIMENT={enabled}",
-                     str(source), "-o", str(executable)],
+                     "-I", str(ROOT / "main"), str(source), "-o", str(executable)],
                     check=True, capture_output=True, text=True
                 )
                 subprocess.run([str(executable)], check=True, capture_output=True,

@@ -94,11 +94,13 @@ class QdtechTab5Display : public MipiLcdDisplay {
         const bool radio_busy = music_playing_ || std::strcmp(radio, "Playing") == 0 ||
                                 std::strcmp(radio, "Buffering") == 0 ||
                                 std::strcmp(radio, "Connecting") == 0;
+        const bool waiting = app.IsWaitingForReply();
+        const bool voice = nabo_scene::VoiceBlocksScene(
+            waiting, app.IsVoiceDetected(), app.GetAudioService().IsAudioProcessorRunning());
         return sd_scene_->Tick(
-            now, {speaking_, !app.GetAudioService().IsPlaybackIdle(), sleeping_,
-                  awaiting_reply_ || face_animation_.state() == tab5_home::State::Thinking, active_,
-                  app.IsVoiceDetected(), radio_busy,
-                  preview_active_ || (apps_ && apps_->IsVisible()), wave_active_});
+            now,
+            {speaking_, !app.GetAudioService().IsPlaybackIdle(), sleeping_, waiting, active_, voice,
+             radio_busy, preview_active_ || (apps_ && apps_->IsVisible()), wave_active_});
     }
 #endif
     lv_obj_t* portrait_ = nullptr;

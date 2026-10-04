@@ -71,7 +71,10 @@ Application::~Application() {
     vEventGroupDelete(event_group_);
 }
 
-bool Application::SetDeviceState(DeviceState state) { return state_machine_.TransitionTo(state); }
+bool Application::SetDeviceState(DeviceState state) {
+    reply_wait_.Reset();
+    return state_machine_.TransitionTo(state);
+}
 
 std::shared_ptr<Protocol> Application::ProtocolSnapshot() const {
     std::lock_guard<std::mutex> lock(protocol_mutex_);
@@ -105,6 +108,7 @@ bool Application::IsProtocolChannelOpened() {
 }
 
 void Application::RequestProtocolClose(bool reset, bool send_goodbye) {
+    reply_wait_.Reset();
     // CancelOpen only signals the handshake task. Actual socket teardown may
     // block and must run after any queued Open on the same worker. Publish the
     // invalidation and enqueue Close while holding the publication lock so a
@@ -728,9 +732,12 @@ void Application::Initialize() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
     };
     callbacks.on_wake_word_detected = [this](const std::string& wake_word) {
+        reply_wait_.Reset();
         xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
     };
     callbacks.on_vad_change = [this](bool speaking) {
+        if (GetDeviceState() == kDeviceStateListening)
+            reply_wait_.Voice(speaking);
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
     callbacks.on_playback_drained = [this]() {
@@ -970,6 +977,7 @@ void Application::HandleNetworkConnectedEvent() {
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
+    reply_wait_.Reset();
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     if (state == kDeviceStateNotifying) {
@@ -1248,6 +1256,7 @@ void Application::InitializeProtocol() {
                 pending_protocol_error_epoch_.compare_exchange_strong(expected, 0);
                 return;
             }
+            reply_wait_.Reset();
             last_error_message_ = message;
             uint64_t expected = epoch;
             pending_protocol_error_epoch_.compare_exchange_strong(expected, 0);
@@ -1287,6 +1296,7 @@ void Application::InitializeProtocol() {
                     return;
                 }
             }
+            reply_wait_.Reset();
             board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
             ClearOutboundMessages();
             auto display = Board::GetInstance().GetDisplay();
@@ -1403,8 +1413,11 @@ void Application::InitializeProtocol() {
                     glyphs.clear();
                 }
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
-                schedule_current([display, message = std::string(text->valuestring),
+                schedule_current([this, display, message = std::string(text->valuestring),
                                   glyphs = std::move(glyphs), bpp]() {
+                    if (!message.empty())
+                        reply_wait_.Recognized(uint32_t(esp_timer_get_time() / 1000),
+                                               GetDeviceState());
                     display->AddTextGlyphs(glyphs, bpp);
                     display->SetChatMessage("user", message.c_str());
                 });
@@ -1573,6 +1586,7 @@ void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT
 void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
 
 void Application::HandleToggleChatEvent() {
+    reply_wait_.Reset();
     auto state = GetDeviceState();
 
     if (state == kDeviceStateNotifying) {
@@ -1620,6 +1634,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 }
 
 void Application::HandleStartListeningEvent() {
+    reply_wait_.Reset();
     auto state = GetDeviceState();
 
     if (state == kDeviceStateNotifying) {
@@ -1665,14 +1680,19 @@ void Application::HandleStopListeningEvent() {
         SetDeviceState(kDeviceStateWifiConfiguring);
         return;
     } else if (state == kDeviceStateListening) {
+        const bool had_voice = reply_wait_.SawVoice();
         ClearOutboundMessages(true);
-        if (!QueueOutboundControl(OutboundKind::Stop))
+        const bool submitted = QueueOutboundControl(OutboundKind::Stop);
+        if (!submitted)
             RequestProtocolClose(false, false);
         SetDeviceState(kDeviceStateIdle);
+        if (submitted)
+            reply_wait_.SubmittedManual(uint32_t(esp_timer_get_time() / 1000), had_voice);
     }
 }
 
 void Application::HandleWakeWordDetectedEvent() {
+    reply_wait_.Reset();
     if (IsExternalAudioActive()) {
         return;
     }
@@ -1863,6 +1883,7 @@ void Application::HandleStateChangedEvent() {
 }
 
 void Application::StartListeningAudio() {
+    reply_wait_.Reset();
     // Runs in the main loop, either directly from HandleStateChangedEvent or
     // deferred via MAIN_EVENT_PLAYBACK_DRAINED once the playback queue drains.
     if (GetDeviceState() != kDeviceStateListening) {
@@ -1982,6 +2003,7 @@ void Application::Schedule(std::function<void()>&& callback) {
 }
 
 bool Application::AbortSpeaking(AbortReason reason) {
+    reply_wait_.Reset();
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
     ClearOutboundMessages(true);
@@ -2228,6 +2250,8 @@ void Application::RegisterDeviceStateCallback(
 }
 
 void Application::SetExternalAudioActive(bool active) {
+    if (active)
+        reply_wait_.Reset();
     // Peak current of speaker PA + LCD + Wi-Fi TX has triggered BOD reboots on
     // USB power. Dim the backlight only — never touch the user's volume.
     static int saved_brightness = -1;
