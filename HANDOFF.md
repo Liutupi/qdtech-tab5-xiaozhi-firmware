@@ -395,3 +395,13 @@ NAS 在 `192.168.3.0/24`，Tab5 在 `192.168.88.0/24`；原网易云 MCP 容器�
 关闭 NAS 自动续播后，用户反馈每日推荐播完第一首便停止。排查 Nabo 容器 `/app/xiaozhi-ws-mcp.js`：`toMcpResult` 虽给 AI 文本结果写了 `continuous: true`，但容器直推 relay 使用 `extractPlayUrlArguments(toolResult)`，优先读取网易云 MCP 的 `play_url_arguments`；该对象没有 `continuous`，原代码只检查 `directArgs.continuous === true`，因此 relay 给 Tab5 的首曲是 `continuous=false`。Tab5 的自然结束回调因此不会请求下一首。这是前一轮只关闭 NAS 计时器、未核对直推字段造成的遗漏。
 
 已在 NAS 挂载脚本的直推参数分支补充：仅带 `tab5ManagedPlayback` 标记的 Nabo 账号、且 `toolResult.playResult.mode === "private_fm"` 时把 `continuous` 置真；单曲点歌和其他账号逻辑不变。NAS 独立自动续播仍关闭，重启后也不会恢复旧会话。修改前备份 `/app/xiaozhi-ws-mcp.js.bak-20261003-continuous-fix`；`node --check` 通过，差异只有该条件一行；已重启 Nabo 容器并确认恢复运行。隔离执行部署函数：模拟私人 FM/Nabo 返回 `true`，私人 FM/其他账号及单曲/Nabo 都返回 `false`；重启后专用标记存在且持久状态 `enabled=false`。此部署修改仍在 NAS 共享目录，未同步到本仓库，后续重部署必须保留。真实首曲自然结束接第二首的实机回归尚待串口和用户反馈确认。
+
+### 2026-10-04 v1.0.8：SD 窗口动画可用、问候与流畅度
+
+SD 动画包（`/sdcard/tab5/nabo/{idle,transition,sleep,work}.nab`）此前首帧读取超时并永久回退静态。根因是 PSRAM 帧缓冲与文件偏移不对齐，ESP-IDF 6.1 `sdmmc_read_sectors()` 退化为逐 512 B 扇区读取并每次 malloc 内部 DMA 弹跳缓冲（内部 RAM 仅剩数 KB），实测仅 2.5–3.8 MB/s。现帧放在 `base + 文件偏移 % 128`，128 B 对齐的暂存缓冲走多块 DMA 直读；读取改 64 KiB 调用；超时不再立即粘性（同 clip 连续 8 次才回退，250 ms 退避）；每个帧索引在一次 Open 后只做一次 CRC。
+
+流畅度：LVGL 局部模式（720×50 绘制缓冲 + 软件旋转）每个 1.36× 缩放、带 alpha 的视频帧约需 7 轮绘制/旋转/拷贝，约 300 ms。现读取线程按原图层规则（头部在上、身体只在窗内）把帧合成到启动时 `lv_snapshot` 的窗口背景上，并通过第二张快照得到的覆盖掩码烘焙前景立柱/窗台，输出不透明 RGB565 434×558；UI 节拍内按 LVGL flush 协议（等待无 flush、置 flushing、等 DMA2D 完成回调）32×32 分块旋转后一次 `esp_lcd_panel_draw_bitmap` 直出，有遮挡/非当前屏/半透明时回退 LVGL 失效重绘。合成与旋转函数 -O2，三输出槽。实测动画约 8 fps，UI 平均渲染约 6 ms（与无动画相当）。PPA flush 实验再次试过：旋转本身正常但无帧率收益，且在摄像头问候后出现 LVGL 卡死（`Failed to lock display`），已从配置移除。
+
+行为：摄像头问候需同一人连续 ≥6 s 且 ≥4 次命中（`nabo_greeting_gate.h`），每次来访只问候一次，离开 ≥5 min 且距上次 ≥10 min 才再问候；检测时断时续不再导致问候永不播放。问候音频改为萌系男声“你好！我是，纳波！很高兴见到你！”（edge-tts `zh-CN-YunxiaNeural`，16 kHz Opus 20 ms 帧）。SD 半身模式下除触摸外不再切全身姿态（问候、唤醒后服务器表情、开始对话按钮）。对话结束后 AFE 关闭语音处理不回调 VAD=false，残留的 `voice_detected_` 曾挡住待机视频；场景门控改为仅采集运行时 VAD 生效。
+
+本版使用 ESP-IDF 6.1 构建（`CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=n`），P4 rev 1.3 实机上相机、人体检测、问候与对话运行正常。宿主测试 152 项全部通过。未验证：长期稳定性、音乐/语音并发下的动画、拍照识图（PSRAM 最低约 4.07 MB）、在线升级完整流程。“看手机”动画只在识别完成到回复播放之间显示，通常不足 1 s，基本看不到，待定改进。

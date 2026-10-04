@@ -17,6 +17,7 @@
 #include "application.h"
 #include "esp_video.h"
 #include "nabo_assets.h"
+#include "nabo_greeting_gate.h"
 #include "pedestrian_detect.hpp"
 #include "tab5_native_display.h"
 
@@ -27,7 +28,6 @@ constexpr int kHeight = 240;
 constexpr int kGridWidth = 32;
 constexpr int kGridHeight = 24;
 constexpr int64_t kSleepAfterUs = 90LL * 1000000;
-constexpr int64_t kGreetingCooldownUs = 120LL * 1000000;
 constexpr int64_t kGreetingRequestLifetimeUs = 8LL * 1000000;
 }
 
@@ -103,6 +103,7 @@ void Tab5VisionService::Run() {
     int64_t last_activity = esp_timer_get_time();
     int64_t last_confirmed_motion = 0;
     int64_t last_person_seen = 0;
+    nabo_vision::GreetingGate greeting_gate;
     int64_t last_gain_adjust = 0;
     int64_t last_person_scan = 0;
     int64_t test_wait_start = 0;
@@ -339,7 +340,7 @@ void Tab5VisionService::Run() {
             continue;
         const int64_t scan_interval =
             test_deadline || (last_confirmed_motion && now - last_confirmed_motion < 10LL * 1000000) ||
-            (person_frames && !person_present) ? 1000000 :
+            (person_frames && !person_present) || greeting_gate.Evaluating(now) ? 1000000 :
             sleeping ? 5000000 : person_present ? 3000000 : 2000000;
         if (now - last_person_scan < scan_interval) continue;
         last_person_scan = now;
@@ -352,7 +353,9 @@ void Tab5VisionService::Run() {
                                        "保持现在的位置，Nabo 已经看到你了。");
         }
         if (++detection_count % 10 == 0 || test_deadline)
-            ESP_LOGI(kTag, "Person detector: %u match(es)", unsigned(people.size()));
+            ESP_LOGI(kTag, "Person detector: %u match(es) present=%d frames=%u owed=%d",
+                     unsigned(people.size()), int(person_present), person_frames,
+                     int(greeting_owed_.load(std::memory_order_acquire)));
 
         if (!people.empty()) {
             last_person_seen = now;
@@ -367,14 +370,19 @@ void Tab5VisionService::Run() {
                     display_->SetSleeping(false);
                 }
                 ESP_LOGI(kTag, "Person arrived");
-                const int64_t last_greeting = last_greeting_us_.load(std::memory_order_acquire);
-                greeting_owed_.store(!last_greeting || now - last_greeting >= kGreetingCooldownUs,
-                                     std::memory_order_release);
             }
-            if (person_present)
-                TryGreeting(now);
+            // Greet only someone who stays, once per visit (see GreetingGate).
+            if (greeting_gate.Scan(now, true, last_greeting_us_.load(std::memory_order_acquire))) {
+                greeting_owed_.store(true, std::memory_order_release);
+                ESP_LOGI(kTag, "Person stayed; greeting");
+            }
+            // The stay rule (GreetingGate) is the authority; an intermittent
+            // detector may never latch person_present for a seated person.
+            TryGreeting(now);
         } else {
             person_frames = 0;
+            if (!person_present && last_person_seen && now - last_person_seen > 15LL * 1000000)
+                greeting_owed_.store(false, std::memory_order_release);
             if (person_present && now - last_person_seen > 15LL * 1000000) {
                 person_present = false;
                 greeting_owed_.store(false, std::memory_order_release);

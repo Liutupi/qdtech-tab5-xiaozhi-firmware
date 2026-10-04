@@ -78,7 +78,9 @@ int main() {
     assert(Select(4000, idle, in).clip == -1);  // Still capturing: VAD always wins.
     in.voice = VoiceBlocksScene(in.working, true, false);
     assert(Select(4040, idle, in).clip == 3);      // Capture stopped: stale VAD cannot stick.
-    assert(VoiceBlocksScene(false, true, false));  // Other states unchanged.
+    // A stale VAD bit after capture stopped (conversation ended) never blocks idle.
+    assert(!VoiceBlocksScene(false, true, false));
+    assert(VoiceBlocksScene(false, true, true));
     assert(!VoiceBlocksScene(true, false, true));
     wait.Reset();
     wait.SubmittedManual(4200, false);

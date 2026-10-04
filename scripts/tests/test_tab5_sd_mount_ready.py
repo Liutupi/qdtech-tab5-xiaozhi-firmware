@@ -35,6 +35,11 @@ unsigned uxTaskGetStackHighWaterMark(void*) { return 0; }
 constexpr size_t kBytes = 320 * 412 * 3;
 constexpr const char* kPaths[] = {"idle", "transition", "sleep", "work"};
 constexpr unsigned kCounts[] = {113, 81, 207, 50};
+constexpr unsigned kMaxConsecutiveTimeouts = 8;
+constexpr uint32_t kTimeoutBackoffMs = 250;
+constexpr size_t kReadChunk = 64 * 1024;
+constexpr uint32_t kCallDeadlineMs = 150, kReadDeadlineMs = 200, kFrameDeadlineMs = 260;
+static unsigned slow_reads;
 static uint64_t now_ms;
 static unsigned ticks, limit, mount_at, restore_file_at, cancel_at;
 static unsigned opens, premature_opens, reads, displayed, yielded;
@@ -55,7 +60,7 @@ struct SdSource : nabo_sd::Source {
     uint64_t NowMs() const override { return now_ms; }
     size_t ReadAt(uint32_t at, uint8_t* out, size_t n) override {
         ++reads;
-        if (slow_io) now_ms += 100;
+        if (slow_io || reads <= slow_reads) now_ms += 200;  // beyond one-call deadline
         if (uint64_t(at) + n > data.size()) return 0;
         std::memcpy(out, data.data() + at, n);
         return n;
@@ -86,10 +91,10 @@ void vTaskDelay(unsigned ms) {
     if (ticks >= cancel_at) reader->mailbox.CancelAll();
     else reader->mailbox.Request(0, (ticks / 10) % 113, 1);
 }
-enum Case { Delayed, Absent, MissingFile, BadCrc, BadHeader, SlowIo, CancelBeforeMount };
+enum Case { Delayed, Absent, MissingFile, BadCrc, BadHeader, SlowIo, CancelBeforeMount, TransientSlow };
 void run(Case which) {
     now_ms = ticks = opens = premature_opens = reads = displayed = yielded = 0;
-    s_ready = false; file_present = true; slow_io = false;
+    s_ready = false; file_present = true; slow_io = false; slow_reads = 0;
     mount_at = 20; restore_file_at = cancel_at = 0xffffffffu; limit = 100;
     data = original;
     if (which == Delayed) { mount_at = 1800; limit = 1880; }
@@ -99,18 +104,27 @@ void run(Case which) {
     if (which == BadHeader) data[0] ^= 1;
     if (which == SlowIo) slow_io = true;
     if (which == CancelBeforeMount) { mount_at = 60; cancel_at = 20; }
+    if (which == TransientSlow) slow_reads = kMaxConsecutiveTimeouts - 1;
     Reader r; reader = &r; r.mailbox.Request(0, 0, 1);
     try { r.Loop(); } catch (const Stop&) {}
     assert(yielded == limit && premature_opens == 0);
     if (which == Delayed) {
         assert(opens == 1 && displayed > 0 && !r.Failed(0));
         std::puts("PASS delayed mount at 7.2s recovers: zero early IO, one open, frames delivered");
+    } else if (which == TransientSlow) {
+        assert(opens == slow_reads + 1 && displayed > 0 && !r.Failed(0));
+        std::puts("PASS transient read timeouts below the limit skip frames and recover");
     } else if (which == Absent || which == CancelBeforeMount) {
         assert(opens == 0 && reads == 0 && displayed == 0 && !r.Failed(0));
         std::puts("PASS absent card / cancelled pending request: static, no IO, no permanent fault, yields");
+    } else if (which == SlowIo) {
+        // Header reads time out too: bounded retries with backoff, then sticky.
+        assert(opens == kMaxConsecutiveTimeouts && reads == kMaxConsecutiveTimeouts);
+        assert(displayed == 0 && r.Failed(0));
+        std::puts("PASS persistent timeout: bounded retries with backoff, then sticky fallback");
     } else {
         assert(opens == 1 && displayed == 0 && r.Failed(0));
-        std::puts("PASS genuine missing file / CRC / bad header / timeout: bounded single attempt, sticky fallback");
+        std::puts("PASS genuine missing file / CRC / bad header: one open, sticky fallback");
     }
 }
 int main(int argc, char** argv) {
@@ -118,7 +132,8 @@ int main(int argc, char** argv) {
     std::ifstream file(argv[1], std::ios::binary);
     original.assign(std::istreambuf_iterator<char>(file), {});
     assert(!original.empty());
-    for (Case c : {Delayed, Absent, MissingFile, BadCrc, BadHeader, SlowIo, CancelBeforeMount}) run(c);
+    for (Case c : {Delayed, Absent, MissingFile, BadCrc, BadHeader, SlowIo, CancelBeforeMount, TransientSlow})
+        run(c);
 }
 '''
 

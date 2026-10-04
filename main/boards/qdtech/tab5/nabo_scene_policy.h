@@ -9,10 +9,12 @@ struct Selection {
     int clip;
     unsigned frame;
 };
-// A stopped manual capture can retain its last VAD bit. Ignore that stale bit
-// only for an established reply wait; all other scene gates keep their behavior.
+// The VAD bit is only meaningful while capture runs: disabling voice processing
+// resets the AFE without a VAD-off callback, so the bit can stay true after a
+// conversation ends and would block the idle scene until the next capture.
 inline bool VoiceBlocksScene(bool waiting, bool voice_detected, bool capture_running) {
-    return voice_detected && (!waiting || capture_running);
+    (void)waiting;
+    return voice_detected && capture_running;
 }
 inline Selection Select(uint64_t now, Output scene, SceneInput input) {
     if (input.hidden || input.gesture || input.voice || input.music || input.playback ||

@@ -1,4 +1,6 @@
 #include <cassert>
+#include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <vector>
 #include "nabo_scene_mailbox.h"
@@ -93,7 +95,78 @@ int main(int argc, char** argv) {
     box.Request(0, 256, 1);
     assert(box.Requested() == 0);
     assert(source.source.max_request <= 8192);
+    // DMA placement: frame starts at base + offset % align, so every sector-aligned
+    // file position maps to an align-aligned destination; capacity includes padding.
+    {
+        constexpr size_t align = 128, slot = bytes + align;
+        auto* x = static_cast<uint8_t*>(std::aligned_alloc(align, slot + align));
+        auto* y = static_cast<uint8_t*>(std::aligned_alloc(align, slot + align));
+        assert(x && y);
+        SceneMailbox aligned(x, y, slot, align);
+        for (unsigned i = 0; i < 4; ++i) {
+            aligned.Request(0, i, 9);
+            assert(aligned.Pump(pack, aligned.Requested()) == Error::Ok);
+            auto lease = aligned.TakeReady();
+            assert(lease.slot >= 0);
+            const auto entry = pack.At(i);
+            const uint8_t* base = lease.slot ? y : x;
+            assert(lease.pixels == base + entry.offset % align);
+            const size_t to_sector = (512 - entry.offset % 512) % 512;
+            assert(uintptr_t(lease.pixels + to_sector) % align == 0);
+            assert(Crc(lease.pixels, entry.bytes) == entry.crc);
+            aligned.Release(lease);
+        }
+        std::free(x);
+        std::free(y);
+    }
+    // Verify-once: first read of a frame index checks CRC, repeats skip it, a
+    // fresh Open verifies again; an unverified corrupt frame still fails.
+    {
+        Pack once;
+        assert(once.Open(source, bytes, 10000) == Error::Ok);
+        once.SetVerifyOnce(true);
+        FrameTrace trace;
+        assert(once.Frame(5, a.data(), bytes, {}, &trace) == Error::Ok);
+        assert(trace.crc_bytes == bytes && trace.phase == FrameTrace::Complete);
+        assert(once.Frame(5, a.data(), bytes, {}, &trace) == Error::Ok);
+        assert(trace.crc_bytes == 0 && trace.phase == FrameTrace::Complete);
+        assert(Crc(a.data(), bytes) == once.At(5).crc);
+        assert(once.Frame(6, a.data(), bytes, {}, &trace) == Error::Ok && trace.crc_bytes == bytes);
+        assert(once.Open(source, bytes, 10000) == Error::Ok);
+        once.SetVerifyOnce(true);
+        assert(once.Frame(5, a.data(), bytes, {}, &trace) == Error::Ok && trace.crc_bytes == bytes);
+    }
+    // Third slot: the reader publishes while one frame is shown and one waits.
+    {
+        std::vector<uint8_t> c(bytes);
+        SceneMailbox three(a.data(), b.data(), bytes, 1, c.data());
+        three.Request(0, 1, 7);
+        assert(three.Pump(pack, three.Requested()) == Error::Ok);
+        auto shown = three.TakeReady();
+        three.Request(0, 2, 7);
+        assert(three.Pump(pack, three.Requested()) == Error::Ok);  // slot 2 ready
+        three.Request(0, 3, 7);
+        SceneMailbox::PumpTrace trace;
+        assert(three.Pump(pack, three.Requested(), &trace) == Error::Ok && trace.published);
+        auto newest = three.TakeReady();  // newest wins, the older ready slot is freed
+        assert(newest.slot >= 0 && (newest.token & 255) == 3 && newest.slot != shown.slot);
+        three.Release(shown);
+        three.Release(newest);
+    }
+    // Firmware read size: whole-frame reads use 64KiB calls, CRC stays chunked.
+    {
+        Pack large;
+        assert(large.Open(source, bytes, 10000) == Error::Ok);
+        large.SetReadChunk(64 * 1024);
+        FrameTrace trace;
+        assert(large.Frame(3, a.data(), bytes, {}, &trace) == Error::Ok);
+        assert(trace.read_chunks == (bytes + 65535) / 65536 && trace.read_bytes == bytes);
+        assert(trace.crc_chunks == (bytes + kChunk - 1) / kChunk);
+        assert(source.source.max_request == 64 * 1024);
+    }
     std::puts(
         "PASS held-buffer immutability; slow-read frame skipping; epoch cancellation; newest "
-        "completion selection; stale discard; invalid request bounds; 8192-byte reads");
+        "completion selection; stale discard; invalid request bounds; 8192-byte reads; "
+        "DMA-aligned frame placement; 64KiB firmware reads; verify-once CRC; "
+        "third slot");
 }

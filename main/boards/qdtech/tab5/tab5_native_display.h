@@ -11,6 +11,13 @@
 #include "esp_lcd_panel_ops.h"
 #include "src/draw/sw/lv_draw_sw_utils.h"
 #endif
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+#include <esp_timer.h>
+#include "esp_lcd_panel_ops.h"
+#include "src/display/lv_display_private.h"
+#include "nabo_rotate.h"
+#include "src/draw/sw/lv_draw_sw_utils.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -86,6 +93,55 @@ class QdtechTab5Display : public MipiLcdDisplay {
     // The board display and scene are singleton-lifetime; its descriptors remain
     // alive until reboot so queued LVGL work cannot reference a freed descriptor.
     Tab5SdScene* sd_scene_ = nullptr;
+    bool sd_logged_hidden_ = false, sd_logged_gesture_ = false;
+    uint8_t* sd_rotated_ = nullptr;  // persistent rotation output for direct video frames
+    size_t sd_rotated_bytes_ = 0;
+    bool sd_direct_disabled_ = false;
+    // Video frames bypass LVGL: one software rotation (same as esp_lvgl_port's
+    // partial flush) and one panel copy, instead of ~7 partial render/flush
+    // rounds. It follows LVGL's own flush protocol: runs on the LVGL task when no
+    // flush is pending (LVGL waits for every flush before its timers run), marks
+    // flushing, and waits for the panel's completion callback (DMA2D copy) so
+    // LVGL never sees a stray flush-ready while it owns its draw buffer.
+    static bool SdDirectBlit(void* context, const lv_area_t& area, const uint8_t* pixels) {
+        return static_cast<QdtechTab5Display*>(context)->BlitRotated(area, pixels);
+    }
+    bool BlitRotated(const lv_area_t& area, const uint8_t* pixels) {
+        if (sd_direct_disabled_ || !display_ || !panel_ ||
+            lv_display_get_rotation(display_) != LV_DISPLAY_ROTATION_270 || display_->flushing)
+            return false;
+        const int32_t w = lv_area_get_width(&area), h = lv_area_get_height(&area);
+        const size_t bytes = size_t(w) * h * 2;
+        if (!sd_rotated_) {
+            sd_rotated_ = static_cast<uint8_t*>(
+                heap_caps_aligned_alloc(128, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            sd_rotated_bytes_ = sd_rotated_ ? bytes : 0;
+        }
+        if (!sd_rotated_ || bytes > sd_rotated_bytes_)
+            return false;
+        nabo_sd::Rotate270Rgb565(reinterpret_cast<const uint16_t*>(pixels),
+                                 reinterpret_cast<uint16_t*>(sd_rotated_), w, h, w, h);
+        // Same mapping as esp_lvgl_port's lvgl_port_rotate_area() for 270 degrees.
+        const int32_t hres = lv_display_get_vertical_resolution(display_);
+        const int32_t x1 = hres - area.y2 - 1, y2 = area.x2;
+        const int32_t x2 = x1 + h - 1, y1 = y2 - w + 1;
+        display_->flushing = 1;
+        if (esp_lcd_panel_draw_bitmap(panel_, x1, y1, x2 + 1, y2 + 1, sd_rotated_) != ESP_OK) {
+            display_->flushing = 0;
+            return false;
+        }
+        const int64_t deadline = esp_timer_get_time() + 100000;
+        while (display_->flushing && esp_timer_get_time() < deadline)
+            vTaskDelay(1);
+        if (display_->flushing) {
+            // Completion never arrived: stop using the direct path for safety.
+            display_->flushing = 0;
+            sd_direct_disabled_ = true;
+            ESP_LOGE("NaboSDBlit", "panel copy did not complete; direct output disabled");
+            return false;
+        }
+        return true;
+    }
     bool TickSdScene(uint64_t now) {
         if (!sd_scene_)
             return false;
@@ -95,11 +151,23 @@ class QdtechTab5Display : public MipiLcdDisplay {
                                 std::strcmp(radio, "Buffering") == 0 ||
                                 std::strcmp(radio, "Connecting") == 0;
         const bool waiting = app.IsWaitingForReply();
+        const bool playback = !app.GetAudioService().IsPlaybackIdle();
+        // The presence greeting is a local clip in idle; let the half-body
+        // portrait speak it exactly like a reply.
+        const bool greeting_voice = greeting_active_ && playback;
         const bool voice = nabo_scene::VoiceBlocksScene(
             waiting, app.IsVoiceDetected(), app.GetAudioService().IsAudioProcessorRunning());
+        const bool hidden = preview_active_ || (apps_ && apps_->IsVisible());
+        if (hidden != sd_logged_hidden_ || wave_active_ != sd_logged_gesture_) {
+            ESP_LOGI("Tab5Native", "sd scene visible=%d preview=%d apps=%d gesture=%d sleeping=%d",
+                     int(!hidden && !wave_active_), int(preview_active_),
+                     int(apps_ && apps_->IsVisible()), int(wave_active_), int(sleeping_));
+            sd_logged_hidden_ = hidden;
+            sd_logged_gesture_ = wave_active_;
+        }
         return sd_scene_->Tick(
             now,
-            {speaking_, !app.GetAudioService().IsPlaybackIdle(), sleeping_, waiting, active_, voice,
+            {speaking_ || greeting_voice, playback, sleeping_, waiting, active_, voice,
              radio_busy, preview_active_ || (apps_ && apps_->IsVisible()), wave_active_});
     }
 #endif
@@ -267,6 +335,7 @@ class QdtechTab5Display : public MipiLcdDisplay {
     bool wave_active_ = false;
     bool pose_congested_ = false;
     bool greeting_active_ = false;
+    static constexpr uint32_t kGreetingWindowMs = 4000;
     bool active_ = false;
     bool speaking_ = false;
     bool sleeping_ = false;
@@ -1234,12 +1303,12 @@ class QdtechTab5Display : public MipiLcdDisplay {
 
     static uint64_t AnimationTimeMs() { return esp_timer_get_time() / 1000; }
 
-    void ShowAction(nabo::Action action, bool automatic_idle = false) {
+    void ShowAction(nabo::Action action, bool automatic_idle = false, bool from_touch = false) {
 #ifdef CONFIG_QDTECH_TAB5_SD_SCENE
-        // Existing business events still fire. Idle/listen/think use the new
-        // scene; explicit touch/emotion reactions retain their legacy action.
-        if (sd_scene_ && (automatic_idle || action == nabo::Action::Listen ||
-                          action == nabo::Action::Think || sd_scene_->WasSleeping()))
+        // The half-body window scene owns idle, wake, greeting and conversation
+        // (including server emotions and the chat button): never swap to a
+        // full-body pose there. Only a deliberate touch keeps its reaction.
+        if (sd_scene_ && (!from_touch || sd_scene_->WasSleeping()))
             return;
 #endif
         // Keep live speaking mouth patches visible; large pose swaps are brief.
@@ -1266,6 +1335,8 @@ class QdtechTab5Display : public MipiLcdDisplay {
                 return;
             }
         }
+        ESP_LOGI("Tab5Native", "full-body pose start action=%d auto=%d touch=%d", int(action),
+                 int(automatic_idle), int(from_touch));
         wave_active_ = true;
         pose_congested_ = false;
         idle_pose_ = automatic_idle;
@@ -1301,7 +1372,7 @@ class QdtechTab5Display : public MipiLcdDisplay {
         last_touch_ms_ = now;
         static constexpr nabo::Action reactions[] = {
             nabo::Action::Wave, nabo::Action::Wink, nabo::Action::Encourage, nabo::Action::Curious};
-        ShowAction(double_tap ? nabo::Action::Happy : reactions[touch_reaction_++ % 4]);
+        ShowAction(double_tap ? nabo::Action::Happy : reactions[touch_reaction_++ % 4], false, true);
         next_idle_reaction_ms_ = now + 18000;
     }
 
@@ -1382,7 +1453,8 @@ class QdtechTab5Display : public MipiLcdDisplay {
                 lv_obj_set_style_opa(status_dot_, kPulse[phase % 4], 0);
             }
         }
-        if (greeting_active_ && now - greeting_started_ms_ >= 3000)
+        // Covers the ~3.1s greeting clip plus playback start latency.
+        if (greeting_active_ && now - greeting_started_ms_ >= kGreetingWindowMs)
             greeting_active_ = false;
         const uint64_t pose_now = AnimationTimeMs();
         const auto current_pose = pose_animation_.Current(pose_now);
@@ -1692,6 +1764,7 @@ public:
         lv_obj_set_style_radius(emoji_box_, 0, 0);
         sd_scene_ = new (std::nothrow) Tab5SdScene(emoji_box_);
         if (sd_scene_) {
+            sd_scene_->SetDirectBlit(&QdtechTab5Display::SdDirectBlit, this);
             lv_obj_add_event_cb(
                 sd_scene_->TouchTarget(),
                 [](lv_event_t* event) {
@@ -1984,6 +2057,8 @@ public:
     void WelcomeBack() {
         DisplayLockGuard lock(this);
         const bool was_sleeping = sleeping_;
+        ESP_LOGI("Tab5Native", "welcome back was_sleeping=%d active=%d", int(was_sleeping),
+                 int(active_));
         if (sleep_)
             lv_obj_add_flag(sleep_, LV_OBJ_FLAG_HIDDEN);
         sleeping_ = false;
@@ -2005,7 +2080,10 @@ public:
             else
                 lv_label_set_text(message_label_, digest_text_.c_str());
         }
-        ShowWave();
+        // Greet in place on the half-body portrait: no full-body wave swap.
+        // The mouth follows the greeting audio while greeting_active_ is set.
+        if (interaction_action_)
+            interaction_action_();
         greeting_active_ = !active_;
         greeting_started_ms_ = lv_tick_get();
     }

@@ -78,6 +78,7 @@ public:
                bool allow_scene = false, uint32_t frame_read_ms = 0, uint32_t frame_total_ms = 0) {
         source_ = &source;
         valid_ = false;
+        verified_.fill(0);
         timeout_ms_ = timeout_ms;
         frame_read_ms_ = frame_read_ms ? frame_read_ms : timeout_ms;
         frame_total_ms_ = frame_total_ms;
@@ -128,6 +129,11 @@ public:
         valid_ = true;
         return Error::Ok;
     }
+    // Larger reads let the filesystem issue fewer, longer multi-block DMA transfers.
+    // CRC and cancellation stay at kChunk granularity regardless.
+    void SetReadChunk(size_t bytes) { read_chunk_ = bytes ? bytes : kChunk; }
+    // Skip the payload CRC of a frame index that already passed since Open.
+    void SetVerifyOnce(bool enabled) { verify_once_ = enabled; }
     bool Valid() const { return valid_; }
     uint32_t Duration() const { return duration_; }
     uint32_t Count() const { return count_; }
@@ -165,6 +171,15 @@ public:
         const Error result = Read(e.offset, out, e.bytes, cancel, trace, read_ms);
         if (result != Error::Ok)
             return result;
+        // Card content is immutable while open and every SD block transfer is
+        // CRC16-checked by the host, so a frame verified once need not be again.
+        if (verify_once_ && (verified_[i / 32] >> (i % 32) & 1)) {
+            if (cancel.Changed())
+                return Error::Cancelled;
+            if (trace)
+                trace->phase = FrameTrace::Complete;
+            return Error::Ok;
+        }
         if (trace)
             trace->phase = FrameTrace::CrcPhase;
         const uint64_t trace_started = trace ? trace->Now() : 0;
@@ -198,7 +213,10 @@ public:
         }
         if (cancel.Changed())
             return finish(Error::Cancelled);
-        return finish(~crc == e.crc ? Error::Ok : Error::Crc);
+        if (~crc != e.crc)
+            return finish(Error::Crc);
+        verified_[i / 32] |= 1u << (i % 32);
+        return finish(Error::Ok);
     }
 
 private:
@@ -216,7 +234,7 @@ private:
         while (done < bytes) {
             if (cancel.Changed())
                 return finish(Error::Cancelled);
-            const size_t chunk = std::min(kChunk, bytes - done);
+            const size_t chunk = std::min(read_chunk_, bytes - done);
             const uint64_t chunk_started = trace ? trace->Now() : 0;
             const uint64_t chunk_started_ms = source_->NowMs();
             const size_t got = source_->ReadAt(offset + done, out + done, chunk);
@@ -244,8 +262,12 @@ private:
     std::array<uint8_t, kMaxEntries * 32> index_{};
     uint32_t count_ = 0, duration_ = 0, max_payload_ = 0, timeout_ms_ = 80;
     uint32_t frame_read_ms_ = 80, frame_total_ms_ = 0;
+    size_t read_chunk_ = kChunk;
     uint16_t width_ = 0, height_ = 0;
     bool valid_ = false;
+    // Frames whose payload CRC already passed since Open (SetVerifyOnce only).
+    std::array<uint32_t, kMaxEntries / 32> verified_{};
+    bool verify_once_ = false;
 };
 
 struct Gates {
