@@ -75,7 +75,8 @@
                 "CONFIG_LV_USE_LZ4_INTERNAL=y",
                 "CONFIG_LV_BIN_DECODER_RAM_LOAD=y",
                 "CONFIG_QDTECH_TAB5_PORTRAIT_MATTE_EXPERIMENT=y",
-                "CONFIG_QDTECH_TAB5_RAW_THINK_TORSO_EXPERIMENT=n"
+                "CONFIG_QDTECH_TAB5_RAW_THINK_TORSO_EXPERIMENT=n",
+                "CONFIG_QDTECH_TAB5_SD_SCENE=y"
             ]
         },
         {

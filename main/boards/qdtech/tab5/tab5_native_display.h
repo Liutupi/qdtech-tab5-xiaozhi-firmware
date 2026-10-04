@@ -50,6 +50,7 @@
 #include "tab5_lrc.h"
 #include "tab5_native_apps.h"
 #include "tab5_radio_status_mailbox.h"
+#include "tab5_sd_scene.h"
 
 LV_FONT_DECLARE(qd_font_lxgw_28);
 LV_FONT_DECLARE(qd_font_cjk_28);
@@ -80,6 +81,25 @@ class QdtechTab5Display : public MipiLcdDisplay {
     uint32_t ppa_max_us_ = 0;
     uint64_t ppa_total_us_ = 0;
     bool ppa_disabled_ = false;
+#endif
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+    // The board display and scene are singleton-lifetime; its descriptors remain
+    // alive until reboot so queued LVGL work cannot reference a freed descriptor.
+    Tab5SdScene* sd_scene_ = nullptr;
+    bool TickSdScene(uint64_t now) {
+        if (!sd_scene_)
+            return false;
+        auto& app = Application::GetInstance();
+        const char* radio = radio_status_current_.state.data();
+        const bool radio_busy = music_playing_ || std::strcmp(radio, "Playing") == 0 ||
+                                std::strcmp(radio, "Buffering") == 0 ||
+                                std::strcmp(radio, "Connecting") == 0;
+        return sd_scene_->Tick(
+            now, {speaking_, !app.GetAudioService().IsPlaybackIdle(), sleeping_,
+                  awaiting_reply_ || face_animation_.state() == tab5_home::State::Thinking, active_,
+                  app.IsVoiceDetected(), radio_busy,
+                  preview_active_ || (apps_ && apps_->IsVisible()), wave_active_});
+    }
 #endif
     lv_obj_t* portrait_ = nullptr;
 #ifdef CONFIG_QDTECH_TAB5_PORTRAIT_MATTE_EXPERIMENT
@@ -546,6 +566,10 @@ class QdtechTab5Display : public MipiLcdDisplay {
                 self->frame_flush_pixels_ = 0;
                 break;
             case LV_EVENT_RENDER_READY:
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+                if (self->sd_scene_)
+                    self->sd_scene_->RenderReady();
+#endif
                 if (self->render_started_us_) {
                     const uint32_t elapsed =
                         static_cast<uint32_t>(esp_timer_get_time() - self->render_started_us_);
@@ -687,6 +711,15 @@ class QdtechTab5Display : public MipiLcdDisplay {
     }
 
     void UpdateAnimationTimerPeriod() {
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+        if (sd_scene_ && !preview_active_ && !(apps_ && apps_->IsVisible())) {
+            if (animation_timer_ && animation_period_ms_ != 40) {
+                animation_period_ms_ = 40;
+                lv_timer_set_period(animation_timer_, 40);
+            }
+            return;
+        }
+#endif
         const uint32_t period = wave_active_ ? (pose_congested_ ? 50 : 40)
                                 : (sleeping_ || preview_active_) && !(apps_ && apps_->IsVisible())
                                     ? 100
@@ -1200,6 +1233,13 @@ class QdtechTab5Display : public MipiLcdDisplay {
     static uint64_t AnimationTimeMs() { return esp_timer_get_time() / 1000; }
 
     void ShowAction(nabo::Action action, bool automatic_idle = false) {
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+        // Existing business events still fire. Idle/listen/think use the new
+        // scene; explicit touch/emotion reactions retain their legacy action.
+        if (sd_scene_ && (automatic_idle || action == nabo::Action::Listen ||
+                          action == nabo::Action::Think || sd_scene_->WasSleeping()))
+            return;
+#endif
         // Keep live speaking mouth patches visible; large pose swaps are brief.
         if (speaking_ || preview_active_ || (active_ && action == nabo::Action::Wave))
             return;
@@ -1295,6 +1335,9 @@ class QdtechTab5Display : public MipiLcdDisplay {
         const bool returning_home = home_clock_hidden_ && !apps_visible;
         if (service_due || apps_visible != home_clock_hidden_)
             UpdateClock(apps_visible);
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+        const bool sd_scene_active = TickSdScene(AnimationTimeMs());
+#endif
         if (apps_visible) {
             if (daily_mirror_gate_.HasPending())
                 daily_mirror_retry_on_home_ = true;
@@ -1379,6 +1422,10 @@ class QdtechTab5Display : public MipiLcdDisplay {
         auto frame =
             face_animation_.Sample(now, active_ && !speaking_ && application.IsVoiceDetected(),
                                    playback, greeting_active_);
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+        if (sd_scene_active)
+            frame.eyes = frame.mouth = 0;
+#endif
         if (idle_pose_) {
             const uint32_t duration =
                 static_cast<uint32_t>(nabo::Animation::Duration(pose_animation_.Current(pose_now)));
@@ -1461,6 +1508,10 @@ public:
 
     ~QdtechTab5Display() override {
         DisplayLockGuard lock(this);
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+        if (lock.locked() && sd_scene_)
+            sd_scene_->Detach();
+#endif
         if (animation_timer_) {
             lv_timer_delete(animation_timer_);
             animation_timer_ = nullptr;
@@ -1633,6 +1684,22 @@ public:
             lv_obj_add_flag(thought_[i], LV_OBJ_FLAG_HIDDEN);
         }
 
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+        lv_obj_set_style_bg_color(emoji_box_, lv_color_hex(0x0d1b2b), 0);
+        lv_obj_set_style_border_width(emoji_box_, 0, 0);
+        lv_obj_set_style_radius(emoji_box_, 0, 0);
+        sd_scene_ = new (std::nothrow) Tab5SdScene(emoji_box_);
+        if (sd_scene_) {
+            lv_obj_add_event_cb(
+                sd_scene_->TouchTarget(),
+                [](lv_event_t* event) {
+                    static_cast<QdtechTab5Display*>(lv_event_get_user_data(event))->TouchNabo();
+                },
+                LV_EVENT_CLICKED, this);
+            lv_obj_add_event_cb(sd_scene_->TouchTarget(), PresenceLongPress, LV_EVENT_LONG_PRESSED,
+                                this);
+        }
+#endif
         auto* daily_card = Card(screen, 581, 112, 647, 143, 0x122b43, 0x2c536c, 26);
         lv_obj_add_flag(daily_card, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(

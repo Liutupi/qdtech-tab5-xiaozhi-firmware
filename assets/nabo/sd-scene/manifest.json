@@ -1,0 +1,22 @@
+{
+  "mouth_open.bin": {
+    "bytes": 7686,
+    "sha256": "6f88d427d19f8423e88f4a286baf1d874eec94cf9e629a7a796d4d4a732c433f"
+  },
+  "neutral.bin": {
+    "bytes": 395520,
+    "sha256": "48bce54d4e9bc5cb618c7382318db2ac097337fbc2ccf40d0baa485707e3075a"
+  },
+  "mouth_half.bin": {
+    "bytes": 7626,
+    "sha256": "e210aa7bd0829405e9e604f9c1505e0a121844fb4e2fe16eb9a56832429a4858"
+  },
+  "closed_blink.bin": {
+    "bytes": 56682,
+    "sha256": "5c802cb487bba2103f37cdc03d72f8c2d26bfd0e7d9ffe0b9440757301b15767"
+  },
+  "half_blink.bin": {
+    "bytes": 56682,
+    "sha256": "644554b06cff4501ce2c603bdaa83b65c8fb8db5a3c79989ce5816f1479bf395"
+  }
+}

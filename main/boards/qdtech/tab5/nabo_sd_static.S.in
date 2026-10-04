@@ -1,0 +1,21 @@
+.section .rodata.nabo_sd_static,"a"
+.balign 4
+.global nabo_sd_neutral_start
+nabo_sd_neutral_start:
+.incbin "@NABO_SD_ASSET_DIR@/neutral.bin"
+.balign 4
+.global nabo_sd_half_blink_start
+nabo_sd_half_blink_start:
+.incbin "@NABO_SD_ASSET_DIR@/half_blink.bin"
+.balign 4
+.global nabo_sd_closed_blink_start
+nabo_sd_closed_blink_start:
+.incbin "@NABO_SD_ASSET_DIR@/closed_blink.bin"
+.balign 4
+.global nabo_sd_mouth_half_start
+nabo_sd_mouth_half_start:
+.incbin "@NABO_SD_ASSET_DIR@/mouth_half.bin"
+.balign 4
+.global nabo_sd_mouth_open_start
+nabo_sd_mouth_open_start:
+.incbin "@NABO_SD_ASSET_DIR@/mouth_open.bin"

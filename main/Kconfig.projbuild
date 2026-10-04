@@ -1146,6 +1146,17 @@ config QDTECH_TAB5_PPA_FLUSH_EXPERIMENT
         Tab5 interface. Small areas and PPA failures use software rotation.
         This experiment is disabled in all release variants by default.
 
+config QDTECH_TAB5_SD_SCENE
+    bool "Tab5 SD-backed Nabo window scene"
+    depends on QDTECH_TAB5_NATIVE_UI && IDF_TARGET_ESP32P4
+    default n
+    help
+        Candidate window scene with two reusable PSRAM frame buffers. Packs
+        are read only from /sdcard/tab5/nabo by a low-priority task. Missing
+        or invalid resources show the compiled neutral portrait. Audio,
+        music, camera and apps preempt SD reads. This requires device review
+        before deployment; source 25 fps does not promise device throughput.
+
 config QDTECH_TAB5_PORTRAIT_MATTE_EXPERIMENT
     bool "Experiment with a precomposed Tab5 Nabo portrait"
     depends on QDTECH_TAB5_NATIVE_UI && IDF_TARGET_ESP32P4

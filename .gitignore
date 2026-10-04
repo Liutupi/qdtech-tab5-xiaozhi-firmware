@@ -42,3 +42,5 @@ assets/nabo/*-pose-check.png
 assets/nabo/*-browser.png
 assets/nabo/preview-v2.png
 assets/nabo/frames-v2/
+
+!assets/nabo/sd-scene/*.bin
