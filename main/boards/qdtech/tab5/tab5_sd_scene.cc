@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 #include "nabo_sd_static.h"
 #include "src/misc/cache/instance/lv_image_cache.h"
+#include "tab5_sd.h"
 
 namespace {
 constexpr size_t kBytes = 320 * 412 * 3;
@@ -124,7 +125,9 @@ private:
         uint64_t reported = 0;
         uint32_t frames = 0, max_us = 0;
         for (;;) {
-            const uint32_t token = mailbox.Requested();
+            // Mounting runs asynchronously after Wi-Fi claims the SDMMC host.
+            // Before it completes, keep the static face without poisoning a clip.
+            const uint32_t token = Tab5SdReady() ? mailbox.Requested() : 0;
             if (token) {
                 unsigned clip = nabo_sd::SceneMailbox::Clip(token);
                 if (clip < 4 && !Failed(clip)) {
@@ -149,8 +152,11 @@ private:
                                     break;
                                 }
                             }
-                        if (e == nabo_sd::Error::Ok)
+                        if (e == nabo_sd::Error::Ok) {
                             open_clip = clip;
+                            ESP_LOGI("NaboSD", "opened clip=%u frames=%u duration_ms=%u", clip,
+                                     unsigned(pack_.Count()), unsigned(pack_.Duration()));
+                        }
                     }
                     if (e == nabo_sd::Error::Ok) {
                         e = mailbox.Pump(pack_, token);

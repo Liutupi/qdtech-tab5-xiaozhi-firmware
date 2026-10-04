@@ -1,5 +1,7 @@
 #include "tab5_sd.h"
 
+#include <atomic>
+
 #include <esp_log.h>
 #include <esp_vfs_fat.h>
 #include <sdmmc_cmd.h>
@@ -38,7 +40,7 @@ static esp_err_t SdHostDeinitDummy() {
 
 static sdmmc_card_t* s_card = nullptr;
 static sd_pwr_ctrl_handle_t s_pwr = nullptr;
-static bool s_ready = false;
+static std::atomic<bool> s_ready{false};
 static lv_fs_drv_t s_fs_drv;
 
 static void* FsOpen(lv_fs_drv_t* drv, const char* path, lv_fs_mode_t mode) {
