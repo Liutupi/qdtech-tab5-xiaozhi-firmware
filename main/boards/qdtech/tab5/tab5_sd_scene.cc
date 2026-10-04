@@ -87,6 +87,7 @@ public:
             return instance;
         if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < 2 * kBytes + 2 * 1024 * 1024)
             return nullptr;
+        const int64_t pool_started = esp_timer_get_time();
         void* mem =
             heap_caps_malloc(sizeof(Tab5SdSceneReader), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         auto* a =
@@ -99,6 +100,7 @@ public:
             heap_caps_free(b);
             return nullptr;
         }
+        const uint32_t pool_us = esp_timer_get_time() - pool_started;
         auto* self = new (mem) Tab5SdSceneReader(a, b);
         if (xTaskCreate(Run, "nabo_sd", 6144, self, 1, nullptr) != pdPASS) {
             self->~Tab5SdSceneReader();
@@ -112,6 +114,11 @@ public:
                  unsigned(sizeof(nabo_sd::Pack)),
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+        ESP_LOGI("NaboSDPerf",
+                 "pool_alloc_us=%u trace_stack_bytes=%u read_deadline_ms=80 "
+                 "crc_deadline_ms=80 chunk_bytes=%u",
+                 unsigned(pool_us), unsigned(sizeof(nabo_sd::SceneMailbox::PumpTrace)),
+                 unsigned(nabo_sd::kChunk));
         return instance;
     }
     nabo_sd::SceneMailbox mailbox;
@@ -123,7 +130,7 @@ private:
     void Loop() {
         int open_clip = -1;
         uint64_t reported = 0;
-        uint32_t frames = 0, max_us = 0;
+        uint32_t frames = 0, max_us = 0, busy = 0, sampled = 0;
         for (;;) {
             // Mounting runs asynchronously after Wi-Fi claims the SDMMC host.
             // Before it completes, keep the static face without poisoning a clip.
@@ -133,8 +140,12 @@ private:
                 if (clip < 4 && !Failed(clip)) {
                     const int64_t begin = esp_timer_get_time();
                     nabo_sd::Error e = nabo_sd::Error::Ok;
+                    nabo_sd::SceneMailbox::PumpTrace trace;
+                    trace.frame.clock_us = []() { return uint64_t(esp_timer_get_time()); };
+                    uint32_t open_us = 0;
                     if (open_clip != int(clip)) {
                         open_clip = -1;
+                        sampled = 0;
                         if (!source_.Open(kPaths[clip]))
                             e = nabo_sd::Error::Io;
                         else
@@ -152,6 +163,7 @@ private:
                                     break;
                                 }
                             }
+                        open_us = esp_timer_get_time() - begin;
                         if (e == nabo_sd::Error::Ok) {
                             open_clip = clip;
                             ESP_LOGI("NaboSD", "opened clip=%u frames=%u duration_ms=%u", clip,
@@ -159,11 +171,36 @@ private:
                         }
                     }
                     if (e == nabo_sd::Error::Ok) {
-                        e = mailbox.Pump(pack_, token);
-                        if (e == nabo_sd::Error::Ok)
+                        e = mailbox.Pump(pack_, token, &trace);
+                        if (trace.published)
                             ++frames;
+                        if (trace.busy)
+                            ++busy;
                     }
-                    max_us = std::max(max_us, uint32_t(esp_timer_get_time() - begin));
+                    const uint32_t total_us = esp_timer_get_time() - begin;
+                    max_us = std::max(max_us, total_us);
+                    if (trace.attempted && (sampled++ < 3 || (e != nabo_sd::Error::Ok &&
+                                                              e != nabo_sd::Error::Cancelled))) {
+                        const auto& t = trace.frame;
+                        const char* phase = t.phase == nabo_sd::FrameTrace::ReadPhase  ? "read"
+                                            : t.phase == nabo_sd::FrameTrace::CrcPhase ? "crc"
+                                            : t.phase == nabo_sd::FrameTrace::Complete ? "done"
+                                                                                       : "none";
+                        ESP_LOGI("NaboSDPerf",
+                                 "clip=%u frame=%u result=%u phase=%s open_us=%u "
+                                 "total_us=%u claim_us=%u publish_us=%u submitted=%u",
+                                 clip, unsigned(token & 255), unsigned(e), phase, unsigned(open_us),
+                                 unsigned(total_us), unsigned(trace.claim_us),
+                                 unsigned(trace.publish_us), unsigned(trace.published));
+                        ESP_LOGI("NaboSDPerf",
+                                 "read_bytes=%u read_chunks=%u read_us=%u "
+                                 "read_max_us=%u crc_bytes=%u crc_chunks=%u "
+                                 "crc_us=%u crc_max_us=%u",
+                                 unsigned(t.read_bytes), unsigned(t.read_chunks),
+                                 unsigned(t.read_us), unsigned(t.read_max_us),
+                                 unsigned(t.crc_bytes), unsigned(t.crc_chunks), unsigned(t.crc_us),
+                                 unsigned(t.crc_max_us));
+                    }
                     if (e != nabo_sd::Error::Ok && e != nabo_sd::Error::Cancelled) {
                         failures_.fetch_or(1u << clip);
                         source_.Close();
@@ -176,12 +213,13 @@ private:
             const uint64_t now = source_.NowMs();
             if (now - reported >= 10000) {
                 reported = now;
-                ESP_LOGI("NaboSD", "pump=%u max_us=%u psram_min=%u internal_min=%u stack_free=%u",
+                ESP_LOGI("NaboSD",
+                         "pump=%u max_us=%u psram_min=%u internal_min=%u stack_free=%u busy=%u",
                          frames, max_us,
                          unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)),
                          unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
-                         unsigned(uxTaskGetStackHighWaterMark(nullptr)));
-                frames = max_us = 0;
+                         unsigned(uxTaskGetStackHighWaterMark(nullptr)), busy);
+                frames = max_us = busy = 0;
             }
             vTaskDelay(pdMS_TO_TICKS(4));
         }

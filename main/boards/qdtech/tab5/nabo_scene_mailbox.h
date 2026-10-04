@@ -14,6 +14,16 @@ class SceneMailbox {
     };
 
 public:
+    struct PumpTrace {
+        FrameTrace frame;
+        uint32_t claim_us = 0, publish_us = 0;
+        bool attempted = false, published = false, busy = false;
+        void Reset() {
+            const auto clock = frame.clock_us;
+            *this = {};
+            frame.clock_us = clock;
+        }
+    };
     struct Lease {
         int slot = -1;
         const uint8_t* pixels = nullptr;
@@ -38,23 +48,40 @@ public:
     }
     uint32_t Requested() const { return request_.load(std::memory_order_acquire); }
     static unsigned Clip(uint32_t token) { return ((token >> 8) & 7) - 1; }
-    Error Pump(Pack& pack, uint32_t token) {
+    Error Pump(Pack& pack, uint32_t token, PumpTrace* trace = nullptr) {
+        if (trace)
+            trace->Reset();
         if (!token || token == completed_ || (token >> 8) != epoch_.load())
             return Error::Cancelled;
+        const uint64_t claim_started = trace ? trace->frame.Now() : 0;
         for (auto& s : slots_) {
             int expected = Free;
             if (!s.state.compare_exchange_strong(expected, Reading))
                 continue;
-            const Error e = pack.Frame(token & 255, s.pixels, capacity_, {&epoch_, token >> 8});
+            if (trace) {
+                trace->attempted = true;
+                trace->claim_us = uint32_t(trace->frame.Now() - claim_started);
+            }
+            const Error e = pack.Frame(token & 255, s.pixels, capacity_, {&epoch_, token >> 8},
+                                       trace ? &trace->frame : nullptr);
             if (e != Error::Ok || (token >> 8) != epoch_.load()) {
                 s.state.store(Free, std::memory_order_release);
                 return e == Error::Ok ? Error::Cancelled : e;
             }
+            const uint64_t publish_started = trace ? trace->frame.Now() : 0;
             s.token = token;
             s.serial = ++serial_;
             s.state.store(Ready, std::memory_order_release);
             completed_ = token;
+            if (trace) {
+                trace->published = true;
+                trace->publish_us = uint32_t(trace->frame.Now() - publish_started);
+            }
             return Error::Ok;
+        }
+        if (trace) {
+            trace->busy = true;
+            trace->claim_us = uint32_t(trace->frame.Now() - claim_started);
         }
         return Error::Ok;
     }

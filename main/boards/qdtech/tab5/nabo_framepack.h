@@ -34,6 +34,23 @@ struct Cancel {
     uint32_t token = 0;
     bool Changed() const { return request && request->load(std::memory_order_acquire) != token; }
 };
+// Optional worker-only diagnostics. No allocation and no logging in the timed path.
+// Clock is injected so the firmware can use microseconds without changing Source.
+struct FrameTrace {
+    using Clock = uint64_t (*)();
+    enum Phase { None, ReadPhase, CrcPhase, Complete };
+    Clock clock_us = nullptr;
+    Phase phase = None;
+    uint32_t read_bytes = 0, read_chunks = 0, read_us = 0, read_max_us = 0;
+    uint32_t crc_bytes = 0, crc_chunks = 0, crc_us = 0, crc_max_us = 0;
+    uint64_t Now() const { return clock_us ? clock_us() : 0; }
+    void Reset() {
+        const Clock clock = clock_us;
+        *this = {};
+        clock_us = clock;
+    }
+};
+
 struct Entry {
     uint32_t at_ms, offset, bytes, crc;
     uint16_t x, y, width, height;
@@ -113,50 +130,88 @@ public:
             ++i;
         return i;
     }
-    Error Frame(uint32_t i, uint8_t* out, size_t capacity, Cancel cancel = {}) {
+    Error Frame(uint32_t i, uint8_t* out, size_t capacity, Cancel cancel = {},
+                FrameTrace* trace = nullptr) {
+        if (trace)
+            trace->Reset();
         if (!valid_ || i >= count_)
             return Error::Bounds;
         const Entry e = At(i);
         if (!out || e.bytes > capacity)
             return Error::Capacity;
-        const Error result = Read(e.offset, out, e.bytes, cancel);
+        if (trace)
+            trace->phase = FrameTrace::ReadPhase;
+        const Error result = Read(e.offset, out, e.bytes, cancel, trace);
         if (result != Error::Ok)
             return result;
+        if (trace)
+            trace->phase = FrameTrace::CrcPhase;
+        const uint64_t trace_started = trace ? trace->Now() : 0;
         const uint64_t started = source_->NowMs();
+        auto finish = [&](Error result) {
+            if (trace) {
+                trace->crc_us = uint32_t(trace->Now() - trace_started);
+                if (result == Error::Ok)
+                    trace->phase = FrameTrace::Complete;
+            }
+            return result;
+        };
         // CRC is chunked too, so a state change cannot require a full-frame CRC first.
         uint32_t crc = ~0u;
         for (size_t off = 0; off < e.bytes; off += kChunk) {
             if (cancel.Changed())
-                return Error::Cancelled;
-            crc = CrcStep(crc, out + off, std::min(kChunk, size_t(e.bytes) - off));
+                return finish(Error::Cancelled);
+            const size_t chunk = std::min(kChunk, size_t(e.bytes) - off);
+            const uint64_t chunk_started = trace ? trace->Now() : 0;
+            crc = CrcStep(crc, out + off, chunk);
+            if (trace) {
+                trace->crc_bytes += chunk;
+                ++trace->crc_chunks;
+                trace->crc_max_us =
+                    std::max(trace->crc_max_us, uint32_t(trace->Now() - chunk_started));
+            }
             if (source_->NowMs() - started > timeout_ms_)
-                return Error::Timeout;
+                return finish(Error::Timeout);
         }
         if (cancel.Changed())
-            return Error::Cancelled;
-        return ~crc == e.crc ? Error::Ok : Error::Crc;
+            return finish(Error::Cancelled);
+        return finish(~crc == e.crc ? Error::Ok : Error::Crc);
     }
 
 private:
-    Error Read(uint32_t offset, uint8_t* out, size_t bytes, Cancel cancel) {
+    Error Read(uint32_t offset, uint8_t* out, size_t bytes, Cancel cancel,
+               FrameTrace* trace = nullptr) {
+        const uint64_t trace_started = trace ? trace->Now() : 0;
         const uint64_t started = source_->NowMs();
+        auto finish = [&](Error result) {
+            if (trace)
+                trace->read_us = uint32_t(trace->Now() - trace_started);
+            return result;
+        };
         size_t done = 0;
         while (done < bytes) {
             if (cancel.Changed())
-                return Error::Cancelled;
+                return finish(Error::Cancelled);
             const size_t chunk = std::min(kChunk, bytes - done);
+            const uint64_t chunk_started = trace ? trace->Now() : 0;
             const size_t got = source_->ReadAt(offset + done, out + done, chunk);
+            if (trace) {
+                trace->read_bytes += got;
+                ++trace->read_chunks;
+                trace->read_max_us =
+                    std::max(trace->read_max_us, uint32_t(trace->Now() - chunk_started));
+            }
             // A synchronous filesystem call itself is not preemptible here.
             // This method belongs on a worker, never the UI/audio thread.
             if (cancel.Changed())
-                return Error::Cancelled;
+                return finish(Error::Cancelled);
             if (source_->NowMs() - started > timeout_ms_)
-                return Error::Timeout;
+                return finish(Error::Timeout);
             if (got != chunk)
-                return Error::Io;
+                return finish(Error::Io);
             done += got;
         }
-        return Error::Ok;
+        return finish(Error::Ok);
     }
     Source* source_ = nullptr;
     std::array<uint8_t, kMaxEntries * 32> index_{};
