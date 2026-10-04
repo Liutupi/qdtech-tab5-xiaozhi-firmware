@@ -7,19 +7,35 @@
 #include <cstdint>
 #include <cstring>
 
-// Host-tested core only. No ESP/LVGL integration and no allocation in this file.
+#ifdef ESP_PLATFORM
+#include "esp_rom_crc.h"
+#endif
+
+// Host-tested core. The ESP build uses ROM CRC; neither path allocates or accesses LVGL.
 namespace nabo_sd {
 constexpr size_t kChunk = 8192, kMaxEntries = 256;
 enum class Error { Ok, Io, Format, Bounds, Crc, Timeout, Cancelled, Capacity };
 inline uint16_t U16(const uint8_t* p) { return p[0] | uint16_t(p[1]) << 8; }
 inline uint32_t U32(const uint8_t* p) { return U16(p) | uint32_t(U16(p + 2)) << 16; }
 inline uint32_t CrcStep(uint32_t c, const uint8_t* p, size_t n) {
+#ifdef ESP_PLATFORM
+    // ROM adds entry/exit complements; preserve the raw incremental state used
+    // by the pack reader. Calls remain bounded by its existing 8KB CRC chunks.
+    while (n) {
+        const size_t bytes = std::min(n, size_t(UINT32_MAX));
+        c = ~esp_rom_crc32_le(~c, p, static_cast<uint32_t>(bytes));
+        p += bytes;
+        n -= bytes;
+    }
+    return c;
+#else
     while (n--) {
         c ^= *p++;
         for (unsigned b = 0; b < 8; ++b)
             c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1)));
     }
     return c;
+#endif
 }
 inline uint32_t Crc(const uint8_t* p, size_t n) { return ~CrcStep(~0u, p, n); }
 
