@@ -59,10 +59,12 @@ struct Entry {
 class Pack {
 public:
     Error Open(Source& source, size_t frame_capacity, uint32_t timeout_ms = 80,
-               bool allow_scene = false) {
+               bool allow_scene = false, uint32_t frame_read_ms = 0, uint32_t frame_total_ms = 0) {
         source_ = &source;
         valid_ = false;
         timeout_ms_ = timeout_ms;
+        frame_read_ms_ = frame_read_ms ? frame_read_ms : timeout_ms;
+        frame_total_ms_ = frame_total_ms;
         uint8_t h[64];
         Error e = Read(0, h, sizeof(h), {});
         if (e != Error::Ok)
@@ -139,9 +141,12 @@ public:
         const Entry e = At(i);
         if (!out || e.bytes > capacity)
             return Error::Capacity;
+        const uint64_t frame_started = source_->NowMs();
         if (trace)
             trace->phase = FrameTrace::ReadPhase;
-        const Error result = Read(e.offset, out, e.bytes, cancel, trace);
+        const uint32_t read_ms =
+            frame_total_ms_ ? std::min(frame_read_ms_, frame_total_ms_) : frame_read_ms_;
+        const Error result = Read(e.offset, out, e.bytes, cancel, trace, read_ms);
         if (result != Error::Ok)
             return result;
         if (trace)
@@ -170,7 +175,9 @@ public:
                 trace->crc_max_us =
                     std::max(trace->crc_max_us, uint32_t(trace->Now() - chunk_started));
             }
-            if (source_->NowMs() - started > timeout_ms_)
+            const uint64_t now = source_->NowMs();
+            if (now - started > timeout_ms_ ||
+                (frame_total_ms_ && now - frame_started > frame_total_ms_))
                 return finish(Error::Timeout);
         }
         if (cancel.Changed())
@@ -180,7 +187,8 @@ public:
 
 private:
     Error Read(uint32_t offset, uint8_t* out, size_t bytes, Cancel cancel,
-               FrameTrace* trace = nullptr) {
+               FrameTrace* trace = nullptr, uint32_t read_ms = 0) {
+        const uint32_t deadline_ms = read_ms ? read_ms : timeout_ms_;
         const uint64_t trace_started = trace ? trace->Now() : 0;
         const uint64_t started = source_->NowMs();
         auto finish = [&](Error result) {
@@ -194,6 +202,7 @@ private:
                 return finish(Error::Cancelled);
             const size_t chunk = std::min(kChunk, bytes - done);
             const uint64_t chunk_started = trace ? trace->Now() : 0;
+            const uint64_t chunk_started_ms = source_->NowMs();
             const size_t got = source_->ReadAt(offset + done, out + done, chunk);
             if (trace) {
                 trace->read_bytes += got;
@@ -205,7 +214,9 @@ private:
             // This method belongs on a worker, never the UI/audio thread.
             if (cancel.Changed())
                 return finish(Error::Cancelled);
-            if (source_->NowMs() - started > timeout_ms_)
+            const uint64_t now = source_->NowMs();
+            // Whole-frame throughput and one blocked call have separate limits.
+            if (now - started > deadline_ms || now - chunk_started_ms > timeout_ms_)
                 return finish(Error::Timeout);
             if (got != chunk)
                 return finish(Error::Io);
@@ -216,6 +227,7 @@ private:
     Source* source_ = nullptr;
     std::array<uint8_t, kMaxEntries * 32> index_{};
     uint32_t count_ = 0, duration_ = 0, max_payload_ = 0, timeout_ms_ = 80;
+    uint32_t frame_read_ms_ = 80, frame_total_ms_ = 0;
     uint16_t width_ = 0, height_ = 0;
     bool valid_ = false;
 };

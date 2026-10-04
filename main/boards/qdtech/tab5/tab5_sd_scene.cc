@@ -24,6 +24,7 @@ public:
             std::fclose(file_);
         file_ = nullptr;
         size_ = 0;
+        position_ = -1;
     }
     bool Open(const char* path) {
         Close();
@@ -37,19 +38,31 @@ public:
         if (n < 0)
             return false;
         size_ = n;
+        position_ = n;
         return true;
     }
     uint64_t Size() const override { return size_; }
     size_t ReadAt(uint32_t off, uint8_t* out, size_t n) override {
-        if (!file_ || std::fseek(file_, off, SEEK_SET))
+        if (!file_)
             return 0;
-        return std::fread(out, 1, n, file_);
+        // Only this worker owns the FILE; consecutive chunks already have the
+        // desired cursor. Timeline jumps still perform an absolute seek.
+        if (position_ < 0 || uint64_t(position_) != off) {
+            if (std::fseek(file_, off, SEEK_SET)) {
+                position_ = -1;
+                return 0;
+            }
+        }
+        const size_t got = std::fread(out, 1, n, file_);
+        position_ = std::ferror(file_) ? -1 : long(uint64_t(off) + got);
+        return got;
     }
     uint64_t NowMs() const override { return esp_timer_get_time() / 1000; }
 
 private:
     FILE* file_ = nullptr;
     uint64_t size_ = 0;
+    long position_ = -1;
 };
 lv_obj_t* Box(lv_obj_t* parent, int x, int y, int w, int h, uint32_t color, int radius = 0,
               bool opaque = true) {
@@ -115,8 +128,8 @@ public:
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
         ESP_LOGI("NaboSDPerf",
-                 "pool_alloc_us=%u trace_stack_bytes=%u read_deadline_ms=80 "
-                 "crc_deadline_ms=80 chunk_bytes=%u",
+                 "pool_alloc_us=%u trace_stack_bytes=%u read_deadline_ms=120 "
+                 "chunk_deadline_ms=80 crc_deadline_ms=80 frame_deadline_ms=160 chunk_bytes=%u",
                  unsigned(pool_us), unsigned(sizeof(nabo_sd::SceneMailbox::PumpTrace)),
                  unsigned(nabo_sd::kChunk));
         return instance;
@@ -149,7 +162,7 @@ private:
                         if (!source_.Open(kPaths[clip]))
                             e = nabo_sd::Error::Io;
                         else
-                            e = pack_.Open(source_, kBytes, 80, true);
+                            e = pack_.Open(source_, kBytes, 80, true, 120, 160);
                         if (e == nabo_sd::Error::Ok && (pack_.Count() != kCounts[clip] ||
                                                         pack_.Duration() != kCounts[clip] * 40 ||
                                                         pack_.MaxPayload() != kBytes))

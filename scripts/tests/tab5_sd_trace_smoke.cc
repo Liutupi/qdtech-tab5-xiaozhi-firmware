@@ -62,12 +62,12 @@ struct Test {
     std::vector<uint8_t> a, b;
     SceneMailbox box;
     SceneMailbox::PumpTrace trace;
-    explicit Test(const std::vector<uint8_t>& bytes)
+    explicit Test(const std::vector<uint8_t>& bytes, uint32_t read_ms = 0, uint32_t total_ms = 0)
         : source(bytes), a(kBytes), b(kBytes), box(a.data(), b.data(), kBytes) {
         now_us = 0;
         crc_step_us = 0;
         cancel_during_crc = nullptr;
-        assert(pack.Open(source, kBytes, 80) == Error::Ok);
+        assert(pack.Open(source, kBytes, 80, false, read_ms, total_ms) == Error::Ok);
         trace.frame.clock_us = Clock;
         active_trace = &trace.frame;
         source.delay_us = 100;
@@ -166,5 +166,48 @@ int main(int argc, char** argv) {
         assert(t.trace.frame.read_bytes == 8191 && t.trace.frame.read_chunks == 1);
         assert(t.trace.frame.crc_bytes == 0 && !t.trace.published);
         std::puts("PASS short read remains genuine IO fault");
+    }
+    {
+        Test legacy(bytes);
+        legacy.source.delay_us = 1800;
+        assert(legacy.Run() == Error::Timeout);
+        Test t(bytes, 120, 160);
+        t.source.delay_us = 1800;
+        assert(t.Run() == Error::Ok && t.trace.published);
+        assert(t.trace.frame.read_bytes == kBytes && t.trace.frame.read_us == 88200);
+        std::puts("PASS measured-throughput frame completes within bounded 120ms read budget");
+    }
+    {
+        Test t(bytes, 120, 160);
+        t.source.delay_us = 90001;
+        assert(t.Run() == Error::Timeout && t.trace.frame.read_chunks == 1);
+        assert(t.trace.frame.phase == FrameTrace::ReadPhase && !t.trace.published);
+        std::puts("PASS original 80ms single-call protection retained despite frame read budget");
+    }
+    {
+        Test t(bytes, 120, 160);
+        t.source.delay_us = 3000;
+        assert(t.Run() == Error::Timeout && t.trace.frame.read_us == 123000);
+        assert(!t.trace.published && t.trace.frame.crc_bytes == 0);
+        std::puts("PASS 120ms cumulative deadline still rejects an excessively slow frame");
+    }
+    {
+        Test t(bytes, 120, 160);
+        t.source.delay_us = 2100;
+        crc_step_us = 800;
+        assert(t.Run() == Error::Timeout && t.trace.frame.phase == FrameTrace::CrcPhase);
+        assert(t.trace.frame.read_us == 102900 && t.trace.frame.crc_us < 80000);
+        assert(now_us > 160000 && !t.trace.published);
+        std::puts(
+            "PASS whole frame 160ms bound combines read and CRC even if each is within budget");
+    }
+
+    {
+        Test t(bytes, 120, 160);
+        crc_step_us = 2000;
+        assert(t.Run() == Error::Timeout && t.trace.frame.phase == FrameTrace::CrcPhase);
+        assert(t.trace.frame.read_us == 4900 && t.trace.frame.crc_us > 80000);
+        assert(!t.trace.published);
+        std::puts("PASS scene frame CRC still has its independent 80ms deadline");
     }
 }
