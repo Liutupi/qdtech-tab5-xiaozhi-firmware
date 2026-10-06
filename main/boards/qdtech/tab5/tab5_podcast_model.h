@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <new>
@@ -56,6 +57,28 @@ struct Track {
 };
 using TrackList = std::vector<Track, PsramAllocator<Track>>;
 
+struct Cue {
+    uint32_t start_ms = 0;
+    uint32_t end_ms = 0;
+    Str text;
+    bool music = false;
+};
+using CueList = std::vector<Cue, PsramAllocator<Cue>>;
+constexpr size_t kMaxCues = 200;
+constexpr size_t kMaxCueTextBytes = 9000;
+constexpr uint32_t kMaxCueTimeMs = 4 * 3600 * 1000;
+inline int ActiveCue(const CueList& cues, uint32_t time_ms) {
+    size_t low = 0, high = cues.size();
+    while (low < high) {
+        const size_t mid = low + (high - low) / 2;
+        if (cues[mid].start_ms <= time_ms)
+            low = mid + 1;
+        else
+            high = mid;
+    }
+    return low && time_ms < cues[low - 1].end_ms ? int(low - 1) : -1;
+}
+
 struct Episode {
     int id = 0;
     Str title;
@@ -64,8 +87,29 @@ struct Episode {
     Str time;
     Str audio_url;
     TrackList tracks;
+    CueList cues;
 };
 using EpisodeList = std::vector<Episode, PsramAllocator<Episode>>;
+inline bool SameEpisodes(const EpisodeList& a, const EpisodeList& b) {
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const auto& x = a[i];
+        const auto& y = b[i];
+        if (x.id != y.id || x.title != y.title || x.script != y.script || x.from != y.from ||
+            x.time != y.time || x.audio_url != y.audio_url || x.tracks.size() != y.tracks.size() ||
+            x.cues.size() != y.cues.size())
+            return false;
+        for (size_t j = 0; j < x.tracks.size(); ++j)
+            if (x.tracks[j].title != y.tracks[j].title || x.tracks[j].artist != y.tracks[j].artist)
+                return false;
+        for (size_t j = 0; j < x.cues.size(); ++j)
+            if (x.cues[j].start_ms != y.cues[j].start_ms || x.cues[j].end_ms != y.cues[j].end_ms ||
+                x.cues[j].text != y.cues[j].text || x.cues[j].music != y.cues[j].music)
+                return false;
+    }
+    return true;
+}
 // Immutable once published: snapshots and pages share it instead of copying text.
 using SharedEpisodes = std::shared_ptr<const EpisodeList>;
 inline std::shared_ptr<EpisodeList> MakeEpisodes() {

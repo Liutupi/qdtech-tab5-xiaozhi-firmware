@@ -38,7 +38,8 @@ struct Message {
 };
 struct Snapshot {
     tab5_podcast::SharedEpisodes episodes;
-    bool ok = false, ever_ok = false;
+    bool ok = false, ever_ok = false, podcast_ok = false;
+    unsigned poll_count = 0;
     int latest_id = 0, seen_id = 0;
     std::string host, url, mcp_url;
     std::vector<Message> messages;
@@ -80,6 +81,7 @@ public:
     struct PodcastStub {
         void Tick() {}
         void SetPlayback(bool, const char*) {}
+        void SetRefreshResult(bool, unsigned) {}
         template <typename T> void SetEpisodes(const T&) {}
     };
     PodcastStub* podcast_page_ = nullptr;

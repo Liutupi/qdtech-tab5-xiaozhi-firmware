@@ -1875,6 +1875,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     }
 
     uint8_t* read_ptr = read_buffer;
+    playback_clock_.Begin(url, stream_generation);
     int bytes_left = 0;
     int decoded_frames = 0;
     bool logged_complete = false;
@@ -2030,7 +2031,8 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         MP3FrameInfo frame_info = {};
         MP3GetLastFrameInfo(decoder, &frame_info);
         WritePcm(pcm_buffer, frame_info.outputSamps, frame_info.nChans, frame_info.samprate,
-                 mono_buffer, kPcmMaxSamples, output_buffer, kPcmOutputMaxSamples);
+                 mono_buffer, kPcmMaxSamples, output_buffer, kPcmOutputMaxSamples,
+                 stream_generation);
         if (decoded_frames == 0) {
             if (station_index_ >= 0 && station_index_ < static_cast<int>(last_success_url_.size())) {
                 last_success_url_[station_index_] = url_index;
@@ -2224,8 +2226,8 @@ void RadioService::SetUi(const char* state, const char* detail) {
 }
 
 void RadioService::WritePcm(const int16_t* pcm, int samples, int channels, int sample_rate,
-                            int16_t* mono_buffer, int mono_capacity,
-                            int16_t* output_buffer, int output_capacity) {
+                            int16_t* mono_buffer, int mono_capacity, int16_t* output_buffer,
+                            int output_capacity, uint32_t stream_generation) {
     if (!pcm || !mono_buffer || !output_buffer || samples <= 0 || channels <= 0 || sample_rate <= 0) {
         return;
     }
@@ -2274,6 +2276,7 @@ void RadioService::WritePcm(const int16_t* pcm, int samples, int channels, int s
         codec->EnableOutput(true);
     }
     codec->OutputData(output_buffer, out_frames);
+    playback_clock_.Advance(out_frames, out_rate, stream_generation);
     // Radio bypasses AudioOutputTask; keep the power manager from treating
     // the speaker as idle and closing it mid-stream.
     Application::GetInstance().GetAudioService().NoteOutputActivity();

@@ -3,6 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -52,6 +53,8 @@ struct Snapshot {
     std::string url;          // public inbox URL https://<tunnel>/inbox/<token>
     std::string mcp_url;      // public MCP URL (only when the tunnel is up)
     std::vector<Message> messages;  // newest first
+    uint32_t poll_count = 0;        // completed inbox/episode fetches, including failures
+    bool podcast_ok = false;
     int podcast_latest_id = 0;      // relay's newest music-radio episode id
     tab5_podcast::SharedEpisodes episodes;  // newest first, shared (PSRAM), may be null
 
@@ -94,7 +97,7 @@ private:
     std::string topic_;
     std::string last_music_id_;
     int music_failures_ = 0;
-    int loaded_podcast_id_ = -1;
+    bool refresh_requested_ = false;
     bool track_pending_ = false;
     int track_episode_ = 0;
     int track_index_ = 0;

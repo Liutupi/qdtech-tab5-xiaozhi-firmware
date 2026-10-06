@@ -2381,7 +2381,10 @@ public:
         if (apps_) {
             if (music_lyrics_.lines.empty())
                 apps_->SetMusicLyric(music_title_.c_str(), music_artist_.c_str(), line);
-            if (!apps_->IsRadioVisible())
+            // Muse 电台 plays from its own page: show the song there instead.
+            if (apps_->IsPodcastVisible())
+                apps_->SetPodcastNowPlaying(music_title_.c_str(), music_artist_.c_str(), line);
+            else if (!apps_->IsRadioVisible())
                 apps_->OpenRadio(false);
         }
     }

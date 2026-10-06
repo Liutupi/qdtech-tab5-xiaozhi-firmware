@@ -37,6 +37,7 @@ public:
         std::function<int()> station_count;
         std::function<std::string(int)> station_name;
         std::function<int()> radio_level;
+        std::function<tab5_playback::Position(std::string_view)> podcast_position;
         // NES / USB gamepad
         std::function<void()> start_nes;
         std::function<void()> stop_nes;
@@ -94,6 +95,8 @@ public:
     bool IsVisible() const;
     bool IsRadioVisible() const;
     bool IsSettingsVisible() const;
+    bool IsPodcastVisible() const;
+    void SetPodcastNowPlaying(const char* title, const char* artist, const char* line);
 
 private:
     static constexpr int kRows = 6;

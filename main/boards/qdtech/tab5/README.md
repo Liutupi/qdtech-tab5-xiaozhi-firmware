@@ -1,5 +1,11 @@
 # Tab5 板级目录
 
+## Muse 电台播放
+
+Muse 电台页分别提供“播放播客”和“播放推荐歌曲”。播客按钮只读取本期 `audio_url` 并播放原声 MP3；07:30 的文字节目尚未补上音频时，页面提示原声尚未上传。推荐歌曲按钮继续由 NAS 根据 `tracks` 的歌名和歌手获取网易云完整歌曲，按顺序播放，歌单点播、歌词和波形保留。
+
+云 VM 可在 07:35 生成完成后，按 [上传接口说明](../../../../tools/muse-relay/README.md) 给同一期补上 MP3。设备每分钟自动刷新节目，也检查已有编号的内容变化，无需重复发布节目。电台页右上角“刷新节目”可立即拉取，显示刷新中、完成或失败；失败时保留已有内容，不中断播放。节目原声播放取消尚未完成的歌曲解析请求，防止迟到的歌曲替换播客。
+
 此目录在 XiaoZhi ESP32-P4 底座上加入原 QDTech S3 项目的桌面与服务，同时提供 Tab5 原生分辨率主界面。硬件入口是 `m5stack_tab5.cc`；`config.json` 包含 P4 rev 1.x 的旧桌面和原生版、P4 rev 3+ 的旧桌面。屏幕驱动支持 ILI9881C、ST7121、ST7123，触摸支持 GT911/ST712x。音频为 ES8388 + ES7210；SD 卡须在 C6 Wi‑Fi 的 SDIO host 初始化后使用 slot 0。
 
 旧 `qdtech-tab5` 变体将 480 × 320 桌面以最近邻方式放在横屏中央，两侧留边。双线性全屏实验因刷新和触摸迟滞已从源码撤回。新 `qdtech-tab5-native` 变体在 `tab5_native_display.h` 里用 LVGL 原生 1280 × 720 坐标绘制 Nabo 桌面、对话和触摸按钮；局部刷新由 `esp_lvgl_port` 处理。点击主界面的“应用与设置”进入同一屏幕上的第二页，可重新配网、调节并保存亮度和音量、选择及播放网络电台；语音说“我要听广播”会打开电台页并请求播放。内置电台列表只保留经核对的不同频道，也可用 SD 卡根目录的 `radio.json` 替换。原生版“应用与设置”里现有红白机入口：将 iNES 格式的 `.nes` 文件放在 FAT 格式 SD 卡的 `/nes`、`/FC` 或 `/roms` 目录，打开游戏页后可浏览列表、启动游戏并使用屏幕按键。旧天气、相册、播客服务仍未接入原生版。中文子集由 LXGW WenKai 生成，重建脚本和 OFL 许可证见本目录及 `scripts/generate_tab5_fonts.py`。P4 rev 1.x 关闭了会在该芯片上触发非法指令的自动 ISP 管线控制器，相机设备本身仍能初始化取帧。后续按仓库根目录的 [PORTING_STATUS.md](../../../../PORTING_STATUS.md) 验收电台与其他应用。
@@ -27,3 +33,16 @@ P4 + C6 Wi-Fi 实测总报文 1284 字节可到达，1534 字节及以上未到�
 v1.0.7 增加 Muse relay 音乐命令通道：NAS 上的网易云 MCP 容器将 `title`、`artist`、`url`、准确的 `song_id` 和 `continuous` 以 JSON `POST` 到同机 relay 的 `/tab5/music`；Tab5 使用已配置的 Muse inbox 地址，每约 4 秒读取 `/music/<token>`，按命令 ID 去重后播放。relay 代码见 `tools/muse-relay/relay.js`。`/tab5/music` 仅接受本机及已配置的容器网关来源，不能通过公网隧道写入；不同 Docker 网络应相应调整允许的来源。这个通道用于 NAS 和 Tab5 不在同一网段、UDP 无法到达设备的场景。公开仓库未包含用户 NAS 的网易云 MCP 容器脚本；部署时需在该容器的播放结果处理处发送上述 JSON，并确保传递真实歌曲 ID。设备端没有 ID 时仍按歌名和歌手查词，有 ID 但歌曲无定时歌词时不会拿同名其他版本的歌词替代。
 
 连续播放只能由一侧负责。Tab5 收到 `continuous=true` 后，会在歌曲自然结束时通过小智请求下一首；NAS 网易云 MCP 若也保存私有电台的自动播放状态并按歌曲时长启动定时器，会在设备待机时自行把新歌推到 relay。接入此通道时，应关闭 **Tab5 对应账号** 的 NAS 后台定时续播和进程重启续播，保留 Tab5 的自然结束续播；其他账号可维持自己的设置。NAS 脚本不在本仓库，修改和回退路径见 `HANDOFF.md`。
+
+### Muse 节目文案随播放滚动
+
+Native 电台页支持 relay 返回的 `transcript`（与 `audio_filename` 绑定的有序字幕）。
+旁白段高亮全文、滚动到段落开头；音乐片段显示歌曲标题和歌手。
+计时取自 `RadioService` 写入扬声器的 PCM 帧数，缓冲不前进，重播或连接重启归零。
+播放推荐歌曲、切换节目或换了音频时不继续使用旧字幕。
+手动拖动文案后暂停自动滚动 8 秒；没有字幕的老节目保留全文显示。
+
+字幕来自实际生成音频的时间轴，不按字数估算。Muse 可随 MP3 使用
+`upload_audio.py --speech-optimize --transcript xxx.timeline.json` 上传，或单独
+`POST /podcast/transcript?episode_id=...`。接口、JSON/SRT/VTT 格式和限制见
+[relay 接入说明](../../../../tools/muse-relay/README.md)。

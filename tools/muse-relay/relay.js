@@ -424,7 +424,21 @@ function viaTunnel(req) {
   return Boolean(req.headers['cf-connecting-ip'] || req.headers['cf-ray']);
 }
 
+// Muse MP3 upload extension v1
+const handleMuseAudio = require('./audio_routes').createAudioRoutes({
+  dataDir: DATA_DIR, token: TOKEN, tunnelUrl, getPodcasts: () => podcasts, savePodcasts,
+});
+const originalMusePodcastResponse = podcastResponse;
+podcastResponse = function(url) {
+  const result = originalMusePodcastResponse(url);
+  result.episodes = result.episodes.map(episode => ({
+    ...episode, audio_url: handleMuseAudio.refreshAudioUrl(episode.audio_url),
+  }));
+  return result;
+};
+
 const server = http.createServer(async (req, res) => {
+  if (await handleMuseAudio(req, res)) return;
   const url = new URL(req.url, 'http://localhost');
   const parts = url.pathname.split('/').filter(Boolean);
   try {

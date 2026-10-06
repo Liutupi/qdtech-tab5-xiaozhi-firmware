@@ -9,6 +9,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include "tab5_playback_clock.h"
 
 class DesktopUI;
 
@@ -30,6 +31,9 @@ public:
     std::string GetMusicStatusJson() const;
     uint32_t GetStreamGeneration() const {
         return stream_generation_.load(std::memory_order_acquire);
+    }
+    tab5_playback::Position GetPlaybackPosition(std::string_view url) const {
+        return playback_clock_.Read(url, GetStreamGeneration());
     }
     std::string SelectStation(const std::string& station);
     void SelectStationIndex(int index, int category_filter = -1);
@@ -78,8 +82,8 @@ private:
     void SetUi(const char* state, const char* detail);
     bool FinishCustomUrlIfCurrent(uint32_t stream_generation, bool completed, const char* detail);
     void WritePcm(const int16_t* pcm, int samples, int channels, int sample_rate,
-                  int16_t* mono_buffer, int mono_capacity,
-                  int16_t* output_buffer, int output_capacity);
+                  int16_t* mono_buffer, int mono_capacity, int16_t* output_buffer,
+                  int output_capacity, uint32_t stream_generation);
     void ResetAudioLeveler();
     void ApplyAudioLeveler(int16_t* pcm, int samples);
     void LoadFavorites();
@@ -95,6 +99,7 @@ private:
 
     DesktopUI* desktop_ui_ = nullptr;
     StateCallback state_callback_;
+    tab5_playback::Clock playback_clock_;
     std::mutex start_mutex_;
     void* queue_ = nullptr;
     TaskHandle_t task_handle_ = nullptr;

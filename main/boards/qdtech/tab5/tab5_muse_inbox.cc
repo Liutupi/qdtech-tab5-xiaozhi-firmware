@@ -1,4 +1,5 @@
 #include "tab5_muse_inbox.h"
+#include "tab5_podcast_transcript.h"
 
 #include <cJSON.h>
 #include <esp_heap_caps.h>
@@ -20,7 +21,7 @@ namespace {
 const char* TAG = "Tab5Muse";
 constexpr const char* kDefaultHost = "192.168.3.200:8787";
 constexpr size_t kMaxJsonBytes = 32 * 1024;
-constexpr size_t kMaxPodcastBytes = 96 * 1024;  // up to 6 episodes with full scripts
+constexpr size_t kMaxPodcastBytes = 192 * 1024;  // six bounded scripts and timed transcripts
 constexpr int kPodcastLimit = 6;
 constexpr int kTimeoutMs = 4000;
 constexpr int kPollSeconds = 60;
@@ -107,6 +108,10 @@ void Inbox::Start(Listener listener, MusicListener music_listener) {
 }
 
 void Inbox::RequestRefresh() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        refresh_requested_ = true;
+    }
     if (task_)
         xTaskNotifyGive(task_);
 }
@@ -283,13 +288,17 @@ void Inbox::Run() {
         // A pending track lookup (user tapped play) goes first; it is not a reason
         // to re-poll the inbox.
         bool track_wake = false;
+        bool requested = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             track_wake = track_pending_;
+            requested = refresh_requested_;
+            refresh_requested_ = false;
         }
         ServeTrackRequest();
         const int64_t now = esp_timer_get_time();
-        if ((refresh && !track_wake) || now - last_poll_us >= int64_t(kPollSeconds) * 1000000) {
+        if (requested || (refresh && !track_wake) ||
+            now - last_poll_us >= int64_t(kPollSeconds) * 1000000) {
             Poll();
             last_poll_us = esp_timer_get_time();
         }
@@ -381,6 +390,7 @@ bool Inbox::FetchPodcasts(const std::string& endpoint, tab5_podcast::EpisodeList
         if (!e.audio_url.empty() && e.audio_url.rfind("https://", 0) != 0 &&
             e.audio_url.rfind("http://", 0) != 0)
             e.audio_url.clear();
+        e.cues = tab5_podcast::ParseTranscript(item, e.audio_url);
         auto* tracks = cJSON_GetObjectItem(item, "tracks");
         cJSON* t = nullptr;
         cJSON_ArrayForEach (t, tracks) {
@@ -411,14 +421,14 @@ bool Inbox::Poll() {
     auto* list = root ? cJSON_GetObjectItem(root.get(), "messages") : nullptr;
     const bool ok = cJSON_IsArray(list);
 
-    // Music-radio episodes are fetched (network IO, outside the lock) only when the
-    // relay's newest episode id changes. podcast_id < 0: relay has no podcast support.
-    // loaded_podcast_id_ is only touched by this task.
+    // The MP3 is uploaded after the text publication, so audio_url can change
+    // without a new episode id. Refresh each inbox poll, outside the lock.
+    // podcast_id < 0: relay has no podcast support.
     auto* podcast_latest = ok ? cJSON_GetObjectItem(root.get(), "podcast_latest_id") : nullptr;
     const int podcast_id = cJSON_IsNumber(podcast_latest) ? podcast_latest->valueint : -1;
     auto fetched_episodes = tab5_podcast::MakeEpisodes();
     bool podcast_fetched = false;
-    if (podcast_id >= 0 && podcast_id != loaded_podcast_id_) {
+    if (podcast_id >= 0) {
         std::string podcast_endpoint = endpoint;
         const auto path = podcast_endpoint.find("/inbox");
         if (path != std::string::npos)
@@ -452,12 +462,17 @@ bool Inbox::Poll() {
                 messages.push_back(std::move(m));
             }
             if (podcast_fetched) {
-                loaded_podcast_id_ = podcast_id;
                 snapshot_.podcast_latest_id = podcast_id;
-                ESP_LOGI(TAG, "podcast latest=%d episodes=%u", podcast_id,
-                         unsigned(fetched_episodes->size()));
-                snapshot_.episodes = std::move(fetched_episodes);
-                changed = true;
+                if (!snapshot_.episodes ||
+                    !tab5_podcast::SameEpisodes(*snapshot_.episodes, *fetched_episodes)) {
+                    size_t timed_cues = 0;
+                    for (const auto& episode : *fetched_episodes)
+                        timed_cues += episode.cues.size();
+                    ESP_LOGI(TAG, "podcast latest=%d episodes=%u timed_cues=%u", podcast_id,
+                             unsigned(fetched_episodes->size()), unsigned(timed_cues));
+                    snapshot_.episodes = std::move(fetched_episodes);
+                    changed = true;
+                }
             } else if (podcast_id < 0) {
                 // Relay without podcast support: derive episodes from daily-radio posts.
                 int newest = 0;
@@ -489,9 +504,8 @@ bool Inbox::Poll() {
             auto* latest = cJSON_GetObjectItem(root.get(), "latest_id");
             const int latest_id = cJSON_IsNumber(latest) ? latest->valueint : 0;
             std::string mcp_url = JsonString(root.get(), "mcp_url");
-            changed = !snapshot_.ok || latest_id != snapshot_.latest_id ||
-                      messages.size() != snapshot_.messages.size() ||
-                      mcp_url != snapshot_.mcp_url;
+            changed = changed || !snapshot_.ok || latest_id != snapshot_.latest_id ||
+                      messages.size() != snapshot_.messages.size() || mcp_url != snapshot_.mcp_url;
             if (latest_id < snapshot_.seen_id) {
                 // The relay was reset (fresh data folder): start counting unread again.
                 snapshot_.seen_id = 0;
@@ -511,9 +525,13 @@ bool Inbox::Poll() {
             if (changed)
                 ESP_LOGI(TAG, "inbox latest=%d unread=%d", latest_id, snapshot_.Unread());
         }
+        snapshot_.podcast_ok = ok && (podcast_fetched || podcast_id < 0);
+        ++snapshot_.poll_count;
         copy = snapshot_;
     }
-    if (changed && listener_)
+    // Publish every completed poll so a manual refresh can report its result,
+    // even when the episode contents have not changed. The UI defers unchanged lists.
+    if (listener_)
         listener_(copy);
     // Two failures in a row through the tunnel: the relay may have a new hostname.
     if (!ok && !url.empty() && failures_ >= 2 && Discover())

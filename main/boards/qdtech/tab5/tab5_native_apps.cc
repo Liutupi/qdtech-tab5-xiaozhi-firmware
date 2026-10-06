@@ -225,6 +225,7 @@ void Tab5NativeApps::OpenPodcast() {
     if (!podcast_page_) {
         Tab5PodcastPage::Callbacks callbacks;
         callbacks.back = [this] { OpenApps(); };
+        callbacks.refresh = [this] { Schedule(actions_.muse_refresh); };
         callbacks.play_url = [this](const std::string& url, const std::string& title) {
             return actions_.podcast_play_url ? actions_.podcast_play_url(url, title) : false;
         };
@@ -233,9 +234,15 @@ void Tab5NativeApps::OpenPodcast() {
         };
         callbacks.stop = [this] { Schedule(actions_.radio_stop); };
         callbacks.level = [this] { return actions_.radio_level ? actions_.radio_level() : 0; };
+        callbacks.playback_position = [this](std::string_view url) {
+            return actions_.podcast_position ? actions_.podcast_position(url)
+                                             : tab5_playback::Position{};
+        };
         callbacks.text_font = [] { return MusicTextFontOwner(); };
         podcast_page_ = std::make_unique<Tab5PodcastPage>(root_, std::move(callbacks));
         podcast_page_->SetEpisodes(podcast_episodes_);
+        const auto snapshot = tab5_muse::Inbox::GetInstance().Current();
+        podcast_page_->SetRefreshResult(snapshot.podcast_ok, snapshot.poll_count);
     }
     Show(nullptr);
     podcast_page_->SetPlayback(radio_playing_, radio_station_name_.c_str());
@@ -344,6 +351,16 @@ bool Tab5NativeApps::IsVisible() const {
 
 bool Tab5NativeApps::IsRadioVisible() const {
     return IsVisible() && !lv_obj_has_flag(radio_page_, LV_OBJ_FLAG_HIDDEN);
+}
+
+bool Tab5NativeApps::IsPodcastVisible() const {
+    return IsVisible() && podcast_page_ && podcast_page_->IsVisible();
+}
+
+void Tab5NativeApps::SetPodcastNowPlaying(const char* title, const char* artist,
+                                          const char* line) {
+    if (podcast_page_)
+        podcast_page_->SetNowPlaying(title, artist, line);
 }
 
 bool Tab5NativeApps::IsSettingsVisible() const {
@@ -511,8 +528,10 @@ void Tab5NativeApps::RenderMuseList(const tab5_muse::Snapshot& snapshot) {
 void Tab5NativeApps::SetMuseInbox(const tab5_muse::Snapshot& snapshot) {
     podcast_episodes_ = snapshot.episodes;
     UpdatePodcastEntry();
-    if (podcast_page_)
+    if (podcast_page_) {
         podcast_page_->SetEpisodes(podcast_episodes_);
+        podcast_page_->SetRefreshResult(snapshot.podcast_ok, snapshot.poll_count);
+    }
     const int unread = snapshot.Unread();
     if (muse_entry_label_) {
         char text[64];

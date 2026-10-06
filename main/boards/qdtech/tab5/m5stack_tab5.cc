@@ -2168,6 +2168,8 @@ public:
             };
             actions.radio_stop = [this] {
                 ReplaceMusicSource([this] {
+                    podcast_session_ = false;
+                    ++podcast_request_seq_;
                     EndContinuousSession();
                     if (native_radio_ready_.load())
                         radio_service_.Stop();
@@ -2240,6 +2242,9 @@ public:
             actions.radio_level = [this] {
                 return native_radio_ready_.load() ? radio_service_.GetAudioLevel() : 0;
             };
+            actions.podcast_position = [this](std::string_view url) {
+                return radio_service_.GetPlaybackPosition(url);
+            };
             actions.start_nes = [this] {
                 ReplaceMusicSource([this] {
                     radio_service_.Stop();
@@ -2282,7 +2287,19 @@ public:
             actions.firmware_action = [] { Tab5Ota::GetInstance().HandleButton(); };
             actions.podcast_play_url = [this](const std::string& url, const std::string& title) {
                 Application::GetInstance().Schedule([this, url, title] {
-                    const auto result = PlayMusicRequest(title, "Muse 电台", url, "", "", false);
+                    EnsureNativeRadio();
+                    uint32_t generation;
+                    ReplaceMusicSource([this, &generation] {
+                        // A late song lookup must not replace the narrated episode.
+                        podcast_session_ = false;
+                        ++podcast_request_seq_;
+                        EndContinuousSession();
+                        NoteMusicPlayRequest(false);
+                        generation = music_request_generation_.load();
+                    });
+                    const auto result = StartMusicNow(generation, title, "Muse 电台", url, "");
+                    if (result.rfind("Music URL was NOT started", 0) != 0)
+                        ApplyLegacyMusicLyricLine(title, "Muse 电台", "播客播放中");
                     ESP_LOGI("Tab5Podcast", "episode audio: %s", result.c_str());
                 });
                 return true;

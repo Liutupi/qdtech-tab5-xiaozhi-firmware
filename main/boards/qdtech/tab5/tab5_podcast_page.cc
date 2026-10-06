@@ -71,7 +71,7 @@ Tab5PodcastPage::Tab5PodcastPage(lv_obj_t* parent, Callbacks callbacks)
 
 void Tab5PodcastPage::Build() {
     Text(root_, "Muse 音乐电台", &qd_font_lxgw_36, kText, 52, 27, 600);
-    summary_ = Text(root_, "每日一期 · 来自 Muse", &qd_font_cjk_28, kMuted, 54, 76, 900);
+    summary_ = Text(root_, "每日一期 · 来自 Muse", &qd_font_cjk_28, kMuted, 54, 76, 724);
     lv_label_set_long_mode(summary_, LV_LABEL_LONG_DOT);
     lv_obj_set_height(summary_, 36);
     auto* back = lv_button_create(root_);
@@ -93,6 +93,21 @@ void Tab5PodcastPage::Build() {
         },
         LV_EVENT_CLICKED, this);
 
+    auto* refresh = lv_button_create(root_);
+    lv_obj_set_pos(refresh, 788, 34);
+    lv_obj_set_size(refresh, 208, 60);
+    lv_obj_set_style_bg_color(refresh, lv_color_hex(0x3a2f78), 0);
+    lv_obj_set_style_bg_color(refresh, lv_color_hex(0x5a4fb0), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(refresh, 18, 0);
+    lv_obj_set_style_shadow_width(refresh, 0, 0);
+    refresh_label_ = Text(refresh, "刷新节目", &qd_font_cjk_28, kText, 0, 0, 208);
+    lv_obj_center(refresh_label_);
+    lv_obj_set_style_text_align(refresh_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_add_event_cb(
+        refresh,
+        [](lv_event_t* e) { static_cast<Tab5PodcastPage*>(lv_event_get_user_data(e))->Refresh(); },
+        LV_EVENT_CLICKED, this);
+
     // Episode list.
     auto* left = Box(root_, 48, 128, 360, 560, kPanel, kPanelBorder, 27);
     Text(left, "往期节目", &qd_font_cjk_28, kMuted, 24, 18, 300);
@@ -108,28 +123,47 @@ void Tab5PodcastPage::Build() {
     lv_obj_set_style_text_align(badge_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(badge_label_, LV_ALIGN_CENTER, 0, 0);
 
-    title_ = Text(card, "还没有节目", &qd_font_cjk_28, kText, 32, 74, 540);
+    title_ = Text(card, "还没有节目", &qd_font_cjk_28, kText, 32, 74, 484);
     lv_label_set_long_mode(title_, LV_LABEL_LONG_DOT);
     lv_obj_set_height(title_, 46);
-    meta_ = Text(card, "", &qd_font_cjk_28, kMuted, 32, 120, 540);
+    meta_ = Text(card, "", &qd_font_cjk_28, kMuted, 32, 120, 484);
     lv_label_set_long_mode(meta_, LV_LABEL_LONG_DOT);
     lv_obj_set_height(meta_, 36);
 
     auto* play = lv_button_create(card);
-    lv_obj_set_pos(play, 592, 40);
-    lv_obj_set_size(play, 180, 84);
-    lv_obj_set_style_radius(play, 42, 0);
+    lv_obj_set_pos(play, 532, 32);
+    lv_obj_set_size(play, 240, 58);
+    lv_obj_set_style_radius(play, 29, 0);
     lv_obj_set_style_bg_color(play, lv_color_hex(kPink), 0);
     lv_obj_set_style_bg_grad_color(play, lv_color_hex(kViolet), 0);
     lv_obj_set_style_bg_grad_dir(play, LV_GRAD_DIR_HOR, 0);
     lv_obj_set_style_bg_color(play, lv_color_hex(0xd77d9a), LV_STATE_PRESSED);
     lv_obj_set_style_shadow_width(play, 0, 0);
-    play_label_ = Text(play, "播放本期", &qd_font_lxgw_28, 0x1a1033, 0, 0, 180);
+    play_label_ = Text(play, "播放播客", &qd_font_lxgw_28, 0x1a1033, 0, 0, 240);
     lv_obj_set_style_text_align(play_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(play_label_, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_event_cb(
         play,
-        [](lv_event_t* e) { static_cast<Tab5PodcastPage*>(lv_event_get_user_data(e))->PlaySelected(); },
+        [](lv_event_t* e) {
+            static_cast<Tab5PodcastPage*>(lv_event_get_user_data(e))->PlaySelected();
+        },
+        LV_EVENT_CLICKED, this);
+
+    auto* songs = lv_button_create(card);
+    lv_obj_set_pos(songs, 532, 102);
+    lv_obj_set_size(songs, 240, 58);
+    lv_obj_set_style_radius(songs, 29, 0);
+    lv_obj_set_style_bg_color(songs, lv_color_hex(0x3a2f78), 0);
+    lv_obj_set_style_bg_color(songs, lv_color_hex(0x5a4fb0), LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_width(songs, 0, 0);
+    songs_label_ = Text(songs, "播放推荐歌曲", &qd_font_lxgw_28, kText, 0, 0, 240);
+    lv_obj_set_style_text_align(songs_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(songs_label_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_event_cb(
+        songs,
+        [](lv_event_t* e) {
+            static_cast<Tab5PodcastPage*>(lv_event_get_user_data(e))->PlaySongs();
+        },
         LV_EVENT_CLICKED, this);
 
     auto* wave_panel = Box(card, 32, 166, 740, 104, 0x0c1530, 0x2f2a66, 22);
@@ -143,8 +177,19 @@ void Tab5PodcastPage::Build() {
     lv_obj_remove_flag(wave_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(wave_, DrawWave, LV_EVENT_DRAW_MAIN, this);
 
-    Text(card, "节目文案", &qd_font_lxgw_28, kViolet, 32, 286, 300);
+    script_heading_ = Text(card, "节目文案", &qd_font_lxgw_28, kViolet, 32, 286, 436);
     script_box_ = ScrollColumn(card, 32, 326, 436, 214, 0);
+    lv_obj_add_event_cb(
+        script_box_,
+        [](lv_event_t* event) {
+            const auto code = lv_event_get_code(event);
+            if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING && code != LV_EVENT_RELEASED)
+                return;
+            auto* page = static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event));
+            page->manual_scroll_ = true;
+            page->manual_scroll_started_ = lv_tick_get();
+        },
+        LV_EVENT_ALL, this);
     script_ = Text(script_box_, "", &qd_font_cjk_28, kBody, 0, 0, 420);
     lv_obj_set_style_text_line_space(script_, 8, 0);
 
@@ -163,6 +208,28 @@ void Tab5PodcastPage::Show() {
         RenderList();
     lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
+}
+
+void Tab5PodcastPage::Refresh() {
+    if (refreshing_ || !callbacks_.refresh)
+        return;
+    refreshing_ = true;
+    refresh_started_ = lv_tick_get();
+    lv_label_set_text(refresh_label_, "刷新中…");
+    callbacks_.refresh();
+}
+
+void Tab5PodcastPage::SetRefreshResult(bool ok, uint32_t poll_count) {
+    if (poll_count == last_poll_count_)
+        return;
+    last_poll_count_ = poll_count;
+    if (!refreshing_)
+        return;
+    refreshing_ = false;
+    lv_label_set_text(refresh_label_, ok ? "刷新完成" : "刷新失败");
+    if (!playing_)
+        SetStatus(ok ? "已获取最新节目" : "刷新失败，保留上次内容，可点按重试",
+                  ok ? kMuted : kPink);
 }
 
 void Tab5PodcastPage::Hide() { lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN); }
@@ -269,9 +336,19 @@ void Tab5PodcastPage::RenderList() {
 }
 
 void Tab5PodcastPage::RenderEpisode() {
+    UpdatePlayLabels();
     const lv_font_t* font = font_ ? font_ : &qd_font_cjk_28;
     lv_obj_clean(tracks_);
     track_tags_.clear();
+    track_rows_.clear();
+    lv_obj_clean(script_box_);
+    cue_rows_.clear();
+    active_cue_ = -1;
+    manual_scroll_ = false;
+    transcript_scroll_pending_ = false;
+    script_ = Text(script_box_, "", font, kBody, 0, 0, 420);
+    lv_obj_set_style_text_line_space(script_, 8, 0);
+    lv_label_set_text(script_heading_, "节目文案");
     const auto& episodes = List();
     auto it = std::find_if(episodes.begin(), episodes.end(),
                            [this](const auto& e) { return e.id == selected_id_; });
@@ -292,6 +369,21 @@ void Tab5PodcastPage::RenderEpisode() {
     lv_obj_set_style_text_font(script_, font, 0);
     const std::string script = tab5_podcast::DisplayText(e.script);
     lv_label_set_text(script_, script.empty() ? "本期没有文案。" : script.c_str());
+    if (!e.cues.empty()) {
+        lv_obj_add_flag(script_, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(script_heading_, "节目文案 · 跟随播放");
+        for (const auto& cue : e.cues) {
+            const std::string spoken =
+                (cue.music ? "音乐 · " : "") + tab5_podcast::DisplayText(cue.text);
+            auto* row = Text(script_box_, spoken.c_str(), font, kBody, 0, 0, 420);
+            lv_obj_set_style_text_line_space(row, 8, 0);
+            lv_obj_set_style_pad_ver(row, 6, 0);
+            lv_obj_set_style_bg_color(row, lv_color_hex(0x2a2550), 0);
+            lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+            lv_obj_add_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
+            cue_rows_.push_back(row);
+        }
+    }
     lv_obj_scroll_to_y(script_box_, 0, LV_ANIM_OFF);
 
     if (e.tracks.empty())
@@ -327,8 +419,10 @@ void Tab5PodcastPage::RenderEpisode() {
                 tag->page->PlayTrack(size_t(tag->value));
             },
             LV_EVENT_CLICKED, track_tags_.back().get());
+        track_rows_.push_back(row);
     }
     lv_obj_scroll_to_y(tracks_, 0, LV_ANIM_OFF);
+    HighlightNowPlaying();
 }
 
 void Tab5PodcastPage::SetStatus(const char* text, uint32_t color) {
@@ -337,7 +431,8 @@ void Tab5PodcastPage::SetStatus(const char* text, uint32_t color) {
 }
 
 void Tab5PodcastPage::PlaySelected() {
-    if (playing_) {
+    if (playing_ && playback_kind_ == PlaybackKind::Podcast &&
+        playback_episode_id_ == selected_id_) {
         if (callbacks_.stop)
             callbacks_.stop();
         SetStatus("已停止播放", kMuted);
@@ -351,11 +446,34 @@ void Tab5PodcastPage::PlaySelected() {
     if (!it->audio_url.empty() && callbacks_.play_url) {
         const bool ok = callbacks_.play_url(std::string(it->audio_url.data(), it->audio_url.size()),
                                             std::string(it->title.data(), it->title.size()));
-        SetStatus(ok ? "正在连接节目音频…" : "节目音频暂时无法播放", ok ? kViolet : kPink);
+        if (ok) {
+            playback_kind_ = PlaybackKind::Podcast;
+            playback_episode_id_ = it->id;
+            UpdatePlayLabels();
+        }
+        SetStatus(ok ? "正在连接播客音频…" : "播客音频暂时无法播放", ok ? kViolet : kPink);
         return;
     }
-    if (!it->tracks.empty())
-        PlayTrack(0);  // whole episode in order
+    SetStatus("本期原声播客尚未上传，可单独播放推荐歌曲", kMuted);
+}
+
+void Tab5PodcastPage::PlaySongs() {
+    if (playing_ && playback_kind_ == PlaybackKind::Songs && playback_episode_id_ == selected_id_) {
+        if (callbacks_.stop)
+            callbacks_.stop();
+        SetStatus("已停止播放", kMuted);
+        return;
+    }
+    PlayTrack(0);  // Retain the NAS full-song lookup and ordered playlist.
+}
+
+void Tab5PodcastPage::UpdatePlayLabels() {
+    const bool active = playing_ && playback_episode_id_ == selected_id_;
+    lv_label_set_text(play_label_,
+                      active && playback_kind_ == PlaybackKind::Podcast ? "停止播客" : "播放播客");
+    lv_label_set_text(songs_label_, active && playback_kind_ == PlaybackKind::Songs
+                                        ? "停止推荐歌曲"
+                                        : "播放推荐歌曲");
 }
 
 void Tab5PodcastPage::PlayTrack(size_t index) {
@@ -366,10 +484,46 @@ void Tab5PodcastPage::PlayTrack(size_t index) {
         return;
     const auto& t = it->tracks[index];
     const bool ok = callbacks_.play_track(it->id, int(index), int(it->tracks.size()));
+    if (ok) {
+        playback_kind_ = PlaybackKind::Songs;
+        playback_episode_id_ = it->id;
+        UpdatePlayLabels();
+    }
     const std::string text = ok ? "正在从网易云获取《" + tab5_podcast::DisplayText(t.title) +
                                       "》，之后按歌单顺序播放…"
                                 : std::string("暂时无法播放，稍后再试");
     SetStatus(text.c_str(), ok ? kViolet : kPink);
+}
+
+void Tab5PodcastPage::SetNowPlaying(const char* title, const char* artist, const char* line) {
+    const std::string t = title ? title : "";
+    std::string text = "正在播放：" + tab5_podcast::DisplayText(t);
+    if (artist && *artist)
+        text += " · " + tab5_podcast::DisplayText(artist);
+    if (line && *line && t != line)
+        text += "  " + tab5_podcast::DisplayText(line);
+    SetStatus(text.c_str(), kPink);
+    if (t != now_title_) {
+        now_title_ = t;
+        HighlightNowPlaying();
+    }
+}
+
+// Marks the selected episode's row whose title matches the song now playing.
+void Tab5PodcastPage::HighlightNowPlaying() {
+    const auto& episodes = List();
+    auto it = std::find_if(episodes.begin(), episodes.end(),
+                           [this](const auto& e) { return e.id == selected_id_; });
+    for (size_t i = 0; i < track_rows_.size(); ++i) {
+        const bool on = playing_ && it != episodes.end() && i < it->tracks.size() &&
+                        !now_title_.empty() &&
+                        std::string_view(it->tracks[i].title) == now_title_;
+        lv_obj_set_style_bg_color(track_rows_[i], lv_color_hex(on ? 0x3a2f78 : 0x10263a), 0);
+        lv_obj_set_style_border_color(track_rows_[i], lv_color_hex(kPink), 0);
+        lv_obj_set_style_border_width(track_rows_[i], on ? 2 : 0, 0);
+        if (on)
+            lv_obj_scroll_to_view(track_rows_[i], LV_ANIM_ON);
+    }
 }
 
 void Tab5PodcastPage::SetPlayback(bool playing, const char* now_playing) {
@@ -378,9 +532,10 @@ void Tab5PodcastPage::SetPlayback(bool playing, const char* now_playing) {
         return;
     playing_ = playing;
     now_playing_ = now;
-    lv_label_set_text(play_label_, playing ? "停止播放" : "播放本期");
+    UpdatePlayLabels();
     lv_label_set_text(badge_label_, playing ? "正在播放" : "本期节目");
     lv_obj_set_style_bg_color(badge_, lv_color_hex(playing ? 0x6a3a6e : 0x3a2f78), 0);
+    HighlightNowPlaying();
     if (playing && !now.empty()) {
         const std::string text = "正在播放：" + tab5_podcast::DisplayText(now);
         SetStatus(text.c_str(), kPink);
@@ -390,7 +545,14 @@ void Tab5PodcastPage::SetPlayback(bool playing, const char* now_playing) {
 void Tab5PodcastPage::Tick() {
     if (!IsVisible())
         return;
+    if (refreshing_ && uint32_t(lv_tick_get() - refresh_started_) >= 45000) {
+        refreshing_ = false;
+        lv_label_set_text(refresh_label_, "刷新失败");
+        if (!playing_)
+            SetStatus("刷新超时，可点按重试", kPink);
+    }
     BindFont();
+    UpdateTranscript();
     if ((++phase_ & 1U) != 0)
         return;  // ~12 redraws/s of one bounded area
     const int level = playing_ && callbacks_.level ? std::clamp(callbacks_.level(), 0, 100) : 0;
@@ -412,6 +574,45 @@ void Tab5PodcastPage::Tick() {
     }
     if (changed)
         lv_obj_invalidate(wave_);
+}
+
+void Tab5PodcastPage::UpdateTranscript() {
+    if (cue_rows_.empty())
+        return;
+    int next = -1;
+    if (playing_ && playback_kind_ == PlaybackKind::Podcast &&
+        playback_episode_id_ == selected_id_ && callbacks_.playback_position) {
+        const auto& episodes = List();
+        auto it = std::find_if(episodes.begin(), episodes.end(),
+                               [this](const auto& e) { return e.id == selected_id_; });
+        if (it != episodes.end()) {
+            const auto position = callbacks_.playback_position(it->audio_url);
+            if (position.matches)
+                next = tab5_podcast::ActiveCue(it->cues, position.milliseconds);
+        }
+    }
+    if (next != active_cue_) {
+        if (active_cue_ >= 0 && size_t(active_cue_) < cue_rows_.size()) {
+            lv_obj_set_style_text_color(cue_rows_[active_cue_], lv_color_hex(kBody), 0);
+            lv_obj_set_style_bg_opa(cue_rows_[active_cue_], LV_OPA_TRANSP, 0);
+        }
+        active_cue_ = next;
+        transcript_scroll_pending_ = next >= 0;
+        if (next >= 0 && size_t(next) < cue_rows_.size()) {
+            lv_obj_set_style_text_color(cue_rows_[next], lv_color_hex(kPink), 0);
+            lv_obj_set_style_bg_opa(cue_rows_[next], LV_OPA_COVER, 0);
+        }
+    }
+    if (manual_scroll_ && uint32_t(lv_tick_get() - manual_scroll_started_) >= 8000)
+        manual_scroll_ = false;
+    if (!manual_scroll_ && transcript_scroll_pending_ && active_cue_ >= 0 &&
+        size_t(active_cue_) < cue_rows_.size()) {
+        // A Muse segment can be a whole paragraph taller than the viewport.
+        // Show its beginning, rather than scrolling to its last wrapped line.
+        lv_obj_update_layout(script_box_);
+        lv_obj_scroll_to_y(script_box_, lv_obj_get_y(cue_rows_[active_cue_]), LV_ANIM_ON);
+        transcript_scroll_pending_ = false;
+    }
 }
 
 void Tab5PodcastPage::DrawWave(lv_event_t* event) {
