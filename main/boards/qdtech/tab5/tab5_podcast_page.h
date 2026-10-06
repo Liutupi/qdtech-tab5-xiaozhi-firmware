@@ -22,8 +22,8 @@ public:
         std::function<void()> back;
         // Stream an episode's narrated audio. Returns false when playback could not start.
         std::function<bool(const std::string& url, const std::string& title)> play_url;
-        // Ask Nabo to play one song (voice-equivalent request). False when Nabo is busy.
-        std::function<bool(const std::string& title, const std::string& artist)> play_track;
+        // Play the episode's songs from index on (full songs resolved on the NAS).
+        std::function<bool(int episode, int index, int count)> play_track;
         std::function<void()> stop;
         std::function<int()> level;  // 0..100 output level while music plays
         std::function<std::shared_ptr<LvglFont>()> text_font;  // full CJK font, may be null

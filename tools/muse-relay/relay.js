@@ -27,6 +27,9 @@ const MAX_EPISODES = 30;
 const MAX_SCRIPT = 3000;
 const MAX_TRACKS = 30;
 const PODCAST_SENDERS = ['每日电台'];
+// NAS NetEase music API (xiaozhi-netease-nabo, host network) that turns a song name
+// into a full-length playable URL — the same lookup daily recommendations use.
+const MUSIC_API_URL = (process.env.MUSIC_API_URL || 'http://172.18.0.1:3099').replace(/\/+$/, '');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -349,6 +352,35 @@ function inboxResponse(url) {
   };
 }
 
+// Resolve one episode track to a playable full-length NetEase URL for the Tab5.
+async function podcastTrack(url) {
+  const episodeId = Number(url.searchParams.get('episode'));
+  const index = Number(url.searchParams.get('index'));
+  const episode = podcasts.episodes.find((e) => e.id === episodeId);
+  if (!episode || !Number.isInteger(index) || index < 0 || index >= episode.tracks.length)
+    return { status: 404, body: { ok: false, message: 'track not found' } };
+  const track = episode.tracks[index];
+  const query = `${MUSIC_API_URL}/stream_pcm?song=${encodeURIComponent(track.title)}` +
+    `&artist=${encodeURIComponent(track.artist || '')}`;
+  const base = { episode: episodeId, index, count: episode.tracks.length, title: track.title, artist: track.artist };
+  try {
+    const r = await fetch(query, { signal: AbortSignal.timeout(15000) });
+    const j = await r.json().catch(() => ({}));
+    const playable = String(j.url || j.audio_url || '');
+    if (!r.ok || !j.success || !/^https?:\/\//.test(playable)) {
+      console.log('podcast track unavailable', JSON.stringify({ episode: episodeId, index, title: track.title }));
+      return { status: 404, body: { ok: false, message: j.message || 'song not found', ...base } };
+    }
+    console.log('podcast track', JSON.stringify({ episode: episodeId, index, title: j.title || track.title }));
+    return { status: 200, body: { ok: true, ...base, title: j.title || track.title,
+      artist: j.artist || track.artist, url: playable, song_id: String(j.song_id || ''),
+      duration_ms: Number(j.duration_ms) || 0 } };
+  } catch (e) {
+    console.error('podcast track lookup failed', e.message);
+    return { status: 502, body: { ok: false, message: 'music service unavailable', ...base } };
+  }
+}
+
 function podcastResponse(url) {
   const limit = Math.min(10, Math.max(1, Number(url.searchParams.get('limit')) || 6));
   return { latest_id: podcasts.next_id - 1, episodes: podcasts.episodes.slice(-limit).reverse() };
@@ -436,6 +468,10 @@ const server = http.createServer(async (req, res) => {
 
     if (parts[0] === 'podcast' && req.method === 'GET') {
       if (!tokenOk(parts[1])) return send(res, 404, 'not found');
+      if (parts[2] === 'track') {
+        const r = await podcastTrack(url);
+        return send(res, r.status, r.body);
+      }
       return send(res, 200, podcastResponse(url));
     }
 
@@ -460,6 +496,10 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, inboxResponse(url));
       }
       if (parts[1] === 'podcast' && req.method === 'GET') {
+        if (parts[2] === 'track') {
+          const r = await podcastTrack(url);
+          return send(res, r.status, r.body);
+        }
         return send(res, 200, podcastResponse(url));
       }
       if (parts[1] === 'info' && req.method === 'GET') {

@@ -54,7 +54,8 @@ public:
         std::function<void()> muse_opened;
         // Muse 音乐电台: stream an episode's narrated audio / ask Nabo to play a song.
         std::function<bool(const std::string& url, const std::string& title)> podcast_play_url;
-        std::function<bool(const std::string& title, const std::string& artist)> podcast_play_track;
+        // Play an episode's tracks from index (NAS resolves each song on NetEase).
+        std::function<bool(int episode, int index, int count)> podcast_play;
     };
 
     explicit Tab5NativeApps(lv_obj_t* screen);

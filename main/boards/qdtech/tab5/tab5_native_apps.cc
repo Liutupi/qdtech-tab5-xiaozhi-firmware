@@ -228,9 +228,8 @@ void Tab5NativeApps::OpenPodcast() {
         callbacks.play_url = [this](const std::string& url, const std::string& title) {
             return actions_.podcast_play_url ? actions_.podcast_play_url(url, title) : false;
         };
-        callbacks.play_track = [this](const std::string& title, const std::string& artist) {
-            return actions_.podcast_play_track ? actions_.podcast_play_track(title, artist)
-                                               : false;
+        callbacks.play_track = [this](int episode, int index, int count) {
+            return actions_.podcast_play ? actions_.podcast_play(episode, index, count) : false;
         };
         callbacks.stop = [this] { Schedule(actions_.radio_stop); };
         callbacks.level = [this] { return actions_.radio_level ? actions_.radio_level() : 0; };
@@ -532,7 +531,7 @@ void Tab5NativeApps::SetMuseInbox(const tab5_muse::Snapshot& snapshot) {
         else if (!snapshot.ok)
             std::snprintf(text, sizeof(text), "NAS 暂时无响应，显示的是上次内容");
         else
-            std::snprintf(text, sizeof(text), "共 %u 条 · 未读 %d · 每 2 分钟自动刷新",
+            std::snprintf(text, sizeof(text), "共 %u 条 · 未读 %d · 每分钟自动刷新",
                           unsigned(snapshot.messages.size()), unread);
         SetLabelTextIfChanged(muse_status_, text);
     }

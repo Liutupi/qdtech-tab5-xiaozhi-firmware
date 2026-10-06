@@ -78,6 +78,12 @@ public:
         if (delay_ms != 800) __builtin_trap();
         ++next_requests;
     }
+    // Muse 电台 episode session (off unless a case turns it on).
+    bool podcast_session_ = false;
+    uint32_t podcast_generation_ = 0;
+    int podcast_index_ = 0;
+    int podcast_starts = 0, podcast_started_index = -1;
+    void StartPodcastTrack(int index) { ++podcast_starts; podcast_started_index = index; }
 ''' + ended_method + r'''
     void Emit(const char* station, const char* state, const char* meta) {
         auto* native_display = &display;
@@ -179,6 +185,30 @@ int main() {
     board.Emit("新歌", "Stopped", "Music ended");
     app.Drain();
     if (board.next_requests != 1) return 12;
+
+    // A Muse 电台 track that ends naturally advances the episode (next index) and
+    // never triggers the daily-recommendation continuation.
+    board.music_request_generation_ = 30;
+    board.music_play_count_ = 12;
+    board.music_track_.Begin(30, "电台第2首", "");
+    board.radio_service_.stream_generation = 40;
+    board.podcast_session_ = true;
+    board.podcast_generation_ = 30;
+    board.podcast_index_ = 1;
+    board.music_continuous_ = true;
+    board.music_continuous_session_ = true;
+    board.Emit("电台第2首", "Stopped", "Music ended");
+    app.Drain();
+    if (board.podcast_starts != 1 || board.podcast_started_index != 2 ||
+        board.next_requests != 1) return 16;
+    // A different (non-episode) song ending does not advance the episode.
+    board.music_request_generation_ = 31;
+    board.music_track_.Begin(31, "别的歌", "");
+    board.music_continuous_ = false;
+    board.Emit("别的歌", "Stopped", "Music ended");
+    app.Drain();
+    if (board.podcast_starts != 1) return 17;
+    board.podcast_session_ = false;
 
     // Truncation must preserve a complete UTF-8 prefix of an oversized title.
     std::string long_title(766, 'a');

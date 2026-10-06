@@ -3,6 +3,7 @@
 #include <cJSON.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 
 #include <memory>
 #include <algorithm>
@@ -22,11 +23,12 @@ constexpr size_t kMaxJsonBytes = 32 * 1024;
 constexpr size_t kMaxPodcastBytes = 96 * 1024;  // up to 6 episodes with full scripts
 constexpr int kPodcastLimit = 6;
 constexpr int kTimeoutMs = 4000;
-constexpr int kPollSeconds = 120;
+constexpr int kPollSeconds = 60;
 constexpr int kMusicPollMs = 4000;
 constexpr int kFirstPollDelayMs = 20000;  // let Wi-Fi and the XiaoZhi session settle first
 
-std::string HttpGet(const std::string& url, int* status_out, size_t max_bytes = kMaxJsonBytes) {
+std::string HttpGet(const std::string& url, int* status_out, size_t max_bytes = kMaxJsonBytes,
+                    int timeout_ms = kTimeoutMs) {
     *status_out = 0;
     auto network = Board::GetInstance().GetNetwork();
     if (!network)
@@ -34,7 +36,7 @@ std::string HttpGet(const std::string& url, int* status_out, size_t max_bytes = 
     auto http = network->CreateHttp(0);
     if (!http)
         return {};
-    http->SetTimeout(kTimeoutMs);
+    http->SetTimeout(timeout_ms);
     http->SetHeader("Accept", "application/json");
     if (!http->Open("GET", url))
         return {};
@@ -107,6 +109,71 @@ void Inbox::Start(Listener listener, MusicListener music_listener) {
 void Inbox::RequestRefresh() {
     if (task_)
         xTaskNotifyGive(task_);
+}
+
+void Inbox::ResolveTrack(int episode, int index, TrackCallback done) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        track_pending_ = true;
+        track_episode_ = episode;
+        track_index_ = index;
+        track_done_ = std::move(done);
+    }
+    RequestRefresh();
+}
+
+// Inbox task: the NAS looks the song up on NetEase (a few seconds), so allow a
+// longer timeout than the regular polls.
+void Inbox::ServeTrackRequest() {
+    int episode = 0, index = 0;
+    std::string url, host;
+    TrackCallback done;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!track_pending_)
+            return;
+        track_pending_ = false;
+        episode = track_episode_;
+        index = track_index_;
+        done = std::move(track_done_);
+        url = snapshot_.url;
+        host = snapshot_.host;
+    }
+    std::string endpoint;
+    if (url.empty()) {
+        endpoint = "http://" + host + "/tab5/podcast/track";
+    } else {
+        const auto path = url.find("/inbox/");
+        if (path == std::string::npos)
+            return;
+        endpoint = url;
+        endpoint.replace(path, 7, "/podcast/");
+        endpoint += "/track";
+    }
+    int status = 0;
+    const std::string body =
+        HttpGet(endpoint + "?episode=" + std::to_string(episode) + "&index=" + std::to_string(index),
+                &status, 8 * 1024, 20000);
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
+        body.empty() ? nullptr : cJSON_ParseWithLength(body.data(), body.size()), cJSON_Delete);
+    ResolvedTrack track;
+    track.episode = episode;
+    track.index = index;
+    if (cJSON_IsObject(root.get())) {
+        auto* count = cJSON_GetObjectItem(root.get(), "count");
+        track.count = cJSON_IsNumber(count) ? count->valueint : 0;
+        track.title = JsonString(root.get(), "title");
+        track.artist = JsonString(root.get(), "artist");
+        track.url = JsonString(root.get(), "url");
+        track.song_id = JsonString(root.get(), "song_id");
+        track.ok = status == 200 && cJSON_IsTrue(cJSON_GetObjectItem(root.get(), "ok")) &&
+                   (track.url.rfind("https://", 0) == 0 || track.url.rfind("http://", 0) == 0) &&
+                   track.url.size() <= 1200 && track.song_id.size() <= 20;
+    }
+    ESP_LOGI(TAG, "podcast track %d/%d %s (http %d)", episode, index, track.ok ? "ok" : "unavailable",
+             status);
+    if (done)
+        done(track);
 }
 
 void Inbox::MarkAllSeen() {
@@ -208,13 +275,26 @@ void Inbox::TaskEntry(void* arg) { static_cast<Inbox*>(arg)->Run(); }
 
 void Inbox::Run() {
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kFirstPollDelayMs));
+    // The inbox/podcast poll runs on a wall-clock interval: each tunnel request
+    // costs ~3 s of TLS setup, so counting music polls stretched it to ~5 min.
+    int64_t last_poll_us = 0;
+    bool refresh = true;
     while (true) {
-        Poll();
-        for (int i = 0; i < kPollSeconds * 1000 / kMusicPollMs; ++i) {
-            PollMusic();
-            if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kMusicPollMs)) > 0)
-                break;
+        // A pending track lookup (user tapped play) goes first; it is not a reason
+        // to re-poll the inbox.
+        bool track_wake = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            track_wake = track_pending_;
         }
+        ServeTrackRequest();
+        const int64_t now = esp_timer_get_time();
+        if ((refresh && !track_wake) || now - last_poll_us >= int64_t(kPollSeconds) * 1000000) {
+            Poll();
+            last_poll_us = esp_timer_get_time();
+        }
+        PollMusic();
+        refresh = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kMusicPollMs)) > 0;
     }
 }
 

@@ -355,7 +355,7 @@ void Tab5PodcastPage::PlaySelected() {
         return;
     }
     if (!it->tracks.empty())
-        PlayTrack(0);
+        PlayTrack(0);  // whole episode in order
 }
 
 void Tab5PodcastPage::PlayTrack(size_t index) {
@@ -365,10 +365,10 @@ void Tab5PodcastPage::PlayTrack(size_t index) {
     if (it == episodes.end() || index >= it->tracks.size() || !callbacks_.play_track)
         return;
     const auto& t = it->tracks[index];
-    const bool ok = callbacks_.play_track(std::string(t.title.data(), t.title.size()),
-                                          std::string(t.artist.data(), t.artist.size()));
-    const std::string text = ok ? "正在请 Nabo 播放《" + tab5_podcast::DisplayText(t.title) + "》…"
-                                : std::string("Nabo 正在忙，稍后再点一次");
+    const bool ok = callbacks_.play_track(it->id, int(index), int(it->tracks.size()));
+    const std::string text = ok ? "正在从网易云获取《" + tab5_podcast::DisplayText(t.title) +
+                                      "》，之后按歌单顺序播放…"
+                                : std::string("暂时无法播放，稍后再试");
     SetStatus(text.c_str(), ok ? kViolet : kPink);
 }
 

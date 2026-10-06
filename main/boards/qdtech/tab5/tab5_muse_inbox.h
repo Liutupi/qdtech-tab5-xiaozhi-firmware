@@ -31,6 +31,18 @@ struct MusicCommand {
     bool continuous = false;
 };
 
+// One Muse 电台 track resolved by the NAS (full-length NetEase URL).
+struct ResolvedTrack {
+    bool ok = false;
+    int episode = 0;
+    int index = 0;
+    int count = 0;
+    std::string title;
+    std::string artist;
+    std::string url;
+    std::string song_id;
+};
+
 struct Snapshot {
     bool ok = false;          // last poll succeeded
     bool ever_ok = false;     // at least one poll succeeded since boot
@@ -55,10 +67,14 @@ class Inbox {
 public:
     using Listener = std::function<void(const Snapshot&)>;
     using MusicListener = std::function<void(const MusicCommand&)>;
+    using TrackCallback = std::function<void(const ResolvedTrack&)>;
 
     static Inbox& GetInstance();
     void Start(Listener listener, MusicListener music_listener = {});
     void RequestRefresh();
+    // Asks the relay to resolve one episode track; done runs on the inbox task.
+    // A newer request replaces a pending one.
+    void ResolveTrack(int episode, int index, TrackCallback done);
     void MarkAllSeen();
     Snapshot Current();
     void SetHost(const std::string& host);
@@ -71,6 +87,7 @@ private:
     void Run();
     bool Poll();
     bool PollMusic();
+    void ServeTrackRequest();
     bool FetchPodcasts(const std::string& endpoint, tab5_podcast::EpisodeList* out);
     bool Discover();
     int failures_ = 0;
@@ -78,6 +95,10 @@ private:
     std::string last_music_id_;
     int music_failures_ = 0;
     int loaded_podcast_id_ = -1;
+    bool track_pending_ = false;
+    int track_episode_ = 0;
+    int track_index_ = 0;
+    TrackCallback track_done_;
 
     std::mutex mutex_;
     Snapshot snapshot_;

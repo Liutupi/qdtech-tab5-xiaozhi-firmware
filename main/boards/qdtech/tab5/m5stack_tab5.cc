@@ -322,10 +322,69 @@ private:
     int64_t music_next_last_attempt_us_ = 0;
     esp_timer_handle_t music_next_timer_ = nullptr;
     esp_timer_handle_t ask_song_timer_ = nullptr;
-    // Muse 电台: song request text handed from the LVGL task to the main task.
-    esp_timer_handle_t podcast_timer_ = nullptr;
-    std::mutex podcast_request_mutex_;
-    std::string podcast_request_;
+    // Muse 电台 playback session (main task only): plays an episode's tracks in order.
+    // Each track is resolved by the NAS (full-length NetEase URL) and played like a
+    // daily-recommendation song; a natural end advances to the next track.
+    bool podcast_session_ = false;
+    int podcast_episode_ = 0;
+    int podcast_index_ = 0;
+    int podcast_count_ = 0;
+    int podcast_misses_ = 0;
+    uint32_t podcast_request_seq_ = 0;
+    uint32_t podcast_generation_ = 0;
+
+    void SetPodcastStatus(const char* line) {
+        if (display_)
+            static_cast<QdtechTab5Display*>(display_)->SetMusicInfo("Muse 电台", "", line);
+    }
+
+    void StartPodcastTrack(int index) {
+        if (!podcast_session_)
+            return;
+        if (index >= podcast_count_) {
+            podcast_session_ = false;
+            SetPodcastStatus("本期歌单播完了");
+            return;
+        }
+        podcast_index_ = index;
+        const uint32_t seq = ++podcast_request_seq_;
+        ReplaceMusicSource([this] {
+            EndContinuousSession();
+            if (native_radio_ready_.load())
+                radio_service_.Stop();
+        });
+        char line[48];
+        std::snprintf(line, sizeof(line), "正在获取第 %d/%d 首…", index + 1, podcast_count_);
+        SetPodcastStatus(line);
+        ESP_LOGI("Tab5Podcast", "episode %d track %d/%d", podcast_episode_, index + 1,
+                 podcast_count_);
+        tab5_muse::Inbox::GetInstance().ResolveTrack(
+            podcast_episode_, index, [this, seq](const tab5_muse::ResolvedTrack& track) {
+                Application::GetInstance().Schedule(
+                    [this, seq, track] { OnPodcastTrack(seq, track); });
+            });
+    }
+
+    void OnPodcastTrack(uint32_t seq, const tab5_muse::ResolvedTrack& track) {
+        if (!podcast_session_ || seq != podcast_request_seq_)
+            return;  // stopped, or a newer tap replaced this request
+        std::string result = "Music URL was NOT started: song unavailable.";
+        if (track.ok)
+            result = PlayMusicRequest(track.title, track.artist, track.url, "", track.song_id,
+                                      false);
+        if (result.rfind("Music URL was NOT started", 0) == 0) {
+            ESP_LOGW("Tab5Podcast", "track %d unavailable: %s", track.index + 1, result.c_str());
+            if (++podcast_misses_ >= 3 || podcast_index_ + 1 >= podcast_count_) {
+                podcast_session_ = false;
+                SetPodcastStatus("暂时找不到这些歌，请稍后再试");
+                return;
+            }
+            StartPodcastTrack(podcast_index_ + 1);  // skip a song NetEase cannot play
+            return;
+        }
+        podcast_misses_ = 0;
+        podcast_generation_ = music_request_generation_.load();
+    }
     static constexpr const char* kMusicNextCommand = "继续播放下一首每日推荐";
     static constexpr int kMusicNextMaxAttempts = 3;
     static constexpr int64_t kMusicNextAnswerWaitUs = 40LL * 1000 * 1000;
@@ -415,13 +474,24 @@ private:
         // RequestNextSong updates the display and timer. Keep both off the
         // decoder task, and discard this event if Stop/Next or a new song won.
         Application::GetInstance().Schedule([this, stream_generation, generation, play_count] {
-            std::lock_guard<std::mutex> guard(music_track_mutex_);
-            if (radio_service_.GetStreamGeneration() != stream_generation ||
-                music_request_generation_.load() != generation ||
-                !music_track_.IsCurrent(generation) || music_play_count_.load() != play_count ||
-                !music_continuous_session_.load() || !music_continuous_.exchange(false))
-                return;
-            RequestNextSong(800);
+            bool next_podcast = false;
+            {
+                std::lock_guard<std::mutex> guard(music_track_mutex_);
+                if (radio_service_.GetStreamGeneration() != stream_generation ||
+                    music_request_generation_.load() != generation ||
+                    !music_track_.IsCurrent(generation) || music_play_count_.load() != play_count)
+                    return;
+                // A Muse 电台 track that played to the end: continue with the episode.
+                next_podcast = podcast_session_ && generation == podcast_generation_;
+                if (!next_podcast) {
+                    if (!music_continuous_session_.load() || !music_continuous_.exchange(false))
+                        return;
+                    RequestNextSong(800);
+                }
+            }
+            // StartPodcastTrack takes music_track_mutex_ itself.
+            if (next_podcast)
+                StartPodcastTrack(podcast_index_ + 1);
         });
     }
 
@@ -2217,51 +2287,16 @@ public:
                 });
                 return true;
             };
-            actions.podcast_play_track = [this](const std::string& title,
-                                                const std::string& artist) {
-                if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle)
+            actions.podcast_play = [this](int episode, int index, int count) {
+                if (episode <= 0 || index < 0 || count <= 0 || index >= count)
                     return false;
-                // Same as a spoken request, sent as text: the NAS music service finds
-                // the song and streams it. Stop current music first so Nabo's short
-                // reply is heard and the new song replaces it cleanly.
-                std::string text = "播放歌曲《" + title + "》";
-                if (!artist.empty())
-                    text += "，歌手是" + artist;
-                {
-                    std::lock_guard<std::mutex> lock(podcast_request_mutex_);
-                    podcast_request_ = std::move(text);
-                }
-                ReplaceMusicSource([this] {
-                    EndContinuousSession();
-                    if (native_radio_ready_.load())
-                        radio_service_.Stop();
+                Application::GetInstance().Schedule([this, episode, index, count] {
+                    podcast_session_ = true;
+                    podcast_episode_ = episode;
+                    podcast_count_ = count;
+                    podcast_misses_ = 0;
+                    StartPodcastTrack(index);
                 });
-                if (!podcast_timer_) {
-                    esp_timer_create_args_t args = {};
-                    args.arg = this;
-                    args.callback = [](void* arg) {
-                        auto* self = static_cast<QdtechTab5Board*>(arg);
-                        Application::GetInstance().Schedule([self] {
-                            std::string request;
-                            {
-                                std::lock_guard<std::mutex> lock(self->podcast_request_mutex_);
-                                request.swap(self->podcast_request_);
-                            }
-                            if (!request.empty() &&
-                                !Application::GetInstance().InvokeTextCommand(request))
-                                ESP_LOGW("Tab5Podcast", "song request dropped: Nabo busy");
-                        });
-                    };
-                    args.dispatch_method = ESP_TIMER_TASK;
-                    args.name = "podcast_song";
-                    if (esp_timer_create(&args, &podcast_timer_) != ESP_OK) {
-                        podcast_timer_ = nullptr;
-                        return false;
-                    }
-                }
-                esp_timer_stop(podcast_timer_);
-                esp_timer_start_once(podcast_timer_, 600 * 1000);
-                ESP_LOGI("Tab5Podcast", "song request: %s - %s", title.c_str(), artist.c_str());
                 return true;
             };
             actions.muse_refresh = [] { tab5_muse::Inbox::GetInstance().RequestRefresh(); };
