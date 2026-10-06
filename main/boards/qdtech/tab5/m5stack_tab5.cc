@@ -322,6 +322,10 @@ private:
     int64_t music_next_last_attempt_us_ = 0;
     esp_timer_handle_t music_next_timer_ = nullptr;
     esp_timer_handle_t ask_song_timer_ = nullptr;
+    // Muse 电台: song request text handed from the LVGL task to the main task.
+    esp_timer_handle_t podcast_timer_ = nullptr;
+    std::mutex podcast_request_mutex_;
+    std::string podcast_request_;
     static constexpr const char* kMusicNextCommand = "继续播放下一首每日推荐";
     static constexpr int kMusicNextMaxAttempts = 3;
     static constexpr int64_t kMusicNextAnswerWaitUs = 40LL * 1000 * 1000;
@@ -2206,6 +2210,60 @@ public:
             actions.nes_rom_name = [this](int i) { return fc_emulator_service_.RomNameAt(i); };
             actions.nes_rom_index = [this] { return fc_emulator_service_.CurrentRomIndex(); };
             actions.firmware_action = [] { Tab5Ota::GetInstance().HandleButton(); };
+            actions.podcast_play_url = [this](const std::string& url, const std::string& title) {
+                Application::GetInstance().Schedule([this, url, title] {
+                    const auto result = PlayMusicRequest(title, "Muse 电台", url, "", "", false);
+                    ESP_LOGI("Tab5Podcast", "episode audio: %s", result.c_str());
+                });
+                return true;
+            };
+            actions.podcast_play_track = [this](const std::string& title,
+                                                const std::string& artist) {
+                if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle)
+                    return false;
+                // Same as a spoken request, sent as text: the NAS music service finds
+                // the song and streams it. Stop current music first so Nabo's short
+                // reply is heard and the new song replaces it cleanly.
+                std::string text = "播放歌曲《" + title + "》";
+                if (!artist.empty())
+                    text += "，歌手是" + artist;
+                {
+                    std::lock_guard<std::mutex> lock(podcast_request_mutex_);
+                    podcast_request_ = std::move(text);
+                }
+                ReplaceMusicSource([this] {
+                    EndContinuousSession();
+                    if (native_radio_ready_.load())
+                        radio_service_.Stop();
+                });
+                if (!podcast_timer_) {
+                    esp_timer_create_args_t args = {};
+                    args.arg = this;
+                    args.callback = [](void* arg) {
+                        auto* self = static_cast<QdtechTab5Board*>(arg);
+                        Application::GetInstance().Schedule([self] {
+                            std::string request;
+                            {
+                                std::lock_guard<std::mutex> lock(self->podcast_request_mutex_);
+                                request.swap(self->podcast_request_);
+                            }
+                            if (!request.empty() &&
+                                !Application::GetInstance().InvokeTextCommand(request))
+                                ESP_LOGW("Tab5Podcast", "song request dropped: Nabo busy");
+                        });
+                    };
+                    args.dispatch_method = ESP_TIMER_TASK;
+                    args.name = "podcast_song";
+                    if (esp_timer_create(&args, &podcast_timer_) != ESP_OK) {
+                        podcast_timer_ = nullptr;
+                        return false;
+                    }
+                }
+                esp_timer_stop(podcast_timer_);
+                esp_timer_start_once(podcast_timer_, 600 * 1000);
+                ESP_LOGI("Tab5Podcast", "song request: %s - %s", title.c_str(), artist.c_str());
+                return true;
+            };
             actions.muse_refresh = [] { tab5_muse::Inbox::GetInstance().RequestRefresh(); };
             actions.muse_opened = [] { tab5_muse::Inbox::GetInstance().MarkAllSeen(); };
             native_display->SetAppsActions(std::move(actions), [this] {

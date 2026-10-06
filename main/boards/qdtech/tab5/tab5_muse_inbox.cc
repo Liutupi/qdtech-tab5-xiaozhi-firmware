@@ -19,12 +19,14 @@ namespace {
 const char* TAG = "Tab5Muse";
 constexpr const char* kDefaultHost = "192.168.3.200:8787";
 constexpr size_t kMaxJsonBytes = 32 * 1024;
+constexpr size_t kMaxPodcastBytes = 96 * 1024;  // up to 6 episodes with full scripts
+constexpr int kPodcastLimit = 6;
 constexpr int kTimeoutMs = 4000;
 constexpr int kPollSeconds = 120;
 constexpr int kMusicPollMs = 4000;
 constexpr int kFirstPollDelayMs = 20000;  // let Wi-Fi and the XiaoZhi session settle first
 
-std::string HttpGet(const std::string& url, int* status_out) {
+std::string HttpGet(const std::string& url, int* status_out, size_t max_bytes = kMaxJsonBytes) {
     *status_out = 0;
     auto network = Board::GetInstance().GetNetwork();
     if (!network)
@@ -39,13 +41,13 @@ std::string HttpGet(const std::string& url, int* status_out) {
     const auto status = http->GetStatusCode();
     *status_out = status ? *status : 0;
     std::string body;
-    if (*status_out == 200 && http->GetBodyLength() <= kMaxJsonBytes) {
+    if (*status_out == 200 && http->GetBodyLength() <= max_bytes) {
         char buffer[1024];
-        while (body.size() <= kMaxJsonBytes) {
+        while (body.size() <= max_bytes) {
             auto read = http->Read(buffer, sizeof(buffer));
             if (!read || *read == 0)
                 break;
-            if (body.size() + *read > kMaxJsonBytes) {
+            if (body.size() + *read > max_bytes) {
                 body.clear();
                 break;
             }
@@ -273,6 +275,47 @@ bool Inbox::PollMusic() {
     return true;
 }
 
+bool Inbox::FetchPodcasts(const std::string& endpoint, tab5_podcast::EpisodeList* out) {
+    int status = 0;
+    const std::string body = HttpGet(endpoint + "?limit=" + std::to_string(kPodcastLimit), &status,
+                                     kMaxPodcastBytes);
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
+        body.empty() ? nullptr : cJSON_ParseWithLength(body.data(), body.size()), cJSON_Delete);
+    auto* list = root ? cJSON_GetObjectItem(root.get(), "episodes") : nullptr;
+    if (status != 200 || !cJSON_IsArray(list)) {
+        ESP_LOGW(TAG, "podcast fetch failed (http %d, %u bytes)", status, unsigned(body.size()));
+        return false;
+    }
+    cJSON* item = nullptr;
+    cJSON_ArrayForEach (item, list) {
+        auto* id = cJSON_GetObjectItem(item, "id");
+        if (!cJSON_IsNumber(id) || out->size() >= size_t(kPodcastLimit))
+            continue;
+        tab5_podcast::Episode e;
+        e.id = id->valueint;
+        e.title = tab5_podcast::ToStr(JsonString(item, "title"));
+        e.script = tab5_podcast::ToStr(JsonString(item, "script"));
+        e.from = tab5_podcast::ToStr(JsonString(item, "from"));
+        e.time = tab5_podcast::ToStr(JsonString(item, "time"));
+        e.audio_url = tab5_podcast::ToStr(JsonString(item, "audio_url"));
+        if (!e.audio_url.empty() && e.audio_url.rfind("https://", 0) != 0 &&
+            e.audio_url.rfind("http://", 0) != 0)
+            e.audio_url.clear();
+        auto* tracks = cJSON_GetObjectItem(item, "tracks");
+        cJSON* t = nullptr;
+        cJSON_ArrayForEach (t, tracks) {
+            if (e.tracks.size() >= tab5_podcast::kMaxTracks)
+                break;
+            tab5_podcast::Track track{tab5_podcast::ToStr(JsonString(t, "title")),
+                                      tab5_podcast::ToStr(JsonString(t, "artist"))};
+            if (!track.title.empty())
+                e.tracks.push_back(std::move(track));
+        }
+        out->push_back(std::move(e));
+    }
+    return true;
+}
+
 bool Inbox::Poll() {
     std::string host, url;
     {
@@ -287,6 +330,21 @@ bool Inbox::Poll() {
         body.empty() ? nullptr : cJSON_ParseWithLength(body.data(), body.size()), cJSON_Delete);
     auto* list = root ? cJSON_GetObjectItem(root.get(), "messages") : nullptr;
     const bool ok = cJSON_IsArray(list);
+
+    // Music-radio episodes are fetched (network IO, outside the lock) only when the
+    // relay's newest episode id changes. podcast_id < 0: relay has no podcast support.
+    // loaded_podcast_id_ is only touched by this task.
+    auto* podcast_latest = ok ? cJSON_GetObjectItem(root.get(), "podcast_latest_id") : nullptr;
+    const int podcast_id = cJSON_IsNumber(podcast_latest) ? podcast_latest->valueint : -1;
+    auto fetched_episodes = tab5_podcast::MakeEpisodes();
+    bool podcast_fetched = false;
+    if (podcast_id >= 0 && podcast_id != loaded_podcast_id_) {
+        std::string podcast_endpoint = endpoint;
+        const auto path = podcast_endpoint.find("/inbox");
+        if (path != std::string::npos)
+            podcast_endpoint.replace(path, 6, "/podcast");
+        podcast_fetched = FetchPodcasts(podcast_endpoint, fetched_episodes.get());
+    }
 
     Snapshot copy;
     bool changed = false;
@@ -312,6 +370,41 @@ bool Inbox::Poll() {
                 m.from = JsonString(item, "from");
                 m.time = JsonString(item, "time");
                 messages.push_back(std::move(m));
+            }
+            if (podcast_fetched) {
+                loaded_podcast_id_ = podcast_id;
+                snapshot_.podcast_latest_id = podcast_id;
+                ESP_LOGI(TAG, "podcast latest=%d episodes=%u", podcast_id,
+                         unsigned(fetched_episodes->size()));
+                snapshot_.episodes = std::move(fetched_episodes);
+                changed = true;
+            } else if (podcast_id < 0) {
+                // Relay without podcast support: derive episodes from daily-radio posts.
+                int newest = 0;
+                size_t count = 0;
+                for (const auto& m : messages)
+                    if (tab5_podcast::IsRadioPost(m.from, m.title)) {
+                        newest = count++ ? newest : m.id;
+                    }
+                const size_t have = snapshot_.episodes ? snapshot_.episodes->size() : 0;
+                if (newest != snapshot_.podcast_latest_id || count != have) {
+                    auto episodes = tab5_podcast::MakeEpisodes();
+                    for (const auto& m : messages) {
+                        if (!tab5_podcast::IsRadioPost(m.from, m.title))
+                            continue;
+                        tab5_podcast::Episode e;
+                        e.id = m.id;
+                        e.title = tab5_podcast::ToStr(m.title);
+                        e.script = tab5_podcast::ToStr(m.body);
+                        e.from = tab5_podcast::ToStr(m.from);
+                        e.time = tab5_podcast::ToStr(m.time);
+                        e.tracks = tab5_podcast::ParseTracks(m.body);
+                        episodes->push_back(std::move(e));
+                    }
+                    snapshot_.podcast_latest_id = newest;
+                    snapshot_.episodes = std::move(episodes);
+                    changed = true;
+                }
             }
             auto* latest = cJSON_GetObjectItem(root.get(), "latest_id");
             const int latest_id = cJSON_IsNumber(latest) ? latest->valueint : 0;

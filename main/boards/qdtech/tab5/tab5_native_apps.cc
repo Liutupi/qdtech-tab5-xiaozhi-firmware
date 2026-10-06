@@ -151,6 +151,7 @@ void Tab5NativeApps::Show(lv_obj_t* page) {
         lv_obj_add_flag(candidate, LV_OBJ_FLAG_HIDDEN);
     }
     if (ir_page_) ir_page_->Hide();
+    if (podcast_page_) podcast_page_->Hide();
     if (page) {
         lv_obj_remove_flag(page, LV_OBJ_FLAG_HIDDEN);
         // Keep the panel clickable so taps don't fall through to the
@@ -214,13 +215,55 @@ void Tab5NativeApps::OpenIr() {
         if (!candidate) continue;
         lv_obj_add_flag(candidate, LV_OBJ_FLAG_HIDDEN);
     }
+    if (podcast_page_) podcast_page_->Hide();
     ir_page_->Show();
     lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
 }
 
+void Tab5NativeApps::OpenPodcast() {
+    if (!podcast_page_) {
+        Tab5PodcastPage::Callbacks callbacks;
+        callbacks.back = [this] { OpenApps(); };
+        callbacks.play_url = [this](const std::string& url, const std::string& title) {
+            return actions_.podcast_play_url ? actions_.podcast_play_url(url, title) : false;
+        };
+        callbacks.play_track = [this](const std::string& title, const std::string& artist) {
+            return actions_.podcast_play_track ? actions_.podcast_play_track(title, artist)
+                                               : false;
+        };
+        callbacks.stop = [this] { Schedule(actions_.radio_stop); };
+        callbacks.level = [this] { return actions_.radio_level ? actions_.radio_level() : 0; };
+        callbacks.text_font = [] { return MusicTextFontOwner(); };
+        podcast_page_ = std::make_unique<Tab5PodcastPage>(root_, std::move(callbacks));
+        podcast_page_->SetEpisodes(podcast_episodes_);
+    }
+    Show(nullptr);
+    podcast_page_->SetPlayback(radio_playing_, radio_station_name_.c_str());
+    podcast_page_->Show();
+    Schedule(actions_.muse_refresh);
+}
+
+void Tab5NativeApps::UpdatePodcastEntry() {
+    if (!podcast_entry_detail_ || !podcast_entry_label_)
+        return;
+    if (!podcast_episodes_ || podcast_episodes_->empty()) {
+        SetLabelTextIfChanged(podcast_entry_detail_, "每日音乐电台");
+        SetLabelTextIfChanged(podcast_entry_label_, "等待今日节目");
+        return;
+    }
+    const auto& latest = podcast_episodes_->front();
+    const std::string title = tab5_podcast::DisplayText(latest.title);
+    SetLabelTextIfChanged(podcast_entry_detail_, title.c_str());
+    char text[64];
+    std::snprintf(text, sizeof(text), "收听 · %u 首歌", unsigned(latest.tracks.size()));
+    SetLabelTextIfChanged(podcast_entry_label_, text);
+}
+
 void Tab5NativeApps::Tick() {
     UpdateWave();
+    if (podcast_page_ && IsVisible())
+        podcast_page_->Tick();
     if (IsRadioVisible() && music_font_ != MusicTextFont())
         SyncRadioTextFont();
     if (IsVisible() && muse_page_ && !lv_obj_has_flag(muse_page_, LV_OBJ_FLAG_HIDDEN) &&
@@ -321,7 +364,8 @@ void Tab5NativeApps::BuildHome() {
     // The six destinations share one large touch target. Keep every label inside
     // the card and let taps on text bubble to the card's click handler.
     auto entry = [this](int x, int y, uint32_t accent, const char* title, const char* detail,
-                        const char* action, lv_event_cb_t callback) -> lv_obj_t* {
+                        const char* action, lv_event_cb_t callback,
+                        lv_obj_t** detail_out = nullptr) -> lv_obj_t* {
         auto* card = Card(home_page_, x, y, 554, 174, 0x142d43, 0x35627d, 26);
         lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_bg_color(card, lv_color_hex(0x234761), LV_STATE_PRESSED);
@@ -338,12 +382,22 @@ void Tab5NativeApps::BuildHome() {
             lv_obj_add_flag(label, LV_OBJ_FLAG_EVENT_BUBBLE);
         }
         lv_obj_add_event_cb(card, callback, LV_EVENT_CLICKED, this);
+        if (detail_out)
+            *detail_out = description;
         return affordance;
     };
 
-    entry(54, 140, 0x64cfe8, "设置", "网络 · 亮度 · 音量", "打开设置", [](lv_event_t* event) {
-        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenSettings();
-    });
+    // Settings stay one tap away from the Nabo home ("设置" button); this slot now
+    // holds the Muse daily music radio.
+    podcast_entry_label_ = entry(
+        54, 140, 0xf59ab5, "Muse 电台", "每日音乐电台", "等待今日节目",
+        [](lv_event_t* event) {
+            static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenPodcast();
+        },
+        &podcast_entry_detail_);
+    // Episode titles are arbitrary Chinese: use the full CJK font for the detail line.
+    lv_obj_set_style_text_font(podcast_entry_detail_, &qd_font_cjk_28, 0);
+    UpdatePodcastEntry();
     entry(672, 140, 0xf7c84d, "网络电台", "选台 · 播放 · 切换", "打开电台", [](lv_event_t* event) {
         static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenRadio();
     });
@@ -456,6 +510,10 @@ void Tab5NativeApps::RenderMuseList(const tab5_muse::Snapshot& snapshot) {
 }
 
 void Tab5NativeApps::SetMuseInbox(const tab5_muse::Snapshot& snapshot) {
+    podcast_episodes_ = snapshot.episodes;
+    UpdatePodcastEntry();
+    if (podcast_page_)
+        podcast_page_->SetEpisodes(podcast_episodes_);
     const int unread = snapshot.Unread();
     if (muse_entry_label_) {
         char text[64];
@@ -1189,6 +1247,9 @@ void Tab5NativeApps::SetRadioState(const char* station, const char* state,
     }
     SetLabelTextIfChanged(radio_state_, localized);
     radio_playing_ = state && std::strcmp(state, "Playing") == 0;
+    radio_station_name_ = station ? station : "";
+    if (podcast_page_)
+        podcast_page_->SetPlayback(radio_playing_, radio_station_name_.c_str());
     const bool play_requested = actions_.radio_play_requested
                                     ? actions_.radio_play_requested()
                                     : radio_playing_;

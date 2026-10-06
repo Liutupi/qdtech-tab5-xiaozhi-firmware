@@ -28,13 +28,16 @@ class MuseDeferredUiTests(unittest.TestCase):
 #include <string>
 #include <utility>
 #include <vector>
+#include <memory>
 
+namespace tab5_podcast { struct EpisodeList { bool empty() const { return true; } }; using SharedEpisodes = std::shared_ptr<const EpisodeList>; }
 namespace tab5_muse {
 struct Message {
     int id = 0;
     std::string title, body, from, time;
 };
 struct Snapshot {
+    tab5_podcast::SharedEpisodes episodes;
     bool ok = false, ever_ok = false;
     int latest_id = 0, seen_id = 0;
     std::string host, url, mcp_url;
@@ -73,6 +76,15 @@ public:
     tab5_muse::Snapshot rendered_;
     std::vector<std::function<void()>> scheduled_;
 
+    // Muse 电台 page is created lazily; these harnesses never open it.
+    struct PodcastStub {
+        void Tick() {}
+        void SetPlayback(bool, const char*) {}
+        template <typename T> void SetEpisodes(const T&) {}
+    };
+    PodcastStub* podcast_page_ = nullptr;
+    tab5_podcast::SharedEpisodes podcast_episodes_;
+    void UpdatePodcastEntry() {}
     bool IsVisible() const { return root_visible_; }
     void Show(FakePage* page) { root_visible_ = true; page->hidden = false; }
     void Close() { root_visible_ = false; page_.hidden = true; }

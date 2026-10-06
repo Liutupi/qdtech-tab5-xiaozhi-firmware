@@ -51,7 +51,15 @@ public:
     lv_obj_t* radio_state_ = &state_label;
     lv_obj_t* radio_meta_ = &meta_label;
     lv_obj_t* radio_play_label_ = &play_label;
+    // Muse 电台 page is created lazily; these harnesses never open it.
+    struct PodcastStub {
+        void Tick() {}
+        void SetPlayback(bool, const char*) {}
+        template <typename T> void SetEpisodes(const T&) {}
+    };
+    PodcastStub* podcast_page_ = nullptr;
     std::string current_station_name_;
+    std::string radio_station_name_;
     bool radio_playing_ = false;
     int station_refreshes = 0;
     static void SetLabelTextIfChanged(lv_obj_t* label, const char* text) {

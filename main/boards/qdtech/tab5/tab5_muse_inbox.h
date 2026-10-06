@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "tab5_podcast_model.h"
+
 // Polls the NAS "Muse inbox" relay over LAN or its public tunnel. Muse pushes short
 // messages to the relay through a public MCP endpoint; music commands share the relay.
 namespace tab5_muse {
@@ -38,6 +40,8 @@ struct Snapshot {
     std::string url;          // public inbox URL https://<tunnel>/inbox/<token>
     std::string mcp_url;      // public MCP URL (only when the tunnel is up)
     std::vector<Message> messages;  // newest first
+    int podcast_latest_id = 0;      // relay's newest music-radio episode id
+    tab5_podcast::SharedEpisodes episodes;  // newest first, shared (PSRAM), may be null
 
     int Unread() const {
         int n = 0;
@@ -67,11 +71,13 @@ private:
     void Run();
     bool Poll();
     bool PollMusic();
+    bool FetchPodcasts(const std::string& endpoint, tab5_podcast::EpisodeList* out);
     bool Discover();
     int failures_ = 0;
     std::string topic_;
     std::string last_music_id_;
     int music_failures_ = 0;
+    int loaded_podcast_id_ = -1;
 
     std::mutex mutex_;
     Snapshot snapshot_;

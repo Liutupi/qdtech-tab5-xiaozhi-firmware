@@ -116,6 +116,14 @@ public:
         std::function<void()> muse_refresh;
         std::function<void()> muse_opened;
     } actions_;
+    // Muse 电台 page is created lazily; these harnesses never open it.
+    struct PodcastStub {
+        void Tick() {}
+        void SetPlayback(bool, const char*) {}
+        template <typename T> void SetEpisodes(const T&) {}
+    };
+    PodcastStub* podcast_page_ = nullptr;
+    bool IsVisible() const { return true; }
     bool radio_visible = false;
     bool IsRadioVisible() const { return radio_visible; }
     void Show(lv_obj_t* page) {

@@ -10,6 +10,7 @@
 #include "tab5_icu_page.h"
 #include "tab5_ir_remote_page.h"
 #include "tab5_muse_inbox.h"
+#include "tab5_podcast_page.h"
 
 class LvglFont;
 
@@ -51,6 +52,9 @@ public:
         // Muse inbox: poll the NAS now / the user opened the inbox (mark read).
         std::function<void()> muse_refresh;
         std::function<void()> muse_opened;
+        // Muse 音乐电台: stream an episode's narrated audio / ask Nabo to play a song.
+        std::function<bool(const std::string& url, const std::string& title)> podcast_play_url;
+        std::function<bool(const std::string& title, const std::string& artist)> podcast_play_track;
     };
 
     explicit Tab5NativeApps(lv_obj_t* screen);
@@ -61,6 +65,7 @@ public:
     void OpenNes();
     void OpenIr();
     void OpenMuse();
+    void OpenPodcast();
     // Called with the display lock held.
     void SetMuseInbox(const tab5_muse::Snapshot& snapshot);
     void OpenIcu(int mode = -1, const std::string& external_result = "", bool result_ok = true);
@@ -110,6 +115,13 @@ private:
     void RenderMuseList(const tab5_muse::Snapshot& snapshot);
     std::unique_ptr<Tab5IcuPage> icu_page_;
     std::unique_ptr<Tab5IrRemotePage> ir_page_;
+    // Created on first open; episodes and playback state are kept here meanwhile.
+    std::unique_ptr<Tab5PodcastPage> podcast_page_;
+    tab5_podcast::SharedEpisodes podcast_episodes_;
+    std::string radio_station_name_;
+    lv_obj_t* podcast_entry_detail_ = nullptr;
+    lv_obj_t* podcast_entry_label_ = nullptr;
+    void UpdatePodcastEntry();
     lv_obj_t* game_canvas_ = nullptr;
     lv_obj_t* game_status_ = nullptr;
     lv_obj_t* game_select_panel_ = nullptr;

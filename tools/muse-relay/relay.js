@@ -15,12 +15,18 @@ const PORT = Number(process.env.PORT || 8787);
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const INBOX_FILE = path.join(DATA_DIR, 'inbox.json');
 const MUSIC_FILE = path.join(DATA_DIR, 'music.json');
+const PODCAST_FILE = path.join(DATA_DIR, 'podcasts.json');
 const TOKEN_FILE = path.join(DATA_DIR, 'token.txt');
 const TUNNEL_LOG = process.env.TUNNEL_LOG || path.join(DATA_DIR, 'tunnel.log');
 const MAX_MESSAGES = 50;
 const MAX_TITLE = 40;
 const MAX_BODY = 600;
 const MAX_REQUEST_BYTES = 64 * 1024;
+// Daily Muse music-radio episodes (title + script + track list, optional audio URL).
+const MAX_EPISODES = 30;
+const MAX_SCRIPT = 3000;
+const MAX_TRACKS = 30;
+const PODCAST_SENDERS = ['每日电台'];
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -45,6 +51,15 @@ function loadInbox() {
   return { next_id: 1, messages: [] };
 }
 let inbox = loadInbox();
+let podcasts = loadPodcasts();
+if (!podcasts) {
+  // First start with podcast support: seed from daily-radio posts already in the inbox.
+  podcasts = { next_id: 1, episodes: [] };
+  for (const m of inbox.messages.filter(isRadioPost))
+    podcasts.episodes.push({ id: podcasts.next_id++, title: m.title, script: m.body, tracks: parseTracks(m.body),
+                             audio_url: '', from: m.from, time: m.time });
+  savePodcasts();
+}
 let music = null;
 try { music = JSON.parse(fs.readFileSync(MUSIC_FILE, 'utf8')); } catch {}
 
@@ -61,6 +76,68 @@ function queueMusic(value) {
   fs.renameSync(MUSIC_FILE + '.tmp', MUSIC_FILE);
   console.log('music queued', JSON.stringify({ id: music.id, title, artist }));
   return music.id;
+}
+
+function loadPodcasts() {
+  try {
+    const data = JSON.parse(fs.readFileSync(PODCAST_FILE, 'utf8'));
+    if (Array.isArray(data.episodes) && Number.isInteger(data.next_id)) return data;
+  } catch {}
+  return null;
+}
+
+function savePodcasts() {
+  const tmp = PODCAST_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(podcasts, null, 1));
+  fs.renameSync(tmp, PODCAST_FILE);
+}
+
+// "1.《歌名》— 歌手" / "2. 《歌名》 - 歌手" lines from a plain-text daily radio post.
+function parseTracks(text) {
+  const tracks = [];
+  for (const line of String(text || '').split('\n')) {
+    const m = line.match(/^\s*\d{1,2}\s*[.、)）]\s*《([^》]{1,80})》\s*(?:[—–\-－:：]+\s*(.{0,120}))?$/);
+    if (m) tracks.push({ title: m[1].trim(), artist: (m[2] || '').trim() });
+  }
+  return tracks.slice(0, MAX_TRACKS);
+}
+
+function cleanTracks(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((t) => (typeof t === 'string' ? { title: t } : t || {}))
+    .map((t) => ({ title: clip(t.title, 80), artist: clip(t.artist, 120) }))
+    .filter((t) => t.title)
+    .slice(0, MAX_TRACKS);
+}
+
+function publishEpisode({ title, script, tracks, audio_url, from }, time = localTime()) {
+  const audio = String(audio_url || '').trim();
+  if (audio && (!/^https?:\/\//.test(audio) || audio.length > 1200)) throw new Error('audio_url must be an http(s) URL');
+  const episode = {
+    id: podcasts.next_id++,
+    title: clip(title, MAX_TITLE),
+    script: clip(script, MAX_SCRIPT),
+    tracks: cleanTracks(tracks),
+    audio_url: audio,
+    from: clip(from || 'Muse', 16),
+    time,
+  };
+  if (!episode.title) throw new Error('title is required');
+  if (!episode.script && !episode.tracks.length && !episode.audio_url)
+    throw new Error('script, tracks or audio_url is required');
+  if (!episode.tracks.length) episode.tracks = parseTracks(episode.script);
+  podcasts.episodes.push(episode);
+  if (podcasts.episodes.length > MAX_EPISODES) podcasts.episodes = podcasts.episodes.slice(-MAX_EPISODES);
+  savePodcasts();
+  console.log('podcast', JSON.stringify({ id: episode.id, title: episode.title, tracks: episode.tracks.length,
+    script: episode.script.length, audio: Boolean(episode.audio_url) }));
+  return episode;
+}
+
+// Older daily-radio pushes (plain tab5_push from "每日电台") also become episodes.
+function isRadioPost(msg) {
+  return PODCAST_SENDERS.includes(msg.from) || /音乐电台|音乐播客|音乐博客/.test(msg.title);
 }
 
 function saveInbox() {
@@ -95,6 +172,14 @@ function pushMessage({ title, body, from }) {
   if (inbox.messages.length > MAX_MESSAGES) inbox.messages = inbox.messages.slice(-MAX_MESSAGES);
   saveInbox();
   console.log('push', JSON.stringify({ id: msg.id, title: msg.title, from: msg.from, bytes: msg.body.length }));
+  if (isRadioPost(msg)) {
+    try {
+      // Keep the full text for the episode script (the inbox copy is clipped at 600).
+      publishEpisode({ title: msg.title, script: clip(body, MAX_SCRIPT), from: msg.from }, msg.time);
+    } catch (e) {
+      console.error('podcast from push failed', e.message);
+    }
+  }
   return msg;
 }
 
@@ -128,6 +213,43 @@ const TOOLS = [
     },
   },
   {
+    name: 'tab5_podcast_publish',
+    description:
+      'Publish one episode of the user\'s daily music radio / music podcast to the Tab5 "Muse 电台" card. ' +
+      'Use this (not tab5_push) for the daily music radio. Write in Simplified Chinese. ' +
+      'The script is shown in full on the Tab5 (plain text, line breaks allowed, up to 3000 characters): ' +
+      'an opening, a short story or comment for each song, and a closing. ' +
+      'List the songs in tracks in play order; the user taps a song to play it. ' +
+      'audio_url is optional: an http(s) MP3 of a narrated episode the Tab5 can stream.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Episode title, e.g. "10月06日·每日音乐电台" (max 40 characters).' },
+        script: { type: 'string', description: 'Episode script / show notes, plain text, up to 3000 characters.' },
+        tracks: {
+          type: 'array',
+          description: 'Songs in play order (max 30).',
+          items: {
+            type: 'object',
+            properties: { title: { type: 'string' }, artist: { type: 'string' } },
+            required: ['title'],
+          },
+        },
+        audio_url: { type: 'string', description: 'Optional http(s) URL of a narrated MP3 for this episode.' },
+        from: { type: 'string', description: 'Optional sender label (default "Muse").' },
+      },
+      required: ['title', 'script'],
+    },
+  },
+  {
+    name: 'tab5_podcast_list',
+    description: 'List the most recent music-radio episodes already on the Tab5 (to avoid duplicates).',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'integer', minimum: 1, maximum: 10, description: 'Default 3.' } },
+    },
+  },
+  {
     name: 'tab5_inbox_list',
     description: 'List the most recent messages already pushed to the Tab5 inbox (to avoid duplicates).',
     inputSchema: {
@@ -142,6 +264,19 @@ function toolResult(text, isError = false) {
 }
 
 function callTool(name, args = {}) {
+  if (name === 'tab5_podcast_publish') {
+    const ep = publishEpisode(args);
+    return toolResult(`已发布到 Tab5 Muse 电台 (#${ep.id} ${ep.time})：${ep.title}，${ep.tracks.length} 首歌`);
+  }
+  if (name === 'tab5_podcast_list') {
+    const limit = Math.min(10, Math.max(1, Number(args.limit) || 3));
+    const recent = podcasts.episodes.slice(-limit).reverse();
+    return toolResult(
+      recent.length
+        ? recent.map((e) => `#${e.id} ${e.time} ${e.title}（${e.tracks.length} 首）`).join('\n')
+        : 'Tab5 Muse 电台还没有节目。'
+    );
+  }
   if (name === 'tab5_push') {
     const msg = pushMessage(args);
     return toolResult(`已推送到 Tab5 收件箱 (#${msg.id} ${msg.time})：${msg.title}`);
@@ -173,6 +308,7 @@ function handleRpc(msg) {
         serverInfo: { name: 'tab5-inbox', version: '1.0.0' },
         instructions:
           'Use tab5_push to send the user short, useful updates (Chinese) to their Tab5 desk display. ' +
+          'Use tab5_podcast_publish for the daily music radio / music podcast episode. ' +
           'Check tab5_inbox_list first when running a recurring task so the same item is not sent twice.',
       });
     case 'ping':
@@ -205,11 +341,17 @@ function inboxResponse(url) {
   const base = tunnelUrl();
   return {
     latest_id: inbox.next_id - 1,
+    podcast_latest_id: podcasts.next_id - 1,
     messages,
     tunnel: base,
     mcp_url: base ? `${base}/mcp/${TOKEN}` : '',
     discovery_topic: DISCOVERY_TOPIC,
   };
+}
+
+function podcastResponse(url) {
+  const limit = Math.min(10, Math.max(1, Number(url.searchParams.get('limit')) || 6));
+  return { latest_id: podcasts.next_id - 1, episodes: podcasts.episodes.slice(-limit).reverse() };
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -254,7 +396,8 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const parts = url.pathname.split('/').filter(Boolean);
   try {
-    if (url.pathname === '/health') return send(res, 200, { ok: true, messages: inbox.messages.length });
+    if (url.pathname === '/health')
+      return send(res, 200, { ok: true, messages: inbox.messages.length, episodes: podcasts.episodes.length });
 
     if (parts[0] === 'mcp') {
       if (!tokenOk(parts[1])) return send(res, 404, 'not found');
@@ -291,6 +434,11 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, inboxResponse(url));
     }
 
+    if (parts[0] === 'podcast' && req.method === 'GET') {
+      if (!tokenOk(parts[1])) return send(res, 404, 'not found');
+      return send(res, 200, podcastResponse(url));
+    }
+
     // Only the local music container may queue playback; Tab5 fetches it through the tunnel.
     if (parts[0] === 'music' && req.method === 'GET') {
       if (!tokenOk(parts[1])) return send(res, 404, 'not found');
@@ -310,6 +458,9 @@ const server = http.createServer(async (req, res) => {
       }
       if (parts[1] === 'inbox' && req.method === 'GET') {
         return send(res, 200, inboxResponse(url));
+      }
+      if (parts[1] === 'podcast' && req.method === 'GET') {
+        return send(res, 200, podcastResponse(url));
       }
       if (parts[1] === 'info' && req.method === 'GET') {
         const base = tunnelUrl();
