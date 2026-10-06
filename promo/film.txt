@@ -1,0 +1,59 @@
+-6000 preroll
+-6000 episodes /home/user/qdtech-tab5-xiaozhi-firmware/promo/v4/data/episodes.txt
+-6000 messages /home/user/qdtech-tab5-xiaozhi-firmware/promo/v4/data/messages.txt
+-6000 levelfile /home/user/qdtech-tab5-xiaozhi-firmware/promo/v4/level.txt
+-5900 inbox 0
+-5800 fw 当前版本 v1.0.9 · 已是最新|检查更新|0|0
+-5800 sleep 1
+-5500 dailypage 3
+3600 welcome
+4750 playback 1
+9550 playback 0
+11000 dailypage 6
+15000 dailypage 5
+18000 touch 904 590 90
+18200 status 连接中...
+18600 status 聆听中...
+21500 chat user|你好 Nabo，今天有什么新歌？
+21750 status 待命
+21800 waiting 1
+22950 waiting 0
+23000 status 说话中...
+23000 playback 1
+23050 chat assistant|早上好！今天的 Muse 电台上线啦，现在听吗？
+27550 touch 1055 305 90
+27800 playback 0
+27800 status 待命
+27850 touch 331 227 90
+30000 touch 1080 189 90
+30120 radio 每日音乐电台 · 10月6日|Playing|
+30150 podseek 220
+40850 podseek 24350
+43900 page radio
+43950 music 把今天调亮一点|Muse|/home/user/qdtech-tab5-xiaozhi-firmware/promo/v4/data/song.lrc
+44000 radio 把今天调亮一点|Playing|
+51900 touch 238 245 90
+52000 stopmusic
+52050 radio 中国之声|Playing|MP3 · 64 kbps
+57900 page icu4
+58100 touch 513 298 90
+58300 touch 460 300 90
+58500 touch 766 553 90
+58700 touch 513 432 90
+58900 touch 806 217 90
+59100 touch 766 553 90
+59300 touch 513 499 90
+59500 touch 633 383 90
+59700 touch 633 466 90
+59900 touch 766 553 90
+60100 touch 513 634 90
+61900 page ir
+62400 touch 452 282 160
+63200 touch 622 282 160
+63900 page muse
+65900 page close
+65900 radio 中国之声|Stopped|
+65950 idle
+65950 status 待命
+65950 dailypage 3
+70300 touchnabo
