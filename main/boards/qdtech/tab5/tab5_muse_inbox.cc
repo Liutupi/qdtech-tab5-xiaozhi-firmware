@@ -426,29 +426,6 @@ bool Inbox::Poll() {
     // podcast_id < 0: relay has no podcast support.
     auto* podcast_latest = ok ? cJSON_GetObjectItem(root.get(), "podcast_latest_id") : nullptr;
     const int podcast_id = cJSON_IsNumber(podcast_latest) ? podcast_latest->valueint : -1;
-    const auto* latest = ok ? cJSON_GetObjectItem(root.get(), "latest_id") : nullptr;
-    const int latest_id = cJSON_IsNumber(latest) ? latest->valueint : 0;
-    std::string mcp_url = ok ? JsonString(root.get(), "mcp_url") : "";
-    const std::string topic = ok ? JsonString(root.get(), "discovery_topic") : "";
-    MessageList messages;
-    if (ok) {
-        cJSON* item = nullptr;
-        cJSON_ArrayForEach (item, list) {
-            auto* id = cJSON_GetObjectItem(item, "id");
-            if (!cJSON_IsNumber(id))
-                continue;
-            Message m;
-            m.id = id->valueint;
-            m.title = tab5_podcast::ToStr(JsonString(item, "title"));
-            m.body = tab5_podcast::ToStr(JsonString(item, "body"));
-            m.from = tab5_podcast::ToStr(JsonString(item, "from"));
-            m.time = tab5_podcast::ToStr(JsonString(item, "time"));
-            messages.push_back(std::move(m));
-        }
-    }
-    // Do not keep the inbox JSON tree alive through another TLS handshake and
-    // the much larger episode/transcript parse. Small cJSON allocations use SRAM.
-    root.reset();
     auto fetched_episodes = tab5_podcast::MakeEpisodes();
     bool podcast_fetched = false;
     if (podcast_id >= 0) {
@@ -470,6 +447,20 @@ bool Inbox::Poll() {
             ESP_LOGW(TAG, "poll %s failed (http %d, %u bytes)", url.empty() ? host.c_str() : "tunnel",
                      status, unsigned(body.size()));
         } else {
+            std::vector<Message> messages;
+            cJSON* item = nullptr;
+            cJSON_ArrayForEach (item, list) {
+                auto* id = cJSON_GetObjectItem(item, "id");
+                if (!cJSON_IsNumber(id))
+                    continue;
+                Message m;
+                m.id = id->valueint;
+                m.title = JsonString(item, "title");
+                m.body = JsonString(item, "body");
+                m.from = JsonString(item, "from");
+                m.time = JsonString(item, "time");
+                messages.push_back(std::move(m));
+            }
             if (podcast_fetched) {
                 snapshot_.podcast_latest_id = podcast_id;
                 if (!snapshot_.episodes ||
@@ -510,6 +501,9 @@ bool Inbox::Poll() {
                     changed = true;
                 }
             }
+            auto* latest = cJSON_GetObjectItem(root.get(), "latest_id");
+            const int latest_id = cJSON_IsNumber(latest) ? latest->valueint : 0;
+            std::string mcp_url = JsonString(root.get(), "mcp_url");
             changed = changed || !snapshot_.ok || latest_id != snapshot_.latest_id ||
                       messages.size() != snapshot_.messages.size() || mcp_url != snapshot_.mcp_url;
             if (latest_id < snapshot_.seen_id) {
@@ -518,6 +512,7 @@ bool Inbox::Poll() {
                 SaveLater("seen", "0");
             }
             failures_ = 0;
+            const std::string topic = JsonString(root.get(), "discovery_topic");
             if (!topic.empty() && topic != topic_) {
                 topic_ = topic;
                 SaveLater("topic", topic_);

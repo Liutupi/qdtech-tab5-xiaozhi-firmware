@@ -504,11 +504,9 @@ void Tab5NativeApps::RenderMuseList(const tab5_muse::Snapshot& snapshot) {
         lv_obj_set_style_text_font(title, muse_rendered_font_, 0);
         lv_obj_set_style_text_color(title, lv_color_hex(0xf5f9fd), 0);
 
-        std::string meta(m.time.c_str());
-        if (!m.from.empty()) {
-            meta += "  ·  ";
-            meta += m.from.c_str();
-        }
+        std::string meta = m.time;
+        if (!m.from.empty())
+            meta += "  ·  " + m.from;
         if (unread)
             meta += "  ·  新";
         auto* meta_label = lv_label_create(card);

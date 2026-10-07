@@ -1149,13 +1149,7 @@ private:
                 for (const auto& m : snapshot.messages) {
                     if (n++ >= limit)
                         break;
-                    out += "[";
-                    out += m.time.c_str();
-                    out += "] ";
-                    out += m.title.c_str();
-                    out += "\n";
-                    out += m.body.c_str();
-                    out += "\n\n";
+                    out += "[" + m.time + "] " + m.title + "\n" + m.body + "\n\n";
                 }
                 inbox.MarkAllSeen();
                 return out;
