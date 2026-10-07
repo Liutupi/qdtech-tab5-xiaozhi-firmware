@@ -17,10 +17,17 @@ class EspTcpOverrideTest(unittest.TestCase):
         compiler = shutil.which("clang++") or shutil.which("g++")
         if compiler is None:
             self.skipTest("C++ compiler unavailable")
+        for psram_stack in (False, True):
+            with self.subTest(psram_stack=psram_stack):
+                self._run_lifecycle(compiler, psram_stack)
+
+    def _run_lifecycle(self, compiler, psram_stack):
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "esp_tcp_lifecycle_smoke"
             subprocess.run(
-                [compiler, "-std=c++23", "-pthread", "-O1", "-I", str(TESTS / "esp_tcp_stubs"),
+                [compiler, "-std=c++23", "-pthread", "-O1",
+                 f"-DCONFIG_ESP_ML307_SSL_RX_STACK_IN_PSRAM={int(psram_stack)}",
+                 "-I", str(TESTS / "esp_tcp_stubs"),
                  "-I", str(COMPONENT / "include"), "-I", str(COMPONENT / "src/esp"),
                  str(TESTS / "esp_tcp_lifecycle_smoke.cc"),
                  str(COMPONENT / "src/esp/esp_tcp.cc"),
@@ -33,6 +40,7 @@ class EspTcpOverrideTest(unittest.TestCase):
                                     timeout=25)
             self.assertIn("24 TCP joins, 2 WebSocket, 1 HTTP and 2 TLS lifecycle cases passed", result.stdout)
             self.assertIn("TCP/TLS Interrupt and WANT_WRITE deadline passed", result.stdout)
+            self.assertIn("TLS stack allocation failure, retry and cleanup passed", result.stdout)
 
 
 if __name__ == "__main__":

@@ -621,6 +621,66 @@ int main() {
         tls.Disconnect();
         server.join();
     }
+    // Fragmented internal RAM must not prevent an opted-in TLS stack. A failed
+    // stack allocation must close the socket and leave the same object reusable.
+    for (int allocation_case = 0; allocation_case < 2; ++allocation_case) {
+        EspSsl tls;
+        uint16_t port;
+        const int listener = StartListener(port);
+        std::thread server([&]() {
+            const int peer = accept(listener, nullptr, nullptr);
+            Check(peer >= 0, "allocation test accept failed");
+            char byte;
+            recv(peer, &byte, 1, 0);
+            close(peer);
+            close(listener);
+        });
+        const int destroyed_before = fake_tls_destroy_count.load();
+        fake_fail_internal_tls_stack = true;
+        fake_fail_caps_stack = allocation_case == 1;
+        const auto result = tls.Connect("127.0.0.1", port);
+#if CONFIG_ESP_ML307_SSL_RX_STACK_IN_PSRAM
+        const bool expect_success = allocation_case == 0;
+#else
+        const bool expect_success = false;
+#endif
+        Check(result.has_value() == expect_success, "TLS stack allocator selection failed");
+        if (!expect_success) {
+            Check(fake_tls_destroy_count.load() == destroyed_before + 1,
+                  "failed TLS task allocation leaked the TLS session");
+        }
+        tls.Disconnect();
+        server.join();
+        fake_fail_internal_tls_stack = false;
+        fake_fail_caps_stack = false;
+        // Reuse after either successful disconnect or failed task allocation.
+        const int retry_listener = StartListener(port);
+        std::thread retry_server([&]() {
+            const int peer = accept(retry_listener, nullptr, nullptr);
+            Check(peer >= 0, "allocation retry accept failed");
+            char byte;
+            recv(peer, &byte, 1, 0);
+            close(peer);
+            close(retry_listener);
+        });
+        Check(tls.Connect("127.0.0.1", port).has_value(), "TLS allocation retry failed");
+        tls.Disconnect();
+        retry_server.join();
+    }
+    // The shim uses detached host threads; wait for their final bookkeeping
+    // before the global task slots (including mutexes) leave scope at exit.
+    Check(WaitUntil([]() {
+              for (size_t i = 0; i < fake_task_count.load(); ++i) {
+                  std::lock_guard<std::mutex> lock(fake_tasks[i].mutex);
+                  if (!fake_tasks[i].exited) {
+                      return false;
+                  }
+              }
+              return true;
+          }),
+          "receive thread shim did not exit");
+    Check(fake_caps_created.load() == fake_caps_deleted.load(), "TLS PSRAM stacks leaked");
+    std::cout << "TLS stack allocation failure, retry and cleanup passed" << std::endl;
     std::cout << "24 TCP joins, 2 WebSocket, 1 HTTP and 2 TLS lifecycle cases passed" << std::endl;
     std::cout << "Zero-length HTTP keep-alive regression passed" << std::endl;
     std::cout << "TCP/TLS Interrupt and WANT_WRITE deadline passed" << std::endl;

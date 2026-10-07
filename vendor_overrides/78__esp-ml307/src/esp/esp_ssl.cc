@@ -4,6 +4,10 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#if CONFIG_ESP_ML307_SSL_RX_STACK_IN_PSRAM
+#include <esp_heap_caps.h>
+#include <freertos/idf_additions.h>
+#endif
 #include <cerrno>
 #include <cstring>
 
@@ -86,15 +90,27 @@ NetworkResult<> EspSsl::Connect(const std::string& host, int port) {
     }
 
     receive_task_finished_.store(false, std::memory_order_relaxed);
-    auto created = xTaskCreate(
-        [](void* arg) {
-            EspSsl* ssl = (EspSsl*)arg;
-            ssl->ReceiveTask();
-            // Final access to ssl before the task deletes itself.
-            ssl->receive_task_finished_.store(true, std::memory_order_release);
-            vTaskDelete(NULL);
-        },
-        "ssl_receive", 4096, this, 1, &receive_task_handle_);
+    auto receive_entry = [](void* arg) {
+        EspSsl* ssl = static_cast<EspSsl*>(arg);
+        ssl->ReceiveTask();
+        // Final access to ssl before the task exits or waits for owner cleanup.
+        ssl->receive_task_finished_.store(true, std::memory_order_release);
+#if CONFIG_ESP_ML307_SSL_RX_STACK_IN_PSRAM
+        // Self-deleting WithCaps tasks allocate a temporary cleanup task. Let
+        // the owner reclaim this one even when internal RAM is fragmented.
+        for (;;) {
+            vTaskSuspend(nullptr);
+        }
+#else
+        vTaskDelete(NULL);
+#endif
+    };
+#if CONFIG_ESP_ML307_SSL_RX_STACK_IN_PSRAM
+    auto created = xTaskCreateWithCaps(receive_entry, "ssl_receive", 4096, this, 1,
+                                       &receive_task_handle_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    auto created = xTaskCreate(receive_entry, "ssl_receive", 4096, this, 1, &receive_task_handle_);
+#endif
     if (created != pdPASS) {
         connected_ = false;
         receive_task_finished_.store(true, std::memory_order_release);
@@ -137,6 +153,11 @@ void EspSsl::Disconnect() {
                 ESP_LOGE(TAG, "Still waiting for TLS receive callback to finish");
             }
         }
+#if CONFIG_ESP_ML307_SSL_RX_STACK_IN_PSRAM
+        // No further access to this EspSsl after receive_task_finished_. The SDK
+        // suspends the task and waits for it to leave the other core before freeing.
+        vTaskDeleteWithCaps(receive_task_handle_);
+#endif
         receive_task_handle_ = nullptr;
     }
 

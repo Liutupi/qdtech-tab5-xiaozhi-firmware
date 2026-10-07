@@ -1,0 +1,13 @@
+menu "ESP network transport"
+
+config ESP_ML307_SSL_RX_STACK_IN_PSRAM
+    bool "Allocate TLS receive task stacks in PSRAM"
+    depends on SPIRAM && FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    default n
+    help
+        Keep TLS receive stacks out of fragmented internal RAM. The task control
+        block remains in internal RAM. Enable only when receive callbacks are
+        safe to run from an external stack: flash writes must run in another task.
+        The connection owner reclaims each stack when disconnecting.
+
+endmenu
