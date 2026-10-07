@@ -2,6 +2,12 @@
 
 云 VM 通过现有 relay 隧道上传原声节目，无需新增通道。保留现有 `tab5_podcast_publish` 的 `title`、`script`、`tracks` 和可选 `audio_url`，以及网易云取歌接口。
 
+## Muse 歌单的歌曲音质
+
+Tab5 播放歌单时，relay 通过 NAS 网易云服务的 `/stream_pcm?song=...&artist=...` 获取完整 MP3。建议这个设备接口按 `standard,higher,exhigh` 的顺序解析：320kbps 的歌曲每秒需要约40KB压缩数据，128kbps约16KB；先选标准版本可减轻无线传输和解码压力。曲目、完整时长、歌曲 ID 和歌词沿用原来的解析结果；标准版本不可用时才尝试更高档位。
+
+NAS 的网易云服务脚本不在此仓库。维护它的当前版本时，可让 `searchPlayable` 接受内部 `options.preferredLevels`，默认仍用已有 `preferredLevels`，只在 `/stream_pcm` 的调用中传入 `['standard', 'higher', 'exhigh']`。每日推荐和其他账号保留各自已有配置。先备份原模块并执行 `node --check`，重载音乐服务后验证接口的 `bitrate` 和实机完整播放；无需改动 Muse 发布参数或重启隧道。
+
 ## 大文件使用分片客户端
 
 7.4 MB MP3 在约58 KB/s的上传链路上需要超过两分钟。整文件 multipart 请求可能被代理超时中断；客户端发完所有字节并不代表 NAS 已完整保存。分片接口每512 KiB单独请求，落盘并校验后才确认；重试或 relay 进程重启后可续传，完整校验后才更新节目地址。

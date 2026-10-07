@@ -21,6 +21,7 @@ class MusePollRefreshTests(unittest.TestCase):
         harness = r'''
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -31,7 +32,10 @@ class MusePollRefreshTests(unittest.TestCase):
 template<typename... T> void IgnoreLog(const char*, T&&...) {}
 #define ESP_LOGI(tag, ...) IgnoreLog(__VA_ARGS__)
 #define ESP_LOGW(...) ((void)0)
-std::string body=R"({"messages":[],"latest_id":0,"podcast_latest_id":4})";
+int live_json_allocations=0;
+void* JsonAlloc(size_t size) { void* p=std::malloc(size);if(p)++live_json_allocations;return p; }
+void JsonFree(void* p) { if(p)--live_json_allocations;std::free(p); }
+std::string body=R"({"messages":[{"id":13,"title":"Morning","body":"Episode script","from":"Muse","time":"07:30"}],"latest_id":13,"podcast_latest_id":4,"mcp_url":"https://relay.example/mcp/test","discovery_topic":"muse"})";
 std::string HttpGet(const std::string&,int* status) { *status=200; return body; }
 std::string JsonString(cJSON* object,const char* key) {
  auto* item=cJSON_GetObjectItem(object,key);
@@ -50,6 +54,8 @@ public:
  bool fetch_ok=true;
  tab5_podcast::EpisodeList feed;
  bool FetchPodcasts(const std::string&,tab5_podcast::EpisodeList* out) {
+   // HTTP lock allocation can abort on-device while the first JSON tree is live.
+   assert(live_json_allocations==0);
    if (!fetch_ok) return false;
    *out=feed;return true;
  }
@@ -59,6 +65,7 @@ public:
 ''' + poll + r'''
 }
 int main() {
+ cJSON_Hooks hooks{JsonAlloc,JsonFree};cJSON_InitHooks(&hooks);
  tab5_muse::Inbox inbox;
  inbox.snapshot_.host="localhost";
  tab5_podcast::Episode episode;episode.id=4;episode.title="Daily radio";
@@ -66,6 +73,11 @@ int main() {
  int callbacks=0;tab5_muse::Snapshot seen;
  inbox.listener_=[&](const auto& value){++callbacks;seen=value;};
  assert(inbox.Poll() && callbacks==1 && seen.podcast_ok && seen.poll_count==1);
+ assert(live_json_allocations==0 && seen.latest_id==13);
+ assert(seen.mcp_url=="https://relay.example/mcp/test");
+ assert(seen.messages.size()==1 && seen.messages[0].title=="Morning");
+ assert(seen.messages[0].body=="Episode script" && seen.messages[0].from=="Muse");
+ assert(seen.messages[0].time=="07:30" && inbox.topic_=="muse");
  auto first=seen.episodes;
  // All inbox fields and episode IDs stay identical. Only late MP3 delivery changes.
  inbox.feed[0].audio_url="https://relay.example/narration.mp3";
@@ -79,7 +91,14 @@ int main() {
  assert(inbox.Poll() && callbacks==4 && !seen.podcast_ok && seen.episodes==updated);
  body="invalid";
  assert(!inbox.Poll() && callbacks==5 && !seen.podcast_ok && seen.episodes==updated);
- assert(seen.poll_count==5);
+ assert(seen.poll_count==5 && live_json_allocations==0);
+ // Older relays without a podcast endpoint derive episodes from owned messages.
+ body=R"({"messages":[{"id":14,"title":"Legacy radio","body":"Intro text","from":"每日电台","time":"07:30"}],"latest_id":14})";
+ assert(inbox.Poll() && callbacks==6 && seen.podcast_ok && seen.poll_count==6);
+ assert(seen.podcast_latest_id==14 && seen.episodes->size()==1);
+ assert((*seen.episodes)[0].script=="Intro text" && seen.messages[0].body=="Intro text");
+ assert(live_json_allocations==0);
+
 }
 '''
         with tempfile.TemporaryDirectory() as directory:
