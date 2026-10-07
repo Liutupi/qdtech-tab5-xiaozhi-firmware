@@ -1,6 +1,8 @@
 #include "tab5_sd_scene.h"
 #ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+#include <algorithm>
 #include <cstdio>
+#include <ctime>
 #include <cstring>
 #include <new>
 #include "esp_heap_caps.h"
@@ -9,6 +11,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nabo_frame_composer.h"
+#include "nabo_sky.h"
+#include "tab5_sky_weather.h"
 #include "nabo_sd_static.h"
 #include "src/misc/cache/instance/lv_image_cache.h"
 #include "src/misc/lv_area_private.h"
@@ -184,10 +188,35 @@ private:
     Tab5SdSceneReader(uint8_t* a, uint8_t* b, uint8_t* c, uint8_t* staging,
                       const uint16_t* background, const uint8_t* overlay)
         : mailbox(a, b, kOutBytes, kDmaAlign, c), composer_(background, overlay) {
-        mailbox.SetComposer(staging, kSlotBytes, &ComposeThunk, &composer_);
+        mailbox.SetComposer(staging, kSlotBytes, &ComposeThunk, this);
     }
+public:
+    // New sky: the background now contains it, fx animates it on every composed frame.
+    void SetSky(const uint16_t* background, const nabo_sky::SkyFx* fx) {
+        composer_.SetBackground(background);
+        fx_.store(fx, std::memory_order_release);
+    }
+
+private:
     static void ComposeThunk(void* context, const uint8_t* raw, uint8_t* out) {
-        static_cast<const nabo_sd::FrameComposer*>(context)->Compose(raw, out);
+        auto* self = static_cast<Tab5SdSceneReader*>(context);
+        const int64_t t0 = esp_timer_get_time();
+        self->composer_.Compose(raw, out);
+        const int64_t t1 = esp_timer_get_time();
+        const nabo_sky::SkyFx* fx = self->fx_.load(std::memory_order_acquire);
+        if (fx)
+            // Clouds, stars, rain, snow... only where Nabo is fully transparent, above the window.
+            fx->Draw(uint32_t(t1 / 1000), reinterpret_cast<uint16_t*>(out), Layout::kOutW,
+                     Layout::kOutH, kVideoX,
+                     [self, raw](int x, int y) { return self->composer_.AlphaAt(raw, x, y); });
+        const int64_t t2 = esp_timer_get_time();
+        self->compose_us_ += uint32_t(t1 - t0);
+        self->fx_us_ += uint32_t(t2 - t1);
+        if (++self->composed_ == 512) {
+            ESP_LOGI("NaboSky", "per frame: compose %u us, sky fx %u us",
+                     unsigned(self->compose_us_ / 512), unsigned(self->fx_us_ / 512));
+            self->composed_ = self->compose_us_ = self->fx_us_ = 0;
+        }
     }
     static void Run(void* p) { static_cast<Tab5SdSceneReader*>(p)->Loop(); }
     void Loop() {
@@ -311,12 +340,32 @@ private:
     SdSource source_;
     nabo_sd::Pack pack_;
     nabo_sd::FrameComposer composer_;
+    std::atomic<const nabo_sky::SkyFx*> fx_{nullptr};
+    uint32_t composed_ = 0, compose_us_ = 0, fx_us_ = 0;
     std::atomic<uint32_t> failures_{0};
 };
 
 Tab5SdScene::Tab5SdScene(lv_obj_t* parent) {
     root_ = Box(parent, 0, 0, 512, 558, 0x0d1b2b);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
+    // Sky behind everything (time of day + weather); re-rendered only on change.
+    sky_buf_ = static_cast<uint16_t*>(
+        heap_caps_malloc(size_t(kSkyW) * kSkyH * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (sky_buf_) {
+        sky_ = CurrentSky();
+        nabo_sky::RenderSkyBase(sky_, sky_buf_, kSkyW, kSkyH);
+        sky_dsc_.header.magic = LV_IMAGE_HEADER_MAGIC;
+        sky_dsc_.header.cf = LV_COLOR_FORMAT_RGB565;
+        sky_dsc_.header.w = kSkyW;
+        sky_dsc_.header.h = kSkyH;
+        sky_dsc_.header.stride = kSkyW * 2;
+        sky_dsc_.data_size = uint32_t(kSkyW) * kSkyH * 2;
+        sky_dsc_.data = reinterpret_cast<const uint8_t*>(sky_buf_);
+        sky_img_ = lv_image_create(root_);
+        lv_obj_set_pos(sky_img_, 0, 0);
+        lv_obj_remove_flag(sky_img_, LV_OBJ_FLAG_CLICKABLE);
+        lv_image_set_src(sky_img_, &sky_dsc_);
+    }
     Box(root_, 94, 340, 352, 222, 0x193b56, 28);
     Box(root_, 108, 354, 324, 185, 0x10273b, 16);
     auto* shadow = Box(root_, 123, 347, 291, 36, 0x01070e, 18);
@@ -358,6 +407,140 @@ Tab5SdScene::Tab5SdScene(lv_obj_t* parent) {
     Source(&nabo_sd_neutral);
     Face(0, 0, 255);
     reader_ = Tab5SdSceneReader::Create(background_, overlay_);
+    if (reader_ && sky_buf_ && background_ && BuildSkyLayers()) {
+        fx_[0].Reset(sky_);
+        reader_->SetSky(background_, &fx_[0]);
+    }
+    tab5_sky::WeatherService::GetInstance().Start();
+    ESP_LOGI("NaboSky", "sky period=%d weather=%d moon_day=%d", int(sky_.period), int(sky_.weather),
+             int(sky_.moon_day));
+}
+// Local time + latest weather -> sky. Before SNTP sync the time is unknown: use day.
+nabo_sky::Sky Tab5SdScene::CurrentSky() {
+    const auto weather = tab5_sky::WeatherService::GetInstance().Current();
+    const time_t now = time(nullptr);
+    struct tm local;
+    localtime_r(&now, &local);
+    const int minutes = local.tm_year + 1900 >= 2025 ? local.tm_hour * 60 + local.tm_min : 12 * 60;
+    const int sunrise = weather.sunrise_min > 0 ? weather.sunrise_min : 6 * 60;
+    const int sunset = weather.sunset_min > 0 ? weather.sunset_min : 18 * 60 + 15;
+    return nabo_sky::SelectSky(minutes, sunrise, sunset, weather.valid ? weather.wmo_code : -1,
+                               int64_t(now));
+}
+// Boot only (plenty of internal RAM): snapshot the scene with a black and a white
+// sky. For each compositor pixel, black gives the decorations' own colour (K) and
+// white minus black gives how much sky shows through (t). Rows above the first
+// decoration are pure sky and need neither. A later sky change is then plain math,
+// with no LVGL snapshot (whose small draw allocations land in scarce internal RAM).
+bool Tab5SdScene::BuildSkyLayers() {
+    const size_t n = size_t(kSkyW) * kSkyH;
+    // Second sky buffer: keeps the rendered sky across the snapshots now, and later
+    // receives each new sky rendered off the LVGL task.
+    sky_next_ = static_cast<uint16_t*>(heap_caps_malloc(n * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!sky_next_)
+        return false;
+    std::memcpy(sky_next_, sky_buf_, n * 2);
+    auto snapshot_with = [&](uint16_t fill, uint16_t* out) {
+        std::fill(sky_buf_, sky_buf_ + n, fill);
+        lv_image_cache_drop(&sky_dsc_);
+        lv_obj_invalidate(sky_img_);
+        return RecaptureBackground(out);
+    };
+    auto* black = static_cast<uint16_t*>(heap_caps_malloc(kOutBytes, MALLOC_CAP_SPIRAM));
+    auto* white = static_cast<uint16_t*>(heap_caps_malloc(kOutBytes, MALLOC_CAP_SPIRAM));
+    bool ok = black && white && snapshot_with(0x0000, black) && snapshot_with(0xffff, white);
+    if (ok) {
+        sky_mask_top_ = Layout::kOutH;
+        for (size_t i = 0; i < size_t(Layout::kOutW) * Layout::kOutH; ++i)
+            if (black[i] != 0x0000 || white[i] != 0xffff) {
+                sky_mask_top_ = int(i / Layout::kOutW);
+                break;
+            }
+        const size_t rows = size_t(Layout::kOutH - sky_mask_top_), m = rows * Layout::kOutW;
+        sky_k_ = static_cast<uint16_t*>(heap_caps_malloc(std::max<size_t>(m, 1) * 2, MALLOC_CAP_SPIRAM));
+        sky_t_ = static_cast<uint8_t*>(heap_caps_malloc(std::max<size_t>(m, 1), MALLOC_CAP_SPIRAM));
+        ok = sky_k_ && sky_t_;
+        for (size_t i = 0; ok && i < m; ++i) {
+            const size_t src = size_t(sky_mask_top_) * Layout::kOutW + i;
+            sky_k_[i] = black[src];
+            // Green has 6 bits: best resolution for the sky's share of this pixel.
+            const int g = int((white[src] >> 5) & 63) - int((black[src] >> 5) & 63);
+            sky_t_[i] = uint8_t(std::clamp(g * 255 / 63, 0, 255));
+        }
+    }
+    heap_caps_free(black);
+    heap_caps_free(white);
+    std::memcpy(sky_buf_, sky_next_, n * 2);
+    lv_image_cache_drop(&sky_dsc_);
+    lv_obj_invalidate(sky_img_);
+    if (ok)
+        ApplySkyToBackground(sky_buf_);
+    ESP_LOGI("NaboSky", "sky layers %s, decorations from row %d", ok ? "ready" : "unavailable",
+             sky_mask_top_);
+    return ok;
+}
+// background = K + t * sky, in place. The reader may compose one frame that mixes old
+// and new sky rows while this runs; that is a single 1/8 s frame a few times a day.
+void Tab5SdScene::ApplySkyToBackground(const uint16_t* panel) {
+    for (int y = 0; y < Layout::kOutH; ++y) {
+        const uint16_t* sky = panel + size_t(y) * kSkyW + kVideoX;
+        uint16_t* bg = background_ + size_t(y) * Layout::kOutW;
+        if (y < sky_mask_top_) {
+            std::memcpy(bg, sky, size_t(Layout::kOutW) * 2);
+            continue;
+        }
+        const uint16_t* k = sky_k_ + size_t(y - sky_mask_top_) * Layout::kOutW;
+        const uint8_t* t = sky_t_ + size_t(y - sky_mask_top_) * Layout::kOutW;
+        for (int x = 0; x < Layout::kOutW; ++x) {
+            if (t[x] == 0) {
+                bg[x] = k[x];
+                continue;
+            }
+            const int r = std::min(31, int(k[x] >> 11) + int(sky[x] >> 11) * t[x] / 255);
+            const int g = std::min(63, int((k[x] >> 5) & 63) + int((sky[x] >> 5) & 63) * t[x] / 255);
+            const int b = std::min(31, int(k[x] & 31) + int(sky[x] & 31) * t[x] / 255);
+            bg[x] = uint16_t((r << 11) | (g << 5) | b);
+        }
+    }
+}
+// Rendering a sky takes most of a second, so it runs on the sky weather task: the new
+// image goes to sky_next_, the compositor background is rebuilt in place and the idle
+// fx slot is reset. The LVGL task then only swaps buffers (no snapshot, no allocation).
+void Tab5SdScene::SkyJob(void* arg) {
+    auto* self = static_cast<Tab5SdScene*>(arg);
+    const int64_t started = esp_timer_get_time();
+    nabo_sky::RenderSkyBase(self->sky_pending_, self->sky_next_, kSkyW, kSkyH);
+    self->ApplySkyToBackground(self->sky_next_);
+    self->fx_[1 - self->sky_slot_].Reset(self->sky_pending_);
+    self->sky_job_ms_ = uint32_t((esp_timer_get_time() - started) / 1000);
+    self->sky_job_.store(kSkyJobDone, std::memory_order_release);
+}
+void Tab5SdScene::UpdateSky(uint64_t now) {
+    if (!sky_next_ || !reader_ || !sky_k_)
+        return;
+    if (sky_job_.load(std::memory_order_acquire) == kSkyJobDone) {
+        std::swap(sky_buf_, sky_next_);
+        sky_dsc_.data = reinterpret_cast<const uint8_t*>(sky_buf_);
+        lv_image_cache_drop(&sky_dsc_);
+        lv_obj_invalidate(sky_img_);
+        sky_slot_ = 1 - sky_slot_;
+        reader_->SetSky(background_, &fx_[sky_slot_]);
+        sky_ = sky_pending_;
+        sky_job_.store(kSkyJobIdle, std::memory_order_relaxed);
+        ESP_LOGI("NaboSky", "sky period=%d weather=%d moon_day=%d (worker %u ms)",
+                 int(sky_.period), int(sky_.weather), int(sky_.moon_day), unsigned(sky_job_ms_));
+        return;
+    }
+    if (sky_job_.load(std::memory_order_relaxed) != kSkyJobIdle || now - sky_checked_ms_ < 30000)
+        return;
+    sky_checked_ms_ = now;
+    const nabo_sky::Sky next = CurrentSky();
+    if (next == sky_)
+        return;
+    sky_pending_ = next;
+    sky_job_.store(kSkyJobRunning, std::memory_order_relaxed);
+    if (!tab5_sky::WeatherService::GetInstance().Post(&SkyJob, this))
+        sky_job_.store(kSkyJobIdle, std::memory_order_relaxed);
 }
 void Tab5SdScene::SetDirectBlit(DirectBlit blit, void* context) {
     blit_ = blit;
@@ -525,9 +708,36 @@ void Tab5SdScene::Face(unsigned eyes, unsigned mouth, uint8_t opacity) {
     show(mouth_, mouth, nabo_sd_mouth);
     lv_obj_set_style_opa(mouth_, opacity, 0);
 }
+// Background for the compositor without any character layer (they are hidden for
+// the snapshot and restored right after). Boot-time use only.
+bool Tab5SdScene::RecaptureBackground(uint16_t* out) {
+    lv_obj_t* layers[] = {head_, body_, video_, eyes_, mouth_};
+    bool hidden[5];
+    for (int i = 0; i < 5; ++i) {
+        hidden[i] = lv_obj_has_flag(layers[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(layers[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_draw_buf_t* snap = lv_snapshot_take(root_, LV_COLOR_FORMAT_RGB565);
+    for (int i = 0; i < 5; ++i)
+        if (!hidden[i])
+            lv_obj_remove_flag(layers[i], LV_OBJ_FLAG_HIDDEN);
+    if (!snap)
+        return false;
+    const int ext = (int(snap->header.w) - int(lv_obj_get_width(root_))) / 2;
+    const bool fits = int(snap->header.w) >= ext + kVideoX + Layout::kOutW &&
+                      int(snap->header.h) >= ext + Layout::kOutH;
+    if (fits)
+        for (int y = 0; y < Layout::kOutH; ++y)
+            std::memcpy(out + size_t(y) * Layout::kOutW,
+                        snap->data + size_t(y + ext) * snap->header.stride + (ext + kVideoX) * 2,
+                        size_t(Layout::kOutW) * 2);
+    lv_draw_buf_destroy(snap);
+    return fits;
+}
 bool Tab5SdScene::Tick(uint64_t now, Input input) {
     if (detached_)
         return false;
+    UpdateSky(now);
     const bool wake = was_sleeping_ && !input.sleeping;
     auto scene = controller_.Tick(
         now, {input.speaking, input.playback, input.sleeping && !was_sleeping_, wake});

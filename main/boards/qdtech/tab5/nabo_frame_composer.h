@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -33,6 +34,7 @@ public:
     // cover the frame (the background already contains them there).
     explicit FrameComposer(const uint16_t* background, const uint8_t* overlay = nullptr)
         : background_(background), overlay_(overlay) {
+        // background_ may be swapped later (SetBackground) from another task.
         // Nearest-neighbour, matching LVGL's unfiltered transform with pivot 0,0.
         for (int x = 0; x < L::kOutW; ++x) {
             const int s = x * 256 / L::kScale;
@@ -55,6 +57,18 @@ public:
         const uint32_t r = ((f * a5 + b * (32 - a5)) >> 5) & 0x07E0F81Fu;
         return uint16_t(r | (r >> 16));
     }
+    // Swap the static art (e.g. a new sky). The caller writes the new buffer before
+    // publishing it and keeps the previous one alive until at least one frame later.
+    void SetBackground(const uint16_t* background) {
+        background_.store(background, std::memory_order_release);
+    }
+    // Nabo's opacity at an output pixel inside the head rows (0 = background shows).
+    uint8_t AlphaAt(const uint8_t* src, int x, int y) const {
+        if (x < 0 || y < 0 || x >= L::kOutW || y >= L::kHeadBottom)
+            return 255;
+        const uint8_t* alpha = src + size_t(L::kSrcW) * L::kSrcH * 2;
+        return alpha[size_t(sy_[y]) * L::kSrcW + sx_[x]];
+    }
     // src: RGB565 plane (kSrcW*kSrcH*2) followed by A8 plane. out: kOutBytes.
     // Hot per-frame loop: built at -O2 even in the size-optimized firmware.
 #if defined(__GNUC__) && !defined(__clang__)
@@ -64,8 +78,9 @@ public:
         const auto* color = reinterpret_cast<const uint16_t*>(src);
         const uint8_t* alpha = src + size_t(L::kSrcW) * L::kSrcH * 2;
         auto* dst = reinterpret_cast<uint16_t*>(out);
+        const uint16_t* const background = background_.load(std::memory_order_acquire);
         for (int y = 0; y < L::kOutH; ++y) {
-            const uint16_t* bg = background_ + size_t(y) * L::kOutW;
+            const uint16_t* bg = background + size_t(y) * L::kOutW;
             uint16_t* row = dst + size_t(y) * L::kOutW;
             int x0 = 0, x1 = L::kOutW;
             if (y >= L::kHeadBottom) {
@@ -90,7 +105,7 @@ public:
     }
 
 private:
-    const uint16_t* background_;
+    std::atomic<const uint16_t*> background_;
     const uint8_t* overlay_;
     uint16_t sx_[L::kOutW];
     uint16_t sy_[L::kOutH];
