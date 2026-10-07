@@ -15,13 +15,17 @@
 // messages to the relay through a public MCP endpoint; music commands share the relay.
 namespace tab5_muse {
 
+// Inbox snapshots are copied to the UI and callbacks; keep their small text
+// allocations and message storage in PSRAM just like the podcast episodes.
 struct Message {
     int id = 0;
-    std::string title;
-    std::string body;
-    std::string from;
-    std::string time;
+    tab5_podcast::Str title;
+    tab5_podcast::Str body;
+    tab5_podcast::Str from;
+    tab5_podcast::Str time;
 };
+
+using MessageList = std::vector<Message, tab5_podcast::PsramAllocator<Message>>;
 
 struct MusicCommand {
     std::string id;
@@ -52,7 +56,7 @@ struct Snapshot {
     std::string host;         // NAS host:port (LAN) — used only when no url is set
     std::string url;          // public inbox URL https://<tunnel>/inbox/<token>
     std::string mcp_url;      // public MCP URL (only when the tunnel is up)
-    std::vector<Message> messages;  // newest first
+    MessageList messages;     // newest first
     uint32_t poll_count = 0;        // completed inbox/episode fetches, including failures
     bool podcast_ok = false;
     int podcast_latest_id = 0;      // relay's newest music-radio episode id
