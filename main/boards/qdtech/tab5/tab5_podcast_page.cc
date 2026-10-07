@@ -70,7 +70,7 @@ Tab5PodcastPage::Tab5PodcastPage(lv_obj_t* parent, Callbacks callbacks)
 }
 
 void Tab5PodcastPage::Build() {
-    Text(root_, "Muse 音乐电台", &qd_font_lxgw_36, kText, 52, 27, 600);
+    Text(root_, "NABO 电台", &qd_font_lxgw_36, kText, 52, 27, 600);
     summary_ = Text(root_, "每日一期 · 来自 Muse", &qd_font_cjk_28, kMuted, 54, 76, 724);
     lv_label_set_long_mode(summary_, LV_LABEL_LONG_DOT);
     lv_obj_set_height(summary_, 36);

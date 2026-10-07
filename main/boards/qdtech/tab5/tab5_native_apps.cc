@@ -171,7 +171,7 @@ void Tab5NativeApps::OpenMuse() {
     if (muse_snapshot_.seen_id < muse_snapshot_.latest_id) {
         muse_snapshot_.seen_id = muse_snapshot_.latest_id;
         muse_list_dirty_ = true;
-        SetLabelTextIfChanged(muse_entry_label_, "打开 Muse");
+        SetLabelTextIfChanged(muse_entry_label_, "打开推送");
     }
     if (muse_list_dirty_ || muse_rendered_font_ != MusicTextFont()) {
         RenderMuseList(muse_snapshot_);
@@ -404,9 +404,9 @@ void Tab5NativeApps::BuildHome() {
     };
 
     // Settings stay one tap away from the Nabo home ("设置" button); this slot now
-    // holds the Muse daily music radio.
+    // holds the NABO 电台 (Muse daily music radio).
     podcast_entry_label_ = entry(
-        54, 140, 0xf59ab5, "Muse 电台", "每日音乐电台", "等待今日节目",
+        54, 140, 0xf59ab5, "NABO 电台", "每日音乐电台", "等待今日节目",
         [](lv_event_t* event) {
             static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenPodcast();
         },
@@ -429,13 +429,13 @@ void Tab5NativeApps::BuildHome() {
         static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenIr();
     });
     muse_entry_label_ =
-        entry(672, 512, 0xa99bff, "Muse", "NAS 消息推送", "打开 Muse", [](lv_event_t* event) {
+        entry(672, 512, 0xa99bff, "NABO 每日推送", "Muse 整理 · NAS 推送", "打开推送", [](lv_event_t* event) {
             static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenMuse();
         });
 }
 
 void Tab5NativeApps::BuildMuse() {
-    Label(muse_page_, "Muse 推送", &qd_font_lxgw_28, 0xf5f9fd, 52, 30, 440);
+    Label(muse_page_, "NABO 每日推送", &qd_font_lxgw_28, 0xf5f9fd, 52, 30, 440);
     muse_status_ = Label(muse_page_, "正在连接 NAS…", &qd_font_cjk_28, 0x9bb7ca, 54, 76, 760);
     lv_label_set_long_mode(muse_status_, LV_LABEL_LONG_DOT);
     lv_obj_set_height(muse_status_, 34);
@@ -536,9 +536,9 @@ void Tab5NativeApps::SetMuseInbox(const tab5_muse::Snapshot& snapshot) {
     if (muse_entry_label_) {
         char text[64];
         if (unread > 0)
-            std::snprintf(text, sizeof(text), "打开 Muse · %d 条新消息", unread);
+            std::snprintf(text, sizeof(text), "打开推送 · %d 条新消息", unread);
         else
-            std::snprintf(text, sizeof(text), "打开 Muse");
+            std::snprintf(text, sizeof(text), "打开推送");
         SetLabelTextIfChanged(muse_entry_label_, text);
     }
     if (muse_status_) {

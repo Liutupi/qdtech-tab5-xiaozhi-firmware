@@ -335,7 +335,7 @@ private:
 
     void SetPodcastStatus(const char* line) {
         if (display_)
-            static_cast<QdtechTab5Display*>(display_)->SetMusicInfo("Muse 电台", "", line);
+            static_cast<QdtechTab5Display*>(display_)->SetMusicInfo("NABO 电台", "", line);
     }
 
     void StartPodcastTrack(int index) {
@@ -2297,9 +2297,9 @@ public:
                         NoteMusicPlayRequest(false);
                         generation = music_request_generation_.load();
                     });
-                    const auto result = StartMusicNow(generation, title, "Muse 电台", url, "");
+                    const auto result = StartMusicNow(generation, title, "NABO 电台", url, "");
                     if (result.rfind("Music URL was NOT started", 0) != 0)
-                        ApplyLegacyMusicLyricLine(title, "Muse 电台", "播客播放中");
+                        ApplyLegacyMusicLyricLine(title, "NABO 电台", "播客播放中");
                     ESP_LOGI("Tab5Podcast", "episode audio: %s", result.c_str());
                 });
                 return true;

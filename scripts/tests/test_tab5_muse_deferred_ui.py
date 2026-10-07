@@ -116,7 +116,7 @@ int main() {
 
     ui.OpenMuse();
     if (ui.renders_ != 1 || ui.rendered_.seen_id != 1 || ui.muse_list_dirty_ ||
-        ui.entry_ != "打开 Muse" || ui.scheduled_.size() != 2)
+        ui.entry_ != "打开推送" || ui.scheduled_.size() != 2)
         return 2;
 
     // The real mark-read callback should not rebuild the same list.

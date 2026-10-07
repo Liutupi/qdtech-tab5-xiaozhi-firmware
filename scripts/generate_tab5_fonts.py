@@ -12,7 +12,7 @@ BOARD = ROOT / "main/boards/qdtech/tab5"
 # Source: https://github.com/lxgw/LxgwWenKai/blob/main/fonts/TTF/LXGWWenKai-Regular.ttf
 # Converter: lv_font_conv 1.5.3; license: BOARD / "FONT_LICENSE_OFL.txt".
 FONT_SHA256 = "39ad71264b588165b469e35e6afb162a378dacd1f95348160240ba9038ac3009"
-NATIVE_TITLE_SYMBOLS = "小智对话轻触开始结束语音继续正在思考听你说来聊聊吧视觉和声音已就绪原生显示我是好，土皮助手设置网络电台屏幕亮度播放音量目录当前中国之声北京新闻广播交通广州资讯广东珠江经济文体动音乐频道选择一个肾功能尿白蛋氧合血气分析静脉泵数值工具输入换算结果"
+NATIVE_TITLE_SYMBOLS = "一东个中之乐交京亮体你值入具分前功动助北原台合吧听和国土在声外好始家对小就尿屏州工已幕广度开当录思我手择换控推播放数文新日是显智束来析果正每气氧江泵济珠生电白皮目示算米红经结络继绪续网置考聊肾能脉蛋血视觉触讯设话语说资轻输送选通道遥量闻静音频，"
 
 
 def main() -> None:

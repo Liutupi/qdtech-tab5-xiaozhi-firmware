@@ -2112,7 +2112,7 @@ public:
             return;
         const auto& latest = snapshot.messages.front();
         if (prompt_label_)
-            lv_label_set_text(prompt_label_, "Muse 新推送");
+            lv_label_set_text(prompt_label_, "NABO 新推送");
         if (message_label_) {
             std::string text = latest.title + "\n" + latest.body;
             lv_label_set_text(message_label_, text.c_str());
