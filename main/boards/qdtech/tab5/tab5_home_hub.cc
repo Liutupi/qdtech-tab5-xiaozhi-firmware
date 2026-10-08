@@ -10,6 +10,7 @@
 #include "board.h"
 #include "settings.h"
 #include "tab5_muse_inbox.h"
+#include "tab5_net_gate.h"
 
 namespace tab5_home {
 namespace {
@@ -19,7 +20,7 @@ constexpr size_t kMaxCatalogBytes = 24 * 1024;
 constexpr size_t kMaxErrorBytes = 512;
 constexpr size_t kMaxJobs = 8;
 constexpr int kTimeoutMs = 8000;
-constexpr int kFirstFetchMs = 25000;          // after Wi-Fi, the inbox and the session
+constexpr int kFirstFetchMs = 60000;          // after Wi-Fi, the first inbox/podcast poll and the session
 constexpr int kVisiblePollMs = 5000;
 constexpr int kIdlePollMs = 10 * 60 * 1000;   // keep the catalog warm for voice commands
 constexpr int kAfterControlMs = 1200;         // HA reports the new state shortly after
@@ -35,6 +36,7 @@ struct Response {
 Response Request(const char* method, const std::string& url, const std::string& key, std::string body,
                  size_t max_bytes) {
     Response out;
+    std::lock_guard<std::mutex> gate(tab5_net::TransferGate());
     auto network = Board::GetInstance().GetNetwork();
     auto http = network ? network->CreateHttp(0) : nullptr;
     if (!http)
@@ -278,6 +280,8 @@ bool Hub::Fetch(const std::string& base) {
         if (status_.catalog && SameCatalog(*status_.catalog, *catalog))
             catalog.reset();  // unchanged: no redraw
     }
+    ESP_LOGI(TAG, "catalog: %u devices, %u scenes%s", unsigned(catalog ? catalog->devices.size() : 0),
+             unsigned(catalog ? catalog->scenes.size() : 0), catalog ? "" : " (unchanged)");
     Publish(true, "", std::move(catalog));
     return true;
 }

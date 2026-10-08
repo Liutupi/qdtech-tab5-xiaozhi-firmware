@@ -121,6 +121,8 @@ function createHomeRoutes({ dataDir, token, haUrl, fetchImpl = globalThis.fetch,
     });
   }
 
+  // Home Assistant failures use 424: Cloudflare replaces an origin 502 with its own page, which
+  // would hide the error code from the Tab5.
   class HomeError extends Error {
     constructor(status, code) { super(code); this.status = status; this.code = code; }
   }
@@ -139,12 +141,12 @@ function createHomeRoutes({ dataDir, token, haUrl, fetchImpl = globalThis.fetch,
         signal: controller.signal,
       });
     } catch {
-      throw new HomeError(502, 'ha_unreachable');
+      throw new HomeError(424, 'ha_unreachable');
     } finally {
       clearTimeout(timer);
     }
-    if (response.status === 401 || response.status === 403) throw new HomeError(502, 'ha_token_rejected');
-    if (!response.ok) throw new HomeError(502, `ha_http_${response.status}`);
+    if (response.status === 401 || response.status === 403) throw new HomeError(424, 'ha_token_rejected');
+    if (!response.ok) throw new HomeError(424, `ha_http_${response.status}`);
     return response;
   }
 
@@ -196,7 +198,7 @@ function createHomeRoutes({ dataDir, token, haUrl, fetchImpl = globalThis.fetch,
     try {
       list = JSON.parse(await response.text());
     } catch {
-      throw new HomeError(502, 'ha_bad_response');
+      throw new HomeError(424, 'ha_bad_response');
     }
     const devicesList = (Array.isArray(list) ? list : []).map(d => {
       const out = { id: d.id, name: d.name, domain: String(d.id).split('.')[0], state: d.state, area: d.area || '' };

@@ -1,5 +1,6 @@
 #include "tab5_muse_inbox.h"
 #include "tab5_podcast_transcript.h"
+#include "tab5_net_gate.h"
 
 #include <cJSON.h>
 #include <esp_heap_caps.h>
@@ -31,6 +32,7 @@ constexpr int kFirstPollDelayMs = 20000;  // let Wi-Fi and the XiaoZhi session s
 std::string HttpGet(const std::string& url, int* status_out, size_t max_bytes = kMaxJsonBytes,
                     int timeout_ms = kTimeoutMs) {
     *status_out = 0;
+    std::lock_guard<std::mutex> gate(tab5_net::TransferGate());
     auto network = Board::GetInstance().GetNetwork();
     if (!network)
         return {};

@@ -12,6 +12,7 @@
 
 #include "board.h"
 #include "settings.h"
+#include "tab5_net_gate.h"
 
 namespace tab5_sky {
 namespace {
@@ -103,6 +104,7 @@ void WeatherService::Run() {
 }
 
 bool WeatherService::Fetch() {
+    std::lock_guard<std::mutex> gate(tab5_net::TransferGate());
     auto network = Board::GetInstance().GetNetwork();
     if (!network)
         return false;
