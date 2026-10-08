@@ -7,6 +7,7 @@
 #include <string>
 
 #include "lvgl.h"
+#include "tab5_home_page.h"
 #include "tab5_icu_page.h"
 #include "tab5_ir_remote_page.h"
 #include "tab5_muse_inbox.h"
@@ -66,6 +67,10 @@ public:
     void OpenRadio(bool start_playback = true);
     void OpenNes();
     void OpenIr();
+    // 米家中控 (Home Assistant scenes and devices; the IR remote opens from it).
+    void OpenHomeHub();
+    // Called with the display lock held.
+    void SetHomeStatus(const tab5_home::Status& status);
     void OpenMuse();
     void OpenPodcast();
     // Called with the display lock held.
@@ -119,6 +124,7 @@ private:
     void RenderMuseList(const tab5_muse::Snapshot& snapshot);
     std::unique_ptr<Tab5IcuPage> icu_page_;
     std::unique_ptr<Tab5IrRemotePage> ir_page_;
+    std::unique_ptr<Tab5HomePage> mijia_page_;
     // Created on first open; episodes and playback state are kept here meanwhile.
     std::unique_ptr<Tab5PodcastPage> podcast_page_;
     tab5_podcast::SharedEpisodes podcast_episodes_;

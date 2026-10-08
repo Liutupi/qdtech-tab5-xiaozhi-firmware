@@ -5,6 +5,7 @@
 #include "assets.h"
 #include "icu_calculators.h"
 #include "lvgl_font.h"
+#include "tab5_home_hub.h"
 #include "tab5_muse_inbox.h"
 #include "tab5_music_lyrics.h"
 #include "tab5_music_track_gate.h"
@@ -1153,6 +1154,84 @@ private:
                 }
                 inbox.MarkAllSeen();
                 return out;
+            });
+        // 米家中控: Home Assistant on the NAS through the relay. Requests are queued; the
+        // result shows on the 米家中控 page, so these tools return at once.
+        mcp.AddTool(
+            "self.home.list",
+            "List the user's smart-home combined scenes (e.g. 卧室电脑, 家庭影院) and devices "
+            "(lights, switches, air conditioners, TV, speakers) by room with their current state. "
+            "Call before self.home.scene or self.home.control when unsure of the name.",
+            PropertyList(), [](const PropertyList&) -> ReturnValue {
+                auto& hub = tab5_home::Hub::GetInstance();
+                const auto status = hub.Current();
+                hub.RequestRefresh();
+                if (!status.catalog)
+                    return std::string("Smart home not available yet: ") +
+                           (status.message.empty() ? "waiting for the NAS" : status.message);
+                std::string out = "Scenes:";
+                for (const auto& sc : status.catalog->scenes)
+                    out += " " + std::string(sc.name.data(), sc.name.size()) + ";";
+                out += "\nDevices:";
+                for (const auto& d : status.catalog->devices) {
+                    if (d.kind() == tab5_home::Kind::kScene || d.kind() == tab5_home::Kind::kOther)
+                        continue;
+                    out += "\n" + std::string(d.area.data(), d.area.size()) + " " +
+                           std::string(d.label.data(), d.label.size()) + ": " +
+                           (d.available() ? std::string(d.state.data(), d.state.size()) : "offline");
+                    if (d.kind() == tab5_home::Kind::kClimate && d.target > -999)
+                        out += " target " + std::to_string(int(d.target)) + "C";
+                }
+                return out;
+            });
+        mcp.AddTool(
+            "self.home.scene",
+            "Run one of the user's combined smart-home scenes, e.g. 打开卧室电脑 (PC + screen "
+            "speaker + monitor light) or 关闭家庭影院. name: the scene name or the user's words.",
+            PropertyList({Property("name", kPropertyTypeString), Property("on", kPropertyTypeBoolean, true)}),
+            [](const PropertyList& p) -> ReturnValue {
+                auto& hub = tab5_home::Hub::GetInstance();
+                const auto status = hub.Current();
+                const std::string name = p["name"].value<std::string>();
+                const int i = status.catalog ? tab5_home::MatchScene(*status.catalog, name) : -1;
+                if (i < 0)
+                    return "No scene matches '" + name + "'. Use self.home.list to see the scenes.";
+                const auto& sc = status.catalog->scenes[i];
+                const bool on = p["on"].value<bool>();
+                if ((on && !sc.has_on) || (!on && !sc.has_off))
+                    return std::string("That scene cannot be turned ") + (on ? "on." : "off.");
+                if (!hub.RunScene(std::string(sc.id.data(), sc.id.size()), on))
+                    return std::string("Too many requests, try again in a moment.");
+                return std::string("Requested: ") + (on ? "打开" : "关闭") +
+                       std::string(sc.name.data(), sc.name.size());
+            });
+        mcp.AddTool(
+            "self.home.control",
+            "Control one smart-home device. target: the device in the user's words, with the room "
+            "when said (e.g. 书房的灯, 卧室空调, 客厅电视). action: on, off, or temperature "
+            "(air conditioner, value in °C 16-32).",
+            PropertyList({Property("target", kPropertyTypeString), Property("action", kPropertyTypeString),
+                          Property("value", kPropertyTypeInteger, 26, 16, 32)}),
+            [](const PropertyList& p) -> ReturnValue {
+                auto& hub = tab5_home::Hub::GetInstance();
+                const auto status = hub.Current();
+                const std::string target = p["target"].value<std::string>();
+                const std::string action = p["action"].value<std::string>();
+                if (action != "on" && action != "off" && action != "temperature")
+                    return std::string("action must be on, off or temperature.");
+                const int i = status.catalog ? tab5_home::MatchDevice(*status.catalog, target) : -1;
+                if (i < 0)
+                    return "No device matches '" + target + "'. Use self.home.list to see the devices.";
+                const auto& d = status.catalog->devices[i];
+                if (!d.available())
+                    return std::string(d.label.data(), d.label.size()) + " is offline.";
+                if (action == "temperature" && d.kind() != tab5_home::Kind::kClimate)
+                    return std::string("Only air conditioners take a temperature.");
+                const std::string value = action == "temperature" ? std::to_string(p["value"].value<int>()) : "";
+                if (!hub.Control(std::string(d.id.data(), d.id.size()), action, value))
+                    return std::string("Too many requests, try again in a moment.");
+                return "Requested: " + std::string(d.area.data(), d.area.size()) +
+                       std::string(d.label.data(), d.label.size()) + " " + action + (value.empty() ? "" : " " + value);
             });
         mcp.AddUserOnlyTool("self.muse.set_url",
                     "Set the public Muse relay URL (the MCP URL .../mcp/<token> or the inbox URL "
@@ -2348,6 +2427,9 @@ public:
                         ESP_LOGI("Tab5Music", "relay play_url: %s", result.c_str());
                     });
                 });
+            tab5_home::Hub::GetInstance().Start([native_display](const tab5_home::Status& status) {
+                native_display->SetHomeStatus(status);
+            });
             native_display->SetPresenceTestAction(
                 [this] { vision_service_.RequestPresenceTest(); });
             native_display->SetInteractionAction([this] { vision_service_.NotifyInteraction(); });

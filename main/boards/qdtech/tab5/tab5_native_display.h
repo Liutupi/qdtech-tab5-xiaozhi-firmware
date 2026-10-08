@@ -2102,6 +2102,12 @@ public:
 
     // Muse inbox update from the poll task. new_arrival: a message newer than any seen before
     // arrived; show it on the idle home panel so it is noticed without opening the app.
+    void SetHomeStatus(const tab5_home::Status& status) {
+        DisplayLockGuard lock(this);
+        if (lock.locked() && apps_)
+            apps_->SetHomeStatus(status);
+    }
+
     void SetMuseInbox(const tab5_muse::Snapshot& snapshot, bool new_arrival) {
         DisplayLockGuard lock(this);
         if (!lock.locked())

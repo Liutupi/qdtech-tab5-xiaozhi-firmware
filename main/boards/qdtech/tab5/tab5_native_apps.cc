@@ -151,6 +151,7 @@ void Tab5NativeApps::Show(lv_obj_t* page) {
         lv_obj_add_flag(candidate, LV_OBJ_FLAG_HIDDEN);
     }
     if (ir_page_) ir_page_->Hide();
+    if (mijia_page_) mijia_page_->Hide();
     if (podcast_page_) podcast_page_->Hide();
     if (page) {
         lv_obj_remove_flag(page, LV_OBJ_FLAG_HIDDEN);
@@ -206,16 +207,38 @@ void Tab5NativeApps::OpenNes() {
     Schedule(actions_.nes_status);
 }
 
-void Tab5NativeApps::OpenIr() {
+void Tab5NativeApps::OpenHomeHub() {
     game_page_visible_.store(false, std::memory_order_release);
-    if (!ir_page_)
-        ir_page_ = std::make_unique<Tab5IrRemotePage>(root_, [this] { OpenApps(); });
+    if (!mijia_page_)
+        mijia_page_ = std::make_unique<Tab5HomePage>(root_, [this] { OpenApps(); }, [this] { OpenIr(); });
     for (auto* candidate : {home_page_, settings_page_, radio_page_, game_page_, muse_page_,
                            icu_page_ ? icu_page_->object() : nullptr}) {
         if (!candidate) continue;
         lv_obj_add_flag(candidate, LV_OBJ_FLAG_HIDDEN);
     }
     if (podcast_page_) podcast_page_->Hide();
+    if (ir_page_) ir_page_->Hide();
+    mijia_page_->Show();
+    lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
+}
+
+void Tab5NativeApps::SetHomeStatus(const tab5_home::Status& status) {
+    if (mijia_page_ && mijia_page_->IsVisible())
+        mijia_page_->SetStatus(status);
+}
+
+void Tab5NativeApps::OpenIr() {
+    game_page_visible_.store(false, std::memory_order_release);
+    if (!ir_page_)
+        ir_page_ = std::make_unique<Tab5IrRemotePage>(root_, [this] { OpenHomeHub(); });
+    for (auto* candidate : {home_page_, settings_page_, radio_page_, game_page_, muse_page_,
+                           icu_page_ ? icu_page_->object() : nullptr}) {
+        if (!candidate) continue;
+        lv_obj_add_flag(candidate, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (podcast_page_) podcast_page_->Hide();
+    if (mijia_page_) mijia_page_->Hide();
     ir_page_->Show();
     lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
@@ -342,6 +365,7 @@ void Tab5NativeApps::OpenIcu(int mode, const std::string& external_result, bool 
 
 void Tab5NativeApps::Close() {
     game_page_visible_.store(false, std::memory_order_release);
+    if (mijia_page_) mijia_page_->Hide();  // stops the fast device poll
     lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -425,8 +449,8 @@ void Tab5NativeApps::BuildHome() {
           [](lv_event_t* event) {
               static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenNes();
           });
-    entry(54, 512, 0x86a8e8, "IR", "TV · 空调 · 红外遥控", "打开遥控", [](lv_event_t* event) {
-        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenIr();
+    entry(54, 512, 0x86a8e8, "米家中控", "场景 · 灯 · 空调 · 红外遥控", "打开中控", [](lv_event_t* event) {
+        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenHomeHub();
     });
     muse_entry_label_ =
         entry(672, 512, 0xa99bff, "NABO 每日推送", "Muse 整理 · NAS 推送", "打开推送", [](lv_event_t* event) {

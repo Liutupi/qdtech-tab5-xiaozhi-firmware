@@ -93,15 +93,47 @@ test('controls a device on the LAN and maps brightness', async () => {
   });
 });
 
-test('control through the public tunnel is refused, listing is allowed', async () => {
+test('tunnel control needs the paired home key; the relay token alone only reads', async () => {
   const ha = fakeHa();
-  await withServer({ fetchImpl: ha.fetchImpl }, async base => {
+  await withServer({ fetchImpl: ha.fetchImpl }, async (base, dir) => {
     const tunnel = { 'cf-connecting-ip': '203.0.113.9' };
-    const r = await post(`${base}/home/${TOKEN}/control`, { entity_id: 'switch.bedroom_pc', action: 'on' }, tunnel);
+    const on = { entity_id: 'switch.bedroom_pc', action: 'on' };
+    let r = await post(`${base}/home/${TOKEN}/control`, on, tunnel);
     assert.strictEqual(r.status, 403);
     assert.strictEqual((await fetch(`${base}/home/${TOKEN}/devices`, { headers: tunnel })).status, 200);
     assert.ok(!ha.calls.some(c => c.url.includes('/api/services/')));
+    // First pairing hands out the key once.
+    r = await post(`${base}/home/${TOKEN}/pair`, {}, tunnel);
+    assert.strictEqual(r.status, 200);
+    const { key } = await r.json();
+    assert.ok(key.length >= 32);
+    assert.strictEqual(fs.statSync(path.join(dir, 'home_key.txt')).mode & 0o777, 0o600);
+    assert.strictEqual((await post(`${base}/home/${TOKEN}/pair`, {}, tunnel)).status, 409);
+    assert.strictEqual((await post(`${base}/home/wrong/pair`, {}, tunnel)).status, 404);
+    r = await post(`${base}/home/${TOKEN}/control`, on, { ...tunnel, 'X-Home-Key': 'x'.repeat(key.length) });
+    assert.strictEqual(r.status, 403);
+    r = await post(`${base}/home/${TOKEN}/control`, on, { ...tunnel, 'X-Home-Key': key });
+    assert.strictEqual(r.status, 200);
   });
+});
+
+test('pairing closes 30 minutes after the relay starts', async () => {
+  const ha = fakeHa();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'home-pair-'));
+  let clock = 1000;
+  const handle = createHomeRoutes({ dataDir: dir, token: TOKEN, haUrl: 'http://ha.test', fetchImpl: ha.fetchImpl,
+    now: () => clock });
+  const server = http.createServer(async (req, res) => { await handle(req, res); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    clock += 31 * 60 * 1000;
+    const r = await post(`http://127.0.0.1:${server.address().port}/home/${TOKEN}/pair`, {});
+    assert.strictEqual(r.status, 403);
+    assert.ok(!fs.existsSync(path.join(dir, 'home_key.txt')));
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('scene runs every step and reports the ones that failed', async () => {
@@ -193,5 +225,20 @@ test('scene definitions can be written (also via tunnel) and are validated', asy
     assert.strictEqual(r.status, 200);
     assert.strictEqual(ha.calls.at(-1).url, 'http://ha.test:8123/api/services/scene/turn_on');
     assert.deepStrictEqual(ha.calls.at(-1).body, { entity_id: 'scene.cinema_off' });
+  });
+});
+
+test('compact tsv format for the Tab5', async () => {
+  const ha = fakeHa();
+  const scenes = { scenes: [{ id: 'cinema', name: '家庭影院', room: '客厅',
+    on: [{ entity_id: 'scene.a', action: 'on' }], off: [] }] };
+  await withServer({ fetchImpl: ha.fetchImpl, scenes }, async base => {
+    const text = await (await fetch(`${base}/home/${TOKEN}/devices?format=tsv`)).text();
+    const lines = text.trim().split('\n');
+    assert.strictEqual(lines[0], 'V\t1');
+    assert.ok(lines.includes('D\tlight.monitor_bar\t显示器挂灯\tlight\ton\t卧室\t128\t-\t-'));
+    assert.strictEqual(lines.at(-1), 'S\tcinema\t家庭影院\t客厅\t1\t0');
+    const pair = await (await post(`${base}/home/${TOKEN}/pair?format=tsv`, {})).text();
+    assert.match(pair, /^K\t[A-Za-z0-9_-]{32}\n$/u);
   });
 });

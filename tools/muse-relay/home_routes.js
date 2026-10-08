@@ -4,10 +4,14 @@
 //                        POST /home/<token>/control         {"entity_id","action","value"?}
 //                        POST /home/<token>/scene           {"id","action":"on"|"off"}
 //   setup ------------>  PUT  /home/<token>/scenes          {"scenes":[...]} (definitions only)
+//   Tab5 (once) ------>  POST /home/<token>/pair            -> {"key"} first device after a restart
 //
 // The Home Assistant long-lived token stays on the NAS in /data/ha_token.txt (read on each
-// request, never logged or returned). Control is LAN-only: requests that arrive through the
-// public tunnel may only read the device list. Combined scenes (e.g. 卧室电脑 = PC + speaker +
+// request, never logged or returned). Control from the LAN needs only the relay token. Through
+// the public tunnel it also needs the home key (X-Home-Key) that only the paired Tab5 holds:
+// the relay token alone (which Muse also knows) can read the device list but switch nothing.
+// Pairing hands out the key once, within PAIR_WINDOW_MS of a relay start; delete
+// /data/home_key.txt and restart the relay to pair again. Combined scenes (e.g. 卧室电脑 = PC + speaker +
 // monitor light) live in /data/home_scenes.json and can be edited without a restart.
 'use strict';
 const fs = require('fs');
@@ -34,6 +38,7 @@ const MAX_STEPS = 20;
 const CACHE_MS = 3000;
 const HA_TIMEOUT_MS = 8000;
 const MAX_SCENES = 24;
+const PAIR_WINDOW_MS = 30 * 60 * 1000;
 // Xiaomi Miot exposes every MIoT property; these sub-controls only clutter a wall panel
 // (?all=1 still returns them). Main switches, lights, climate and players stay.
 const NOISE = /信息|指示灯|提示音|物理控制锁|Alarm|充电保护|过度用电|最大功率|倒计时|状态，|睡眠模式|标准睡眠|ECO|摆风|柔风|干燥功能|辅热|安全远程|高水位|洗烘联动|一键智能洗|蒸汽除菌|智能推荐|凌动开关|背灯|Ambient Light|氛围灯$|空调 开关|洗衣机 开关/u;
@@ -70,7 +75,16 @@ function createHomeRoutes({ dataDir, token, haUrl, fetchImpl = globalThis.fetch,
     'http://172.18.0.1:8123').replace(/\/+$/, '');
   const TOKEN_FILE = path.join(dataDir, 'ha_token.txt');
   const SCENES_FILE = path.join(dataDir, 'home_scenes.json');
+  const KEY_FILE = path.join(dataDir, 'home_key.txt');
+  const startedAt = now();
   let cache = null;
+
+  function keyOk(req) {
+    const expected = readText(KEY_FILE);
+    if (!expected) return false;
+    const a = Buffer.from(String(req.headers['x-home-key'] || '')), b = Buffer.from(expected);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
 
   function tokenOk(value) {
     const a = Buffer.from(String(value || '')), b = Buffer.from(TOKEN);
@@ -83,6 +97,12 @@ function createHomeRoutes({ dataDir, token, haUrl, fetchImpl = globalThis.fetch,
     if (res.destroyed || res.writableEnded) return true;
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify(body));
+    return true;
+  }
+  function sendText(res, status, text) {
+    if (res.destroyed || res.writableEnded) return true;
+    res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(text);
     return true;
   }
   function readBody(req) {
@@ -225,6 +245,7 @@ function createHomeRoutes({ dataDir, token, haUrl, fetchImpl = globalThis.fetch,
       if (parts[2] === 'devices' && parts.length === 3 && req.method === 'GET') {
         const list = await devices();
         const shown = url.searchParams.get('all') === '1' ? list : list.filter(d => !isNoise(d));
+        if (url.searchParams.get('format') === 'tsv') return sendText(res, 200, toTsv(shown, loadScenes()));
         return send(res, 200, { ok: true, devices: shown, scenes: loadScenes() });
       }
       // Scene definitions may be written from anywhere with the relay token; running a
@@ -243,10 +264,18 @@ function createHomeRoutes({ dataDir, token, haUrl, fetchImpl = globalThis.fetch,
         fs.renameSync(temporary, SCENES_FILE);
         return send(res, 200, { ok: true, scenes: loadScenes() });
       }
+      if (parts[2] === 'pair' && parts.length === 3 && req.method === 'POST') {
+        if (readText(KEY_FILE)) return send(res, 409, { ok: false, error: 'already_paired' });
+        if (now() - startedAt > PAIR_WINDOW_MS) return send(res, 403, { ok: false, error: 'pairing_closed' });
+        const key = crypto.randomBytes(24).toString('base64url');
+        fs.writeFileSync(KEY_FILE, key + '\n', { mode: 0o600, flag: 'wx' });
+        if (url.searchParams.get('format') === 'tsv') return sendText(res, 200, `K\t${key}\n`);
+        return send(res, 200, { ok: true, key });
+      }
       if (req.method !== 'POST' || parts.length !== 3 || !['control', 'scene'].includes(parts[2]))
         return send(res, 404, { ok: false, error: 'not_found' });
       // Switching things on and off stays inside the home network.
-      if (viaTunnel(req)) return send(res, 403, { ok: false, error: 'lan_only' });
+      if (viaTunnel(req) && !keyOk(req)) return send(res, 403, { ok: false, error: 'home_key_required' });
       let body;
       try {
         body = JSON.parse(await readBody(req));
@@ -276,6 +305,22 @@ function createHomeRoutes({ dataDir, token, haUrl, fetchImpl = globalThis.fetch,
     }
   }
   return handle;
+}
+
+// Compact line format for the Tab5 (parsed without cJSON, whose nodes would land in scarce
+// internal RAM). Fields are tab-separated; tabs and newlines inside values become spaces.
+//   D <id> <label> <domain> <state> <area> <brightness 0-255|-> <target °C|-> <current °C|->
+//   S <id> <name> <room> <has on 0|1> <has off 0|1>
+function toTsv(devices, scenes) {
+  const clean = value => String(value ?? '').replace(/[\t\r\n]+/gu, ' ').slice(0, 80);
+  const num = value => Number.isFinite(value) ? String(value) : '-';
+  const lines = ['V\t1'];
+  for (const d of devices)
+    lines.push(['D', d.id, d.label || d.name, d.domain, d.state, d.area, num(d.brightness), num(d.temperature),
+      num(d.current_temperature)].map(clean).join('\t'));
+  for (const s of scenes)
+    lines.push(['S', s.id, s.name, s.room, s.on.length ? 1 : 0, s.off.length ? 1 : 0].map(clean).join('\t'));
+  return lines.join('\n') + '\n';
 }
 
 function readText(file) {
