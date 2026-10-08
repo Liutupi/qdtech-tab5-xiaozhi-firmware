@@ -243,7 +243,12 @@ void Tab5VisionService::Run() {
             // about 425 KB and its inference arena is 539 KB. Leave room for concurrent
             // UI/audio after the LZ4 pose assets have been mapped into PSRAM.
             if (free_psram >= 1792 * 1024 && largest_psram >= 1280 * 1024) {
+                // esp-dl builds the model graph from hundreds of small `new`s that would
+                // otherwise land in internal SRAM (SPIRAM_MALLOC_ALWAYSINTERNAL), taking
+                // ~5 KB off its minimum. Send this one-time burst to PSRAM.
+                heap_caps_malloc_extmem_enable(0);
                 detector = std::make_unique<PedestrianDetect>(PedestrianDetect::PICO_S8_V1, false);
+                heap_caps_malloc_extmem_enable(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL);
                 vision_ready_.store(true);
                 ESP_LOGI(kTag, "Person detector ready; PSRAM before=%u after=%u largest=%u",
                          unsigned(free_psram),

@@ -275,6 +275,15 @@ public:
 // Parked when a USB gamepad connects so USB endpoints can allocate.
 static EspVideo* g_tab5_camera = nullptr;
 
+// cJSON nodes (40 B) and key/value strings fall under SPIRAM_MALLOC_ALWAYSINTERNAL,
+// so parsing the 192 KB podcast feed put thousands of blocks in internal SRAM and
+// drained it to 16 bytes once a minute. Keep JSON trees in PSRAM; free() releases
+// blocks from either heap, so trees parsed before this hook are still safe.
+static void* Tab5JsonMalloc(size_t size) {
+    return heap_caps_malloc_prefer(size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                   MALLOC_CAP_DEFAULT);
+}
+
 class QdtechTab5Board : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
@@ -2077,6 +2086,8 @@ private:
 
 public:
     QdtechTab5Board() : boot_button_(BOOT_BUTTON_GPIO) {
+        cJSON_Hooks json_hooks = {Tab5JsonMalloc, free};
+        cJSON_InitHooks(&json_hooks);
         // Distinguish freeze-vs-reboot: brownout, panic, task wdt, or power-on.
         const esp_reset_reason_t why = esp_reset_reason();
         ESP_LOGI(TAG, "boot reset_reason=%d (%s) free_sram=%u min_sram=%u", int(why),
