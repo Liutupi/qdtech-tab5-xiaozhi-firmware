@@ -137,6 +137,7 @@ private:
     lv_obj_t* game_select_panel_ = nullptr;
     lv_obj_t* game_play_panel_ = nullptr;
     lv_obj_t* game_rom_label_ = nullptr;
+    lv_obj_t* game_exit_label_ = nullptr;
     lv_obj_t* game_rom_rows_[8] = {};
     lv_obj_t* game_rom_names_[8] = {};
     lv_img_dsc_t game_img_{};
@@ -204,6 +205,7 @@ private:
     void RefreshGameRoms();
     void ShowGameSelect();
     void ShowGamePlay();
+    void ExitGame(bool playing);
     void UpdateWave();
     static void DrawWave(lv_event_t* event);
     static void DrawNes(lv_event_t* event);

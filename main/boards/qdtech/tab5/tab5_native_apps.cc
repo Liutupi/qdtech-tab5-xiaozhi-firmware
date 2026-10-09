@@ -336,29 +336,18 @@ void Tab5NativeApps::Tick() {
         constexpr uint8_t kExitCombo = kNesBtnSelect | kNesBtnStart;
         const bool exit_pressed = playing ? ((pad & kExitCombo) == kExitCombo && (pressed & kExitCombo))
                                           : (pressed & kNesBtnSelect) != 0;
-        if (exit_pressed) {
-            if (playing) {
-                // Drop further emu frames first so the list is not painted
-                // under a still-running scaler, then ask the emu to stop.
-                game_playing_ui_.store(false);
-                game_stop_ui_pending_.store(true);
-                Schedule(actions_.stop_nes);
-                ShowGameSelect();
-                game_stop_ui_pending_.store(false);
-            } else {
-                Schedule(actions_.stop_nes);
-                Schedule([] {
-                    // Leave game mode entirely when exiting to the app home.
-                    Application::GetInstance().SetExternalAudioActive(false);
-                });
-                OpenApps();
-            }
-        }
+        if (exit_pressed)
+            ExitGame(playing);
     }
 }
 
 void Tab5NativeApps::OpenIcu(int mode, const std::string& external_result, bool result_ok) {
-    if (!icu_page_) icu_page_ = std::make_unique<Tab5IcuPage>(root_, [this] { OpenApps(); });
+    if (!icu_page_) {
+        icu_page_ = std::make_unique<Tab5IcuPage>(root_, [this] { OpenApps(); });
+        // Start hidden like every other page: Show() skips pages that already look visible,
+        // and a visible new page left the app home shown underneath, so 返回应用 did nothing.
+        lv_obj_add_flag(icu_page_->object(), LV_OBJ_FLAG_HIDDEN);
+    }
     Show(icu_page_->object());
     icu_page_->Open(mode, external_result, result_ok);
 }
@@ -897,8 +886,15 @@ void Tab5NativeApps::BuildGame() {
 
     game_status_ = Label(stage, "手柄：↑↓ 选 ROM · ○ 开始 · Select 返回",
                          &qd_font_lxgw_28, 0x7f9aad, 24, 16, 900);
-    game_rom_label_ = Label(stage, "", &qd_font_lxgw_36, 0xf5f9fd, 24, 64, 1200);
+    game_rom_label_ = Label(stage, "", &qd_font_lxgw_36, 0xf5f9fd, 24, 64, 1080);
     lv_label_set_long_mode(game_rom_label_, LV_LABEL_LONG_DOT);
+    // Touch exit in the right bar: the emulator only writes the centre 960 px, so it stays
+    // visible while a game runs.
+    auto* exit = Button(stage, "返回应用", 1128, 16, 136, 64, [](lv_event_t* event) {
+        auto* self = static_cast<Tab5NativeApps*>(lv_event_get_user_data(event));
+        self->ExitGame(self->game_playing_ui_.load());
+    }, this);
+    game_exit_label_ = lv_obj_get_child(exit, 0);
 
     // ROM list (gamepad navigates). Dark card, 8 rows.
     game_select_panel_ = Card(stage, 24, 120, 720, 560, 0x0d1b2b, 0x35627d, 24);
@@ -960,8 +956,31 @@ void Tab5NativeApps::FailGameFallback() {
     Schedule(actions_.stop_nes);
 }
 
+// Select (gamepad) or the on-screen button: a running game goes back to the ROM list,
+// the ROM list goes back to the app home.
+void Tab5NativeApps::ExitGame(bool playing) {
+    if (playing) {
+        // Drop further emu frames first so the list is not painted
+        // under a still-running scaler, then ask the emu to stop.
+        game_playing_ui_.store(false);
+        game_stop_ui_pending_.store(true);
+        Schedule(actions_.stop_nes);
+        ShowGameSelect();
+        game_stop_ui_pending_.store(false);
+        return;
+    }
+    Schedule(actions_.stop_nes);
+    Schedule([] {
+        // Leave game mode entirely when exiting to the app home.
+        Application::GetInstance().SetExternalAudioActive(false);
+    });
+    OpenApps();
+}
+
 void Tab5NativeApps::ShowGameSelect() {
     game_playing_ui_.store(false);
+    if (game_exit_label_)
+        lv_label_set_text(game_exit_label_, "返回应用");
     if (game_status_) {
         lv_obj_set_pos(game_status_, 24, 16);
         lv_obj_set_width(game_status_, 900);
@@ -985,6 +1004,8 @@ void Tab5NativeApps::ShowGameSelect() {
 
 void Tab5NativeApps::ShowGamePlay() {
     game_playing_ui_.store(true);
+    if (game_exit_label_)
+        lv_label_set_text(game_exit_label_, "退出游戏");
     if (game_rom_label_) {
         lv_obj_add_flag(game_rom_label_, LV_OBJ_FLAG_HIDDEN);
     }
