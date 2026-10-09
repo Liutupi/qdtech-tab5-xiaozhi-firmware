@@ -6,6 +6,7 @@
 #include "icu_calculators.h"
 #include "lvgl_font.h"
 #include "tab5_home_hub.h"
+#include "tab5_reset_diag.h"
 #include "tab5_muse_inbox.h"
 #include "tab5_music_lyrics.h"
 #include "tab5_music_track_gate.h"
@@ -1242,6 +1243,13 @@ private:
                 return "Requested: " + std::string(d.area.data(), d.area.size()) +
                        std::string(d.label.data(), d.label.size()) + " " + action + (value.empty() ? "" : " " + value);
             });
+        mcp.AddTool("self.system.last_reset",
+                    "Why the Tab5 last restarted unexpectedly (crash, watchdog or brownout), with "
+                    "uptime, RAM and whether music was playing. Use when the user asks why it rebooted.",
+                    PropertyList(), [](const PropertyList&) -> ReturnValue {
+                        const std::string last = tab5_diag::LastAbnormalReset();
+                        return last.empty() ? std::string("No unexpected restart recorded.") : last;
+                    });
         mcp.AddUserOnlyTool("self.muse.set_url",
                     "Set the public Muse relay URL (the MCP URL .../mcp/<token> or the inbox URL "
                     ".../inbox/<token>). Used by the setup script; do not call from conversation.",
@@ -2104,6 +2112,7 @@ public:
                                           : "other",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+        tab5_diag::Start();
         InitializeI2c();
         // 调试用的 I2C 全地址扫描每次开机要多花约 6.6 秒（128 次 200ms 超时），默认关闭。
 #ifdef QDTECH_TAB5_I2C_SCAN_AT_BOOT
