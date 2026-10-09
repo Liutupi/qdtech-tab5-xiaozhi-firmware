@@ -886,7 +886,8 @@ void Tab5NativeApps::BuildGame() {
 
     game_status_ = Label(stage, "手柄：↑↓ 选 ROM · ○ 开始 · Select 返回",
                          &qd_font_lxgw_28, 0x7f9aad, 24, 16, 900);
-    game_rom_label_ = Label(stage, "", &qd_font_lxgw_36, 0xf5f9fd, 24, 64, 1080);
+    // ROM titles are arbitrary Chinese: the full CJK font, not the UI subsets.
+    game_rom_label_ = Label(stage, "", &qd_font_cjk_28, 0xf5f9fd, 24, 70, 1080);
     lv_label_set_long_mode(game_rom_label_, LV_LABEL_LONG_DOT);
     // Touch exit in the right bar: the emulator only writes the centre 960 px, so it stays
     // visible while a game runs.
@@ -902,7 +903,7 @@ void Tab5NativeApps::BuildGame() {
     for (int i = 0; i < 8; ++i) {
         auto* row = Card(game_select_panel_, 16, 16 + i * 66, 688, 58, 0x142d43, 0x2a4a62, 12);
         game_rom_rows_[i] = row;
-        game_rom_names_[i] = Label(row, "", &qd_font_lxgw_28, 0xf5f9fd, 16, 10, 640);
+        game_rom_names_[i] = Label(row, "", &qd_font_cjk_28, 0xf5f9fd, 16, 10, 640);
         lv_label_set_long_mode(game_rom_names_[i], LV_LABEL_LONG_DOT);
         lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
     }

@@ -26,6 +26,8 @@
 #include <esp_random.h>
 #include <freertos/idf_additions.h>
 
+#include "tab5_rom_names.h"
+
 #define TAG "FcEmulator"
 
 namespace {
@@ -115,14 +117,10 @@ std::string utf8_truncate(const std::string& text, size_t max_chars) {
     return text.substr(0, pos) + "~";
 }
 
+// "106.冒险岛2无限人.nes" -> "冒险岛2无限人" (see tab5_rom_names.h). Chinese file names need
+// CONFIG_FATFS_API_ENCODING_UTF_8; with an OEM code page only the digits survived.
 std::string rom_display_name(const std::string& path, size_t max_chars = 22) {
-    std::string name = file_name_from_path(path);
-    strip_nes_extension(name);
-    trim_ascii_space(name);
-    if (name.empty()) {
-        name = file_name_from_path(path);
-    }
-    return utf8_truncate(name, max_chars);
+    return utf8_truncate(tab5_roms::TidyTitle(file_name_from_path(path)), max_chars);
 }
 
 void strip_utf8_bom(std::string& text) {
