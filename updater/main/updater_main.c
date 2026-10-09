@@ -8,6 +8,9 @@
 //
 // Power loss at any point is safe: otadata keeps pointing at this updater and the SD files are
 // only removed after a fully verified write, so the next boot simply retries.
+//
+// The same app also hosts MD (Mega Drive) games (md_main.c): with no firmware update pending,
+// a launch request on the SD card runs the Gwenesis emulator with the whole chip to itself.
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -28,6 +31,7 @@
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "md_main.h"
 #include "psa/crypto.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "sdmmc_cmd.h"
@@ -377,6 +381,8 @@ void app_main(void) {
             delay_ms(30000);
             esp_restart();
         }
+        free(buf);
+        md_maybe_run(factory);  // returns at once without an MD launch request
     } else {
         ESP_LOGW(TAG, "SD card not available");
     }

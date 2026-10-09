@@ -2,5 +2,8 @@
 # Build:  idf.py -C updater set-target esp32p4 && idf.py -C updater build
 cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-set(PROJECT_VER "1.0.0")
+set(PROJECT_VER "1.1.0")  # 1.1: adds MD (Mega Drive) mode
+# Only what main/ needs (it pulls gwenesis and the IDF drivers in through its requirements);
+# keeps unrelated IDF components such as cmock out of the build.
+set(COMPONENTS main)
 project(tab5_updater)
