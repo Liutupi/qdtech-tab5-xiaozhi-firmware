@@ -22,3 +22,6 @@ typedef struct {
 // then goes straight back to the main firmware.
 bool md_board_init(md_board_t* board);
 void md_board_backlight(int percent);
+
+// Raw ST712x touch converted to the same landscape space as the MD picture.
+bool md_board_touch(uint16_t* x, uint16_t* y);

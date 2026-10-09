@@ -4,17 +4,19 @@
 
 #include "driver/gpio.h"
 #include "driver/ledc.h"
-#include "esp_ldo_regulator.h"
 #include "esp_lcd_io_i2c.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_st7121.h"
+#include "esp_lcd_touch_st7123.h"
+#include "esp_ldo_regulator.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char* TAG = "md_board";
+static esp_lcd_touch_handle_t s_touch;
 
 // Same wiring as main/boards/qdtech/tab5/config.h and m5stack_tab5.cc.
 #define I2C_SDA GPIO_NUM_31
@@ -47,7 +49,14 @@ static i2c_master_dev_handle_t add_dev(i2c_master_bus_handle_t bus, uint8_t addr
 
 static void wr(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t value) {
     uint8_t buf[2] = {reg, value};
-    ESP_ERROR_CHECK(i2c_master_transmit(dev, buf, 2, 100));
+    // Match the main firmware: an expander may NACK just after reboot.
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < 4 && err != ESP_OK; ++attempt) {
+        if (attempt)
+            vTaskDelay(pdMS_TO_TICKS(10));
+        err = i2c_master_transmit(dev, buf, 2, 100);
+    }
+    ESP_ERROR_CHECK(err);
 }
 
 static uint8_t rd(i2c_master_dev_handle_t dev, uint8_t reg) {
@@ -217,5 +226,39 @@ bool md_board_init(md_board_t* board) {
         return false;
     }
     ESP_LOGI(TAG, "ST7121 panel");
-    return st7121_init(board);
+    if (!st7121_init(board))
+        return false;
+    esp_lcd_panel_io_i2c_config_t touch_io_cfg = {
+        .dev_addr = ST712X_TOUCH_ADDR,
+        .control_phase_bytes = 1,
+        .lcd_cmd_bits = 16,
+        .scl_speed_hz = 100000,
+        .flags = {.disable_control_phase = 1},
+    };
+    esp_lcd_panel_io_handle_t touch_io = NULL;
+    const esp_lcd_touch_config_t touch_cfg = {
+        .x_max = MD_PANEL_W,
+        .y_max = MD_PANEL_H,
+        .rst_gpio_num = GPIO_NUM_NC,
+        .int_gpio_num = TOUCH_INT_GPIO,
+    };
+    if (esp_lcd_new_panel_io_i2c(board->i2c, &touch_io_cfg, &touch_io) != ESP_OK ||
+        esp_lcd_touch_new_i2c_st7123(touch_io, &touch_cfg, &s_touch) != ESP_OK) {
+        ESP_LOGW(TAG, "touch unavailable; Select+Start still exits");
+    }
+    return true;
+}
+
+bool md_board_touch(uint16_t* x, uint16_t* y) {
+    if (!s_touch || esp_lcd_touch_read_data(s_touch) != ESP_OK)
+        return false;
+    uint8_t count = 0;
+    esp_lcd_touch_point_data_t point[1] = {};
+    if (esp_lcd_touch_get_data(s_touch, point, &count, 1) != ESP_OK || !count)
+        return false;
+    if (point[0].x >= MD_PANEL_W || point[0].y >= MD_PANEL_H)
+        return false;
+    *x = point[0].y;
+    *y = MD_PANEL_W - 1 - point[0].x;
+    return true;
 }

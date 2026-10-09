@@ -52,3 +52,14 @@ Native 电台页支持 relay 返回的 `transcript`（与 `audio_filename` 绑�
 `upload_audio.py --speech-optimize --transcript xxx.timeline.json` 上传，或单独
 `POST /podcast/transcript?episode_id=...`。接口、JSON/SRT/VTT 格式和限制见
 [relay 接入说明](../../../../tools/muse-relay/README.md)。
+
+## MD 与 NES 手柄游戏
+
+原生版游戏页共用游戏列表，左右切换 FC/NES 和 MD。进入页面只扫描和显示列表，选择游戏后才开始运行。MD 从 `/roms/md/catalog.tsv` 读取名称，运行于现有 `ota_0` 升级程序；须同时刷入主程序和本次发布的 `tab5_updater` 1.2.2（含 MD 控制/声音及内存、启动修复）或更新版本。在线升级只更新主程序，旧升级程序须通过 USB 写入 `0xc20000`。保留 12MB 主程序、1MB `ota_0` 和现有 NVS/资产分区。
+
+- USB HID / Sony DS4 和 Xbox360/SN30 X-input 通过同一驱动接收；X-input 使用独立的 vendor 接口轮询，不抢占通用 HID 接口。
+- MD 采用三键手柄：四个方向、Start，面键左/下/右分别为 A/B/C。Select+Start 返回主程序；左上角 `EXIT` 也可触摸返回，不再在90秒后自动退出。
+- MD 的 FM 与 PSG 音频混合后经 ES8388 播放，使用现有音量设置。支持 PAL/NTSC 的有界音频缓冲；声音输出任务与模拟主循环分开。
+- NES 保留原按键映射，Select+Start 返回游戏列表，右上角“退出游戏”在直接输出画面时仍可触摸。列表再按 Select 返回应用。快速退出后重新启动会等旧模拟器结束再接续。音频经三帧有界队列交给独立任务，避免 DAC 写入阻塞主循环，使自动跳帧长期停留在追帧状态。
+
+构建主程序用 `python3 scripts/build.py qdtech/tab5 --name qdtech-tab5-native`；MD 程序使用同一 ESP-IDF 6.1 环境下的 `idf.py -C updater build`。两个镜像分别属于 `factory` 和 `ota_0`，不能写到同一个分区。USB 手柄插拔、实际声音、两个模拟器反复进入/退出须用硬件验证。

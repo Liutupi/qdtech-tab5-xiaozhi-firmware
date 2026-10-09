@@ -28,3 +28,6 @@ uint8_t UsbGamepadNesMask();
 
 // True when a HID gamepad is currently connected.
 bool UsbGamepadConnected();
+
+// MD three-button bits: Up Down Left Right C B A Start (active high).
+uint8_t UsbGamepadMdMask();

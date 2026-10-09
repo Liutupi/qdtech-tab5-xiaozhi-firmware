@@ -15,7 +15,9 @@
 // Gwenesis defines its own BIT(); ESP-IDF headers above already did.
 #undef BIT
 #include "gwenesis.h"
+#include "md_audio.h"
 #include "md_board.h"
+#include "md_controls.h"
 #include "md_video.h"
 
 static const char* TAG = "md";
@@ -23,8 +25,7 @@ static const char* TAG = "md";
 #define LAUNCH_FILE "/sdcard/tab5/md/launch.txt"
 #define MAX_ROM_BYTES (6 * 1024 * 1024)
 #define AUDIO_SAMPLE_RATE 53267
-#define AUDIO_BUFFER_LENGTH (AUDIO_SAMPLE_RATE / 60 + 1)
-#define STAGE1_RUN_SECONDS 90  // no gamepad yet: return to the main firmware on its own
+#define AUDIO_BUFFER_LENGTH 1200  // bounded PAL (313 lines) and NTSC sample buffers
 
 // ---- Symbols the Gwenesis core expects from the host (as in retro-go's gwenesis app).
 extern unsigned char* VRAM;
@@ -44,7 +45,15 @@ int saveGwenesisStateGet(SaveState* state, const char* tagName) { return 0; }
 void saveGwenesisStateSet(SaveState* state, const char* tagName, int value) {}
 void saveGwenesisStateGetBuffer(SaveState* state, const char* tagName, void* buffer, int length) {}
 void saveGwenesisStateSetBuffer(SaveState* state, const char* tagName, void* buffer, int length) {}
-void gwenesis_io_get_buttons(void) {}
+void gwenesis_io_get_buttons(void) {
+    const uint8_t buttons = md_controls_buttons();
+    for (int i = 0; i < 8; ++i) {
+        if (buttons & (1u << i))
+            gwenesis_io_pad_press_button(0, i);
+        else
+            gwenesis_io_pad_release_button(0, i);
+    }
+}
 
 typedef struct {
     char rom[256];
@@ -97,6 +106,7 @@ static uint8_t* load_rom(const char* path, size_t* size_out) {
 }
 
 static void return_to_main(void) {
+    md_audio_mute();
     ESP_LOGI(TAG, "back to the main firmware");
     vTaskDelay(pdMS_TO_TICKS(100));
     esp_restart();
@@ -125,14 +135,15 @@ static void run_game(uint8_t* rom, size_t rom_size) {
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-    const int64_t frame_us = 1000000 / 60;
+    const int fps = REG1_PAL ? 50 : 60;
+    const int64_t frame_us = 1000000 / fps;
     int64_t next = esp_timer_get_time();
-    const int64_t stop_at = next + (int64_t)STAGE1_RUN_SECONDS * 1000000;
     int skip = 0;
     uint32_t frames = 0, drawn = 0;
     int64_t emu_us = 0, last_log = next;
 
-    while (esp_timer_get_time() < stop_at) {
+    while (!md_controls_exit()) {
+        gwenesis_io_get_buttons();
         const int64_t t0 = esp_timer_get_time();
         const bool draw = skip == 0;
         const int lines_per_frame = REG1_PAL ? LINES_PER_FRAME_PAL : LINES_PER_FRAME_NTSC;
@@ -179,6 +190,8 @@ static void run_game(uint8_t* rom, size_t rom_size) {
         }
         gwenesis_SN76489_run(system_clock);
         ym2612_run(system_clock);
+        md_audio_submit(gwenesis_ym2612_buffer, ym2612_index, gwenesis_sn76489_buffer,
+                        sn76489_index, fps);
         m68k.cycles -= system_clock;
 
         const int64_t t1 = esp_timer_get_time();
@@ -230,6 +243,10 @@ void md_maybe_run(const esp_partition_t* factory) {
     static md_board_t board;
     if (!md_board_init(&board))
         return_to_main();
+    if (!md_controls_init())
+        return_to_main();
+    if (!md_audio_init(&board))
+        ESP_LOGW(TAG, "audio unavailable; controls and exit remain active");
     if (!md_video_init(&board))
         return_to_main();
     md_board_backlight(80);

@@ -47,5 +47,41 @@ class MdCatalogTest(unittest.TestCase):
             subprocess.run([str(binary)], check=True)
 
 
+    @unittest.skipUnless(shutil.which("c++"), "C++ compiler required")
+    def test_launcher_requires_controls_audio_version(self):
+        source = (BOARD / "tab5_md_launcher.cc").read_text()
+        guard = "bool MdAppPresent(" + source.split("bool MdAppPresent(", 1)[1].split("\n}", 1)[0] + "\n}"
+        harness = r'''
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+struct esp_partition_t {};
+struct esp_app_desc_t { char project_name[32]; char version[32]; };
+constexpr int ESP_OK=0;
+esp_app_desc_t installed{};
+int result=ESP_OK;
+int esp_ota_get_partition_description(const esp_partition_t*,esp_app_desc_t* out) {
+    *out=installed;return result;
+}
+''' + guard + r'''
+int main(){
+ esp_partition_t slot;
+ std::strcpy(installed.project_name,"tab5_updater");
+ std::strcpy(installed.version,"1.1.0");assert(!MdAppPresent(&slot));
+ std::strcpy(installed.version,"1.2.0");assert(MdAppPresent(&slot));
+ std::strcpy(installed.version,"2.0.0");assert(MdAppPresent(&slot));
+ assert(!MdAppPresent(nullptr));
+ result=-1;assert(!MdAppPresent(&slot));result=ESP_OK;
+ std::strcpy(installed.project_name,"other_app");assert(!MdAppPresent(&slot));
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            cpp=Path(directory)/"guard.cc";cpp.write_text(harness)
+            binary=Path(directory)/"guard"
+            subprocess.run(["c++","-std=c++17","-Wall","-Wextra","-Werror",
+                            str(cpp),"-o",str(binary)],check=True)
+            subprocess.run([str(binary)],check=True)
+
+
 if __name__ == "__main__":
     unittest.main()

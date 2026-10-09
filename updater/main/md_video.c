@@ -44,11 +44,31 @@ static bool on_refresh_done(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_even
     return woken == pdTRUE;
 }
 
+// Landscape sidebar button stays outside the 3x game image in H32/H40 modes.
+static void draw_exit(uint16_t* fb) {
+    static const uint8_t glyph[4][7] = {{31, 16, 16, 30, 16, 16, 31},
+                                        {17, 17, 10, 4, 10, 17, 17},
+                                        {31, 4, 4, 4, 4, 4, 31},
+                                        {31, 4, 4, 4, 4, 4, 4}};
+    for (int y = 36; y < 96; ++y) {
+        for (int x = 24; x < 136; ++x) {
+            const bool border = x < 27 || x >= 133 || y < 39 || y >= 93;
+            uint16_t color = border ? 0xffff : 0x20e6;
+            const int gx = (x - 34) / 4, gy = (y - 51) / 4;
+            if (x >= 34 && y >= 51 && gy < 7 && gx >= 0 && gx < 24 && gx % 6 < 5 &&
+                (glyph[gx / 6][gy] & (1u << (4 - gx % 6))))
+                color = 0xffff;
+            fb[(size_t)x * MD_PANEL_W + MD_PANEL_W - 1 - y] = color;
+        }
+    }
+}
+
 void md_video_clear(uint16_t color) {
     for (int b = 0; b < 2; ++b) {
         uint16_t* fb = s_board->fb[b];
         for (size_t i = 0; i < (size_t)MD_PANEL_W * MD_PANEL_H; ++i)
             fb[i] = color;
+        draw_exit(fb);
         esp_cache_msync(fb, FB_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     }
 }
@@ -64,6 +84,7 @@ static void present_one(int i) {
         // Mode change (H32/H40, NTSC/PAL): clear the old image area in both buffers.
         for (int b = 0; b < 2; ++b) {
             memset(s_board->fb[b], 0, FB_BYTES);
+            draw_exit(s_board->fb[b]);
             esp_cache_msync(s_board->fb[b], FB_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
         }
         s_last_w = w;
@@ -123,8 +144,10 @@ static void presenter_task(void* arg) {
 }
 
 static uint16_t* alloc_rgb(void) {
-    uint16_t* p = heap_caps_aligned_calloc(128, 1, RGB_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-    return p ? p : heap_caps_aligned_calloc(128, 1, RGB_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    // Reserve internal RAM for VRAM, the indexed renderer, USB endpoints and
+    // I2S DMA. Two 150 KiB RGB staging pictures exhausted it once input/audio
+    // were enabled. PPA reads aligned PSRAM directly.
+    return heap_caps_aligned_calloc(128, 1, RGB_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
 }
 
 bool md_video_init(md_board_t* board) {

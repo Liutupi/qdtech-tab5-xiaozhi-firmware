@@ -1,12 +1,12 @@
 #include "application.h"
 #include "button.h"
 #include "display/lcd_display.h"
+#include "tab5_reset_diag.h"
 #if CONFIG_QDTECH_TAB5_NATIVE_UI
 #include "assets.h"
 #include "icu_calculators.h"
 #include "lvgl_font.h"
 #include "tab5_home_hub.h"
-#include "tab5_reset_diag.h"
 #include "tab5_muse_inbox.h"
 #include "tab5_music_lyrics.h"
 #include "tab5_music_track_gate.h"
@@ -950,7 +950,7 @@ private:
                         ReplaceMusicSource([this] {
                             radio_service_.Stop();
                             fc_emulator_service_.SetActive(true);
-                            fc_emulator_service_.PlayPause();
+                            fc_emulator_service_.PrepareTask();
                         });
                         return UsbGamepadConnected()
                                    ? std::string("NES started. USB gamepad connected.")
@@ -1564,6 +1564,48 @@ private:
     }
 #endif
 
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+    void StartGameTouchExit() {
+        // LVGL's timers (including pointer reads) stop during direct NES scan-out.
+        // A separate bounded touch poll keeps the visible sidebar exit usable.
+        TaskHandle_t task = nullptr;
+        const auto run = [](void* arg) {
+            auto* board = static_cast<QdtechTab5Board*>(arg);
+            bool armed = false;
+            for (;;) {
+                if (!tab5_nes_video::Active() || !board->touch_) {
+                    armed = false;
+                } else {
+                    uint8_t count = 0;
+                    esp_lcd_touch_point_data_t point[1] = {};
+                    const bool read_ok =
+                        esp_lcd_touch_read_data(board->touch_) == ESP_OK &&
+                        esp_lcd_touch_get_data(board->touch_, point, &count, 1) == ESP_OK;
+                    if (read_ok) {
+                        const bool down = count != 0;
+                        const bool inside = down && point[0].y >= 1128 && point[0].y < 1264 &&
+                                            point[0].x >= 640 && point[0].x < 704;
+                        if (armed && !down) {
+                            Application::GetInstance().Schedule([board] {
+                                if (tab5_nes_video::Active())
+                                    board->fc_emulator_service_.Stop();
+                            });
+                        }
+                        if (down)
+                            armed = inside;
+                        else
+                            armed = false;
+                    }
+                }
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+        };
+        if (xTaskCreateWithCaps(run, "nes_touch", 3072, this, 3, &task,
+                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS)
+            ESP_LOGW(TAG, "NES touch exit task unavailable; use Select+Start");
+    }
+#endif
+
     void RegisterTouchWithLvgl() {
         if (touch_ == nullptr) {
             ESP_LOGE(TAG, "Touch controller was not initialized");
@@ -1623,6 +1665,10 @@ private:
         }
         lvgl_port_unlock();
         ESP_LOGI(TAG, "LVGL touch input %s", indev ? "registered" : "registration failed");
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+        if (indev)
+            StartGameTouchExit();
+#endif
     }
 
     void InitializeI2c() {

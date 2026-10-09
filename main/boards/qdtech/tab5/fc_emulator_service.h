@@ -10,6 +10,8 @@
 #include <vector>
 
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 class FcEmulatorService {
@@ -37,7 +39,7 @@ public:
     bool PrepareSdCard();
     void PrepareTask();
     void PlayPause();
-    void Stop();
+    void Stop(bool restart = false);
     void Next();
     void Prev();
     void SelectRomIndex(int index);
@@ -54,6 +56,20 @@ private:
         uint16_t* pixels = nullptr;
         size_t pixel_count = 0;
     };
+
+    struct AudioFrame {
+        uint32_t generation;
+        int count;
+        int rate;
+        int16_t samples[512];
+    };
+    QueueHandle_t audio_queue_ = nullptr;
+    SemaphoreHandle_t audio_mutex_ = nullptr;
+    TaskHandle_t audio_task_ = nullptr;
+    std::atomic<uint32_t> audio_generation_{0};
+    bool EnsureAudioTask();
+    void QueueNofrendoAudio(const int16_t* samples, int count, int rate);
+    static void AudioTaskWrapper(void* arg);
 
     UiSink ui_sink_;
     TaskHandle_t task_handle_ = nullptr;

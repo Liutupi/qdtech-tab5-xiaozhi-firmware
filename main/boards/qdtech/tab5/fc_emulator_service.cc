@@ -290,9 +290,9 @@ void FcEmulatorService::PlayPause() {
     ESP_LOGI(TAG, "fc start requested rom=%s", SelectedName().c_str());
 }
 
-void FcEmulatorService::Stop() {
+void FcEmulatorService::Stop(bool restart) {
     start_requested_.store(false);
-    play_after_stop_.store(false);
+    play_after_stop_.store(restart);
     if (playing_.load()) {
         // Only signal the emu thread. Touching LVGL / publishing from here
         // while qd_nofrendo_run is still on the stack causes Load access fault.
@@ -307,6 +307,10 @@ void FcEmulatorService::Stop() {
     PublishMode(false);
     PublishState(roms_.empty() ? "No ROM" : "Select ROM",
                  roms_.empty() ? "Put .nes files in /nes" : SelectedName().c_str());
+    if (restart && active_.load()) {
+        play_after_stop_.store(false);
+        start_requested_.store(true);
+    }
     ESP_LOGI(TAG, "fc stop/list");
 }
 
@@ -443,7 +447,8 @@ int FcEmulatorService::NofrendoFrameThunk(const uint16_t* pixels, uint16_t width
 void FcEmulatorService::NofrendoAudioThunk(const int16_t* samples, int sample_count, int sample_rate, void* user) {
     auto* self = static_cast<FcEmulatorService*>(user);
     if (self) {
-        self->WriteNofrendoAudio(samples, sample_count, sample_rate);
+        self->PollPadOnFrame();
+        self->QueueNofrendoAudio(samples, sample_count, sample_rate);
     }
 }
 
@@ -763,6 +768,14 @@ void FcEmulatorService::RunNofrendoRom() {
         return;
     }
 
+    if (!EnsureAudioTask()) {
+        playing_.store(false);
+        PublishMode(false);
+        PublishState("FC unavailable", "Audio task allocation failed");
+        return;
+    }
+    audio_generation_.fetch_add(1);
+    xQueueReset(audio_queue_);
     exit_combo_latched_ = false;
     if (video_begin_hook_) {
         video_begin_hook_();
@@ -784,7 +797,10 @@ void FcEmulatorService::RunNofrendoRom() {
     controller_state_.store(0);
     controller_release_tick_.store(0);
     playing_.store(false);
+    xSemaphoreTake(audio_mutex_, portMAX_DELAY);
+    xQueueReset(audio_queue_);
     audio_output_buf_.clear();
+    xSemaphoreGive(audio_mutex_);
     // Give the panel back to LVGL before any UI publishing below.
     if (video_end_hook_) {
         video_end_hook_();
@@ -899,6 +915,49 @@ bool FcEmulatorService::PublishDirectFrame(const uint16_t* pixels, uint16_t widt
     return direct_frame_cb_(pixels, width, height);
 }
 
+bool FcEmulatorService::EnsureAudioTask() {
+    if (audio_task_)
+        return true;
+    if (!audio_mutex_)
+        audio_mutex_ = xSemaphoreCreateMutex();
+    if (!audio_queue_)
+        audio_queue_ =
+            xQueueCreateWithCaps(3, sizeof(AudioFrame), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!audio_mutex_ || !audio_queue_)
+        return false;
+    return xTaskCreateWithCaps(AudioTaskWrapper, "fc_audio", 6144, this, 4, &audio_task_,
+                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS;
+}
+
+void FcEmulatorService::QueueNofrendoAudio(const int16_t* samples, int count, int rate) {
+    if (!audio_queue_ || !playing_.load() || !samples || count <= 0 || count > 512 || rate <= 0)
+        return;
+    AudioFrame frame{};
+    frame.generation = audio_generation_.load();
+    frame.count = count;
+    frame.rate = rate;
+    memcpy(frame.samples, samples, count * sizeof(int16_t));
+    // Never make the 6502 loop wait for the DAC: that traps auto frame skip
+    // in catch-up mode and leaves the first black frame on screen forever.
+    if (xQueueSend(audio_queue_, &frame, 0) != pdTRUE) {
+        AudioFrame old;
+        xQueueReceive(audio_queue_, &old, 0);
+        xQueueSend(audio_queue_, &frame, 0);
+    }
+}
+
+void FcEmulatorService::AudioTaskWrapper(void* arg) {
+    auto* self = static_cast<FcEmulatorService*>(arg);
+    AudioFrame frame;
+    for (;;) {
+        if (xQueueReceive(self->audio_queue_, &frame, portMAX_DELAY) != pdTRUE)
+            continue;
+        xSemaphoreTake(self->audio_mutex_, portMAX_DELAY);
+        if (self->playing_.load() && frame.generation == self->audio_generation_.load())
+            self->WriteNofrendoAudio(frame.samples, frame.count, frame.rate);
+        xSemaphoreGive(self->audio_mutex_);
+    }
+}
 
 void FcEmulatorService::WriteNofrendoAudio(const int16_t* samples, int sample_count, int sample_rate) {
     if (!playing_.load() || !samples || sample_count <= 0 || sample_rate <= 0) {
@@ -1003,8 +1062,7 @@ void FcEmulatorService::StartSelected() {
     }
     if (playing_.load()) {
         ESP_LOGW(TAG, "fc start: previous rom still running, queue restart");
-        play_after_stop_.store(true);
-        Stop();
+        Stop(true);
         return;
     }
     play_after_stop_.store(false);

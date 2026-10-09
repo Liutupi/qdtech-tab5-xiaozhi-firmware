@@ -1,0 +1,5 @@
+dependencies:
+  espressif/usb_host_hid: "^1.2.0"
+  espressif/esp_codec_dev: "~1.6.2"
+  espressif/esp_lcd_touch_st7123: "^1.0.2"
+  idf: ">=6.0.1"

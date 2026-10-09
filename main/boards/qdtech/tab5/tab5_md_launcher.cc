@@ -20,7 +20,8 @@ constexpr const char* kLaunchDir = "/sdcard/tab5/md";
 constexpr const char* kLaunchFile = "/sdcard/tab5/md/launch.txt";
 constexpr size_t kMaxCatalogBytes = 64 * 1024;
 
-// The ota_0 app must be the Tab5 updater with MD support (version 1.1 or later).
+// The ota_0 app must be the Tab5 updater with MD support (version 1.2 or later
+// (controls/audio/exit)).
 bool MdAppPresent(const esp_partition_t* app) {
     esp_app_desc_t desc = {};
     if (!app || esp_ota_get_partition_description(app, &desc) != ESP_OK)
@@ -28,7 +29,8 @@ bool MdAppPresent(const esp_partition_t* app) {
     if (std::strncmp(desc.project_name, "tab5_updater", sizeof(desc.project_name)) != 0)
         return false;
     int major = 0, minor = 0;
-    return std::sscanf(desc.version, "%d.%d", &major, &minor) == 2 && (major > 1 || (major == 1 && minor >= 1));
+    return std::sscanf(desc.version, "%d.%d", &major, &minor) == 2 &&
+           (major > 1 || (major == 1 && minor >= 2));
 }
 
 }  // namespace
@@ -55,7 +57,7 @@ std::string Launch(const Game& game) {
     const esp_partition_t* app =
         esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
     if (!MdAppPresent(app))
-        return "缺少 MD 模拟器，请用 USB 刷入最新升级程序";
+        return "MD 模拟器需 1.2 或更新版本，请用 USB 更新升级程序";
     const std::string rom = std::string(kRomDir) + "/" + std::string(game.file.data(), game.file.size());
     struct stat st;
     if (stat(rom.c_str(), &st) != 0 || st.st_size <= 0)

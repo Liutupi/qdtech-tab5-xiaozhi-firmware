@@ -1,6 +1,6 @@
 # 小智桌面固件：QDTech S3 → M5Stack Tab5 移植
 
-这是面向 M5Stack Tab5 的开发中固件。`qdtech-tab5-native` 变体直接按 1280 × 720 绘制 Nabo 主界面、时分秒翻页时钟与应用页；支持配网、亮度、音量、网络电台、音乐歌词、ICU 计算器和人体感应。原 `qdtech-tab5` 变体保留旧桌面。当前公开版本为 [v1.0.9](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.9)；各功能的实机验证程度见 [移植状态](PORTING_STATUS.md) 和 [交接本](HANDOFF.md)。
+这是面向 M5Stack Tab5 的开发中固件。`qdtech-tab5-native` 变体直接按 1280 × 720 绘制 Nabo 主界面、时分秒翻页时钟与应用页；支持配网、亮度、音量、网络电台、音乐歌词、ICU 计算器和人体感应。原 `qdtech-tab5` 变体保留旧桌面。当前公开版本为 [v1.0.10](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.10)；各功能的实机验证程度见 [移植状态](PORTING_STATUS.md) 和 [交接本](HANDOFF.md)。
 
 ## 固件与在线升级
 
@@ -8,9 +8,13 @@
 
 首次从旧分区布局升级需要一次 USB 刷写（分区表、主固件和升级程序）；已有兼容分区布局的设备可在设置页升级。NAS 网易云点歌路径还要求 NAS 上的 Muse relay 和网易云 MCP 容器按 [板级说明](main/boards/qdtech/tab5/README.md) 配置；单独刷固件不会建立 NAS 服务。
 
+## MD 世嘉与 NES 游戏
+
+MD 世嘉和 NES 游戏已接入最新游戏页。MD 需随版升级程序 **1.2.2**；在线升级仅更新主程序，旧设备还需用 USB 将升级程序写到 **`0xc20000`**。按键、ROM 目录和构建说明见[板级说明](main/boards/qdtech/tab5/README.md#md-与-nes-手柄游戏)。
+
 ## Muse 电台与播客
 
-v1.0.9 的 Muse 电台页分开提供“播放播客”和“播放推荐歌曲”，支持手动刷新节目。原声播客使用 NAS relay 托管的 MP3，推荐歌曲继续按歌名和歌手通过网易云播放。字幕以实际播放的音频帧为时钟，当前段落高亮并自动滚动；手动浏览文案时会暂缓自动滚动。未提供时间轴的节目仍显示全文。
+v1.0.9 起，Muse 电台页分开提供“播放播客”和“播放推荐歌曲”，支持手动刷新节目。原声播客使用 NAS relay 托管的 MP3，推荐歌曲继续按歌名和歌手通过网易云播放。字幕以实际播放的音频帧为时钟，当前段落高亮并自动滚动；手动浏览文案时会暂缓自动滚动。未提供时间轴的节目仍显示全文。
 
 Relay 支持分片上传音频和单独推送字幕，可接收 Muse 的 `lines` 时间轴 JSON。接口、认证、上传客户端与参数见 [Muse relay 说明](tools/muse-relay/README.md)。设备固件和 relay 均需更新才能使用这些功能。
 
