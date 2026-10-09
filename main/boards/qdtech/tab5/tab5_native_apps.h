@@ -10,6 +10,7 @@
 #include "tab5_home_page.h"
 #include "tab5_icu_page.h"
 #include "tab5_ir_remote_page.h"
+#include "tab5_md_launcher.h"
 #include "tab5_muse_inbox.h"
 #include "tab5_podcast_page.h"
 
@@ -45,6 +46,7 @@ public:
         std::function<void()> nes_play_pause;
         std::function<void()> nes_next;
         std::function<void()> nes_previous;
+        std::function<void(int)> nes_select;
         std::function<void()> nes_status;
         std::function<int()> nes_rom_count;
         std::function<std::string(int)> nes_rom_name;
@@ -138,6 +140,12 @@ private:
     lv_obj_t* game_play_panel_ = nullptr;
     lv_obj_t* game_rom_label_ = nullptr;
     lv_obj_t* game_exit_label_ = nullptr;
+    // FC (NES, in this firmware) or MD (Mega Drive, launched into the ota_0 app).
+    lv_obj_t* game_mode_btns_[2] = {};
+    bool game_md_mode_ = false;
+    int md_selected_ = 0;
+    int game_list_start_ = 0;
+    std::shared_ptr<const tab5_md::Catalog> md_catalog_;
     lv_obj_t* game_rom_rows_[8] = {};
     lv_obj_t* game_rom_names_[8] = {};
     lv_img_dsc_t game_img_{};
@@ -206,6 +214,12 @@ private:
     void ShowGameSelect();
     void ShowGamePlay();
     void ExitGame(bool playing);
+    void SetGameMode(bool md);
+    int GameListCount() const;
+    int GameListIndex() const;
+    std::string GameListName(int index) const;
+    void SelectGame(int index, bool start);
+    void LaunchMdGame();
     void UpdateWave();
     static void DrawWave(lv_event_t* event);
     static void DrawNes(lv_event_t* event);

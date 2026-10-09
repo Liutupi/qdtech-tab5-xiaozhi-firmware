@@ -320,17 +320,27 @@ void Tab5NativeApps::Tick() {
         last_pad = pad;
         const bool playing = game_playing_ui_.load();
         if (!playing) {
-            // ROM list mode — D-pad selects, A starts.
-            if (pressed & kNesBtnUp) Schedule(actions_.nes_previous);
-            if (pressed & kNesBtnDown) Schedule(actions_.nes_next);
-            if (pressed & (kNesBtnA | kNesBtnStart)) {
-                Schedule(actions_.nes_play_pause);
-                ShowGamePlay();
+            // ROM list mode — D-pad selects, A starts, Left/Right switch FC / MD.
+            if (pressed & (kNesBtnLeft | kNesBtnRight))
+                SetGameMode(!game_md_mode_);
+            if (game_md_mode_) {
+                const int count = GameListCount();
+                if ((pressed & kNesBtnUp) && count > 0)
+                    md_selected_ = (md_selected_ + count - 1) % count;
+                if ((pressed & kNesBtnDown) && count > 0)
+                    md_selected_ = (md_selected_ + 1) % count;
+                if (pressed & (kNesBtnA | kNesBtnStart))
+                    LaunchMdGame();
+            } else {
+                if (pressed & kNesBtnUp) Schedule(actions_.nes_previous);
+                if (pressed & kNesBtnDown) Schedule(actions_.nes_next);
+                if (pressed & (kNesBtnA | kNesBtnStart)) {
+                    Schedule(actions_.nes_play_pause);
+                    ShowGamePlay();
+                }
             }
             // The list changes only when the scanner or selection changes.
-            const int count = actions_.nes_rom_count ? actions_.nes_rom_count() : 0;
-            const int selected = actions_.nes_rom_index ? actions_.nes_rom_index() : 0;
-            if (count != game_list_count_ || selected != game_list_index_)
+            if (GameListCount() != game_list_count_ || GameListIndex() != game_list_index_)
                 RefreshGameRoms();
         }
         constexpr uint8_t kExitCombo = kNesBtnSelect | kNesBtnStart;
@@ -884,8 +894,8 @@ void Tab5NativeApps::BuildGame() {
         lv_obj_add_flag(game_canvas_, LV_OBJ_FLAG_HIDDEN);
     }
 
-    game_status_ = Label(stage, "手柄：↑↓ 选 ROM · ○ 开始 · Select 返回",
-                         &qd_font_lxgw_28, 0x7f9aad, 24, 16, 900);
+    game_status_ = Label(stage, "手柄：上下选游戏 · A 开始 · 左右切换 FC/MD · Select 返回 · 也可直接点游戏",
+                         &qd_font_cjk_28, 0x7f9aad, 24, 16, 1090);
     // ROM titles are arbitrary Chinese: the full CJK font, not the UI subsets.
     game_rom_label_ = Label(stage, "", &qd_font_cjk_28, 0xf5f9fd, 24, 70, 1080);
     lv_label_set_long_mode(game_rom_label_, LV_LABEL_LONG_DOT);
@@ -903,11 +913,102 @@ void Tab5NativeApps::BuildGame() {
     for (int i = 0; i < 8; ++i) {
         auto* row = Card(game_select_panel_, 16, 16 + i * 66, 688, 58, 0x142d43, 0x2a4a62, 12);
         game_rom_rows_[i] = row;
+        // Tap a game to start it (gamepad: up/down + A still works).
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_user_data(row, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
+        lv_obj_add_event_cb(row, [](lv_event_t* event) {
+            auto* self = static_cast<Tab5NativeApps*>(lv_event_get_user_data(event));
+            auto* target = static_cast<lv_obj_t*>(lv_event_get_current_target(event));
+            const int slot = static_cast<int>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(target)));
+            self->SelectGame(self->game_list_start_ + slot, true);
+        }, LV_EVENT_CLICKED, this);
         game_rom_names_[i] = Label(row, "", &qd_font_cjk_28, 0xf5f9fd, 16, 10, 640);
         lv_label_set_long_mode(game_rom_names_[i], LV_LABEL_LONG_DOT);
         lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
     }
+    game_mode_btns_[0] = Button(stage, "FC 红白机", 772, 136, 240, 72, [](lv_event_t* event) {
+        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->SetGameMode(false);
+    }, this);
+    game_mode_btns_[1] = Button(stage, "MD 世嘉", 772, 224, 240, 72, [](lv_event_t* event) {
+        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->SetGameMode(true);
+    }, this);
+    for (auto* button : game_mode_btns_)
+        lv_obj_set_style_text_font(lv_obj_get_child(button, 0), &qd_font_cjk_28, 0);
+    SetGameMode(false);
+}
+
+void Tab5NativeApps::SetGameMode(bool md) {
+    game_md_mode_ = md;
+    if (md && !md_catalog_)
+        md_catalog_ = tab5_md::LoadCatalog();
+    for (int i = 0; i < 2; ++i)
+        if (game_mode_btns_[i])
+            lv_obj_set_style_bg_color(game_mode_btns_[i], lv_color_hex(i == (md ? 1 : 0) ? 0x1d8493 : 0x254c66), 0);
+    if (game_status_)
+        SetLabelTextIfChanged(game_status_, md ? "MD：上下选游戏 · A 开始(切换到 MD 模式) · 左右切换 FC/MD · 也可直接点游戏"
+                                               : "手柄：上下选游戏 · A 开始 · 左右切换 FC/MD · Select 返回 · 也可直接点游戏");
+    game_list_count_ = -1;  // force a redraw
     RefreshGameRoms();
+}
+
+int Tab5NativeApps::GameListCount() const {
+    if (game_md_mode_)
+        return md_catalog_ ? int(md_catalog_->size()) : 0;
+    return actions_.nes_rom_count ? actions_.nes_rom_count() : 0;
+}
+
+int Tab5NativeApps::GameListIndex() const {
+    if (game_md_mode_)
+        return md_selected_;
+    return actions_.nes_rom_index ? actions_.nes_rom_index() : 0;
+}
+
+std::string Tab5NativeApps::GameListName(int index) const {
+    if (game_md_mode_) {
+        if (!md_catalog_ || index < 0 || index >= int(md_catalog_->size()))
+            return {};
+        const auto& game = (*md_catalog_)[index];
+        std::string name(game.title.data(), game.title.size());
+        if (!game.category.empty())
+            name += "  · " + std::string(game.category.data(), game.category.size());
+        return name;
+    }
+    return actions_.nes_rom_name ? actions_.nes_rom_name(index) : std::string();
+}
+
+void Tab5NativeApps::SelectGame(int index, bool start) {
+    if (index < 0 || index >= GameListCount() || game_playing_ui_.load())
+        return;
+    if (game_md_mode_) {
+        md_selected_ = index;
+        RefreshGameRoms();
+        if (start)
+            LaunchMdGame();
+        return;
+    }
+    if (actions_.nes_select) {
+        auto select = actions_.nes_select;
+        Schedule([select, index] { select(index); });
+    }
+    if (start) {
+        Schedule(actions_.nes_play_pause);
+        ShowGamePlay();
+    }
+}
+
+// MD runs in the ota_0 app: write the launch request and reboot (main task, SD + NVS).
+void Tab5NativeApps::LaunchMdGame() {
+    if (!md_catalog_ || md_selected_ < 0 || md_selected_ >= int(md_catalog_->size()))
+        return;
+    const tab5_md::Game game = (*md_catalog_)[md_selected_];
+    SetLabelTextIfChanged(game_status_, "正在切换到 MD 模式…");
+    Schedule([this, game] {
+        const std::string error = tab5_md::Launch(game);  // reboots on success
+        if (error.empty() || !lvgl_port_lock(1000))
+            return;
+        SetLabelTextIfChanged(game_status_, error.c_str());
+        lvgl_port_unlock();
+    });
 }
 
 bool Tab5NativeApps::EnsureGameFallbackBuffers() {
@@ -992,8 +1093,12 @@ void Tab5NativeApps::ShowGameSelect() {
     if (game_select_panel_) {
         lv_obj_remove_flag(game_select_panel_, LV_OBJ_FLAG_HIDDEN);
     }
+    for (auto* button : game_mode_btns_)
+        if (button)
+            lv_obj_remove_flag(button, LV_OBJ_FLAG_HIDDEN);
     if (game_status_) {
-        lv_label_set_text(game_status_, "手柄：↑↓ 选 ROM · ○ 开始 · Select 返回");
+        lv_label_set_text(game_status_, game_md_mode_ ? "MD：上下选游戏 · A 开始(切换到 MD 模式) · 左右切换 FC/MD · 也可直接点游戏"
+                                                      : "手柄：上下选游戏 · A 开始 · 左右切换 FC/MD · Select 返回 · 也可直接点游戏");
     }
     if (game_canvas_) {
         lv_obj_add_flag(game_canvas_, LV_OBJ_FLAG_HIDDEN);
@@ -1013,6 +1118,9 @@ void Tab5NativeApps::ShowGamePlay() {
     if (game_select_panel_) {
         lv_obj_add_flag(game_select_panel_, LV_OBJ_FLAG_HIDDEN);
     }
+    for (auto* button : game_mode_btns_)
+        if (button)
+            lv_obj_add_flag(button, LV_OBJ_FLAG_HIDDEN);
     if (tab5_nes_video::Available()) {
         // The emulator writes the centre of the panel directly; keep LVGL's
         // image hidden and park a short hint in the left bar (x < 160 stays
@@ -1032,8 +1140,8 @@ void Tab5NativeApps::ShowGamePlay() {
 
 void Tab5NativeApps::RefreshGameRoms() {
     if (!game_select_panel_) return;
-    const int count = actions_.nes_rom_count ? actions_.nes_rom_count() : 0;
-    const int sel = actions_.nes_rom_index ? actions_.nes_rom_index() : 0;
+    const int count = GameListCount();
+    const int sel = GameListIndex();
     game_list_count_ = count;
     game_list_index_ = sel;
     if (count <= 0) {
@@ -1042,18 +1150,19 @@ void Tab5NativeApps::RefreshGameRoms() {
             if (row)
                 lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
         if (game_status_) {
-            SetLabelTextIfChanged(game_status_, "SD /nes 未找到 ROM");
+            SetLabelTextIfChanged(game_status_, game_md_mode_ ? "SD 卡 /roms/md 未找到 MD 游戏 (catalog.tsv)"
+                                                              : "SD /nes 未找到 ROM");
         }
         return;
     }
-    if (game_rom_label_ && actions_.nes_rom_name)
-        SetLabelTextIfChanged(game_rom_label_,
-                              actions_.nes_rom_name(std::clamp(sel, 0, count - 1)).c_str());
+    if (game_rom_label_)
+        SetLabelTextIfChanged(game_rom_label_, GameListName(std::clamp(sel, 0, count - 1)).c_str());
     // Window of 8 rows centered on selection.
     const int rows = 8;
     int start = sel - rows / 2;
     if (start < 0) start = 0;
     if (start + rows > count) start = count > rows ? count - rows : 0;
+    game_list_start_ = start;
     for (int i = 0; i < rows; ++i) {
         if (!game_rom_rows_[i]) continue;
         const int idx = start + i;
@@ -1062,12 +1171,9 @@ void Tab5NativeApps::RefreshGameRoms() {
             continue;
         }
         lv_obj_remove_flag(game_rom_rows_[i], LV_OBJ_FLAG_HIDDEN);
-        if (game_rom_names_[i] && actions_.nes_rom_name) {
-            char text[80];
-            snprintf(text, sizeof(text), "%s%s", idx == sel ? "▶ " : "",
-                     actions_.nes_rom_name(idx).c_str());
-            SetLabelTextIfChanged(game_rom_names_[i], text);
-        }
+        // The highlight colour marks the selection (the CJK font has no arrow glyph).
+        if (game_rom_names_[i])
+            SetLabelTextIfChanged(game_rom_names_[i], GameListName(idx).c_str());
         lv_obj_set_style_bg_color(
             game_rom_rows_[i],
             lv_color_hex(idx == sel ? 0x1d8493 : 0x142d43), 0);

@@ -2373,6 +2373,7 @@ public:
             };
             actions.nes_next = [this] { fc_emulator_service_.Next(); };
             actions.nes_previous = [this] { fc_emulator_service_.Prev(); };
+            actions.nes_select = [this](int i) { fc_emulator_service_.SelectRomIndex(i); };
             actions.nes_status = [this] {
                 char buf[160];
                 snprintf(buf, sizeof(buf), "手柄: %s  ROM: %s",
