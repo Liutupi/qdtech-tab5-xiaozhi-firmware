@@ -2,26 +2,41 @@
 
 #include <string.h>
 
+#include "driver/ppa.h"
 #include "esp_cache.h"
+#include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char* TAG = "md_video";
 
 #define SCALE 3
 #define FB_BYTES ((size_t)MD_PANEL_W * MD_PANEL_H * 2)
+#define RGB_BYTES (320 * 240 * 2)
 
+// Two-core pipeline: the emulator (core 0) only expands palette indices into one of two
+// small RGB565 pictures (~1 ms); a presenter task on core 1 waits for VSYNC, has the PPA
+// scale it 3x and rotate it into the back scan-out buffer (~9 ms) and flips. The newest
+// picture wins: one the presenter has not picked up yet is overwritten.
 static md_board_t* s_board;
 static SemaphoreHandle_t s_vsync;
-static int s_cur;  // index of the buffer being scanned out
+static TaskHandle_t s_presenter;
+static ppa_client_handle_t s_ppa;
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint16_t* s_rgb[2];
+static int s_rgb_w[2], s_rgb_h[2];
+static int s_ready = -1;  // picture waiting for the presenter
+static int s_busy = -1;   // picture the presenter is reading
+static int s_cur;         // scan-out buffer on screen
 static bool s_flip_pending;
-static uint32_t s_shown, s_skipped;
-static int64_t s_blit_us, s_last_log;
 static int s_last_w, s_last_h;
+static uint32_t s_shown, s_replaced;
+static int64_t s_ppa_us, s_last_log;
 
 static bool on_refresh_done(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t* edata, void* ctx) {
     BaseType_t woken = pdFALSE;
@@ -38,80 +53,122 @@ void md_video_clear(uint16_t color) {
     }
 }
 
-void md_video_init(md_board_t* board) {
+static void present_one(int i) {
+    const int w = s_rgb_w[i], h = s_rgb_h[i];
+    if (s_flip_pending) {
+        // The previous flip happens at VSYNC; until then the old front is still scanned out.
+        xSemaphoreTake(s_vsync, pdMS_TO_TICKS(50));
+        s_flip_pending = false;
+    }
+    if (w != s_last_w || h != s_last_h) {
+        // Mode change (H32/H40, NTSC/PAL): clear the old image area in both buffers.
+        for (int b = 0; b < 2; ++b) {
+            memset(s_board->fb[b], 0, FB_BYTES);
+            esp_cache_msync(s_board->fb[b], FB_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        }
+        s_last_w = w;
+        s_last_h = h;
+    }
+    const int back = s_cur ^ 1;
+    uint16_t* fb = s_board->fb[back];
+    const int64_t t0 = esp_timer_get_time();
+    // Scale 3x and rotate 90 degrees clockwise (270 CCW): landscape (x, y) -> physical (719 - y, x).
+    ppa_srm_oper_config_t op = {
+        .in = {.buffer = s_rgb[i], .pic_w = w, .pic_h = h, .block_w = w, .block_h = h,
+               .srm_cm = PPA_SRM_COLOR_MODE_RGB565},
+        .out = {.buffer = fb, .buffer_size = FB_BYTES, .pic_w = MD_PANEL_W, .pic_h = MD_PANEL_H,
+                .block_offset_x = (MD_PANEL_W - h * SCALE) / 2,
+                .block_offset_y = (MD_PANEL_H - w * SCALE) / 2,
+                .srm_cm = PPA_SRM_COLOR_MODE_RGB565},
+        .rotation_angle = PPA_SRM_ROTATION_ANGLE_270,
+        .scale_x = SCALE,
+        .scale_y = SCALE,
+        .mode = PPA_TRANS_MODE_BLOCKING,
+    };
+    if (ppa_do_scale_rotate_mirror(s_ppa, &op) != ESP_OK)
+        return;
+    const int64_t t1 = esp_timer_get_time();
+    const int x0 = (MD_PANEL_H - w * SCALE) / 2;
+    xSemaphoreTake(s_vsync, 0);
+    // Passing the DPI frame buffer itself makes the driver flip to it (no copy).
+    esp_lcd_panel_draw_bitmap(s_board->panel, 0, x0, MD_PANEL_W, x0 + w * SCALE, fb + (size_t)x0 * MD_PANEL_W);
+    s_cur = back;
+    s_flip_pending = true;
+    s_ppa_us += t1 - t0;
+    ++s_shown;
+}
+
+static void presenter_task(void* arg) {
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        portENTER_CRITICAL(&s_lock);
+        const int i = s_ready;
+        s_busy = i;
+        s_ready = -1;
+        portEXIT_CRITICAL(&s_lock);
+        if (i >= 0)
+            present_one(i);
+        portENTER_CRITICAL(&s_lock);
+        s_busy = -1;
+        portEXIT_CRITICAL(&s_lock);
+        const int64_t now = esp_timer_get_time();
+        if (now - s_last_log >= 2000000) {
+            ESP_LOGI(TAG, "shown=%lu replaced=%lu per 2 s, ppa avg=%lld us", (unsigned long)s_shown,
+                     (unsigned long)s_replaced, (long long)(s_shown ? s_ppa_us / s_shown : 0));
+            s_shown = s_replaced = 0;
+            s_ppa_us = 0;
+            s_last_log = now;
+        }
+    }
+}
+
+static uint16_t* alloc_rgb(void) {
+    uint16_t* p = heap_caps_aligned_calloc(128, 1, RGB_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    return p ? p : heap_caps_aligned_calloc(128, 1, RGB_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+}
+
+bool md_video_init(md_board_t* board) {
     s_board = board;
     s_vsync = xSemaphoreCreateBinary();
     esp_lcd_dpi_panel_event_callbacks_t cbs = {.on_refresh_done = on_refresh_done};
     esp_lcd_dpi_panel_register_event_callbacks(board->panel, &cbs, NULL);
     s_cur = 0;
     md_video_clear(0);
-    s_last_log = esp_timer_get_time();
-}
-
-// Landscape (x, y) is physical (719 - y, x): physical row py shows landscape column x,
-// physical column px shows landscape row 719 - px.
-__attribute__((optimize("O3"))) static void blit(uint16_t* fb, const uint8_t* lines, int w, int h,
-                                                 const uint16_t* pal) {
-    const int out_w = w * SCALE, out_h = h * SCALE;
-    const int x0 = (MD_PANEL_H - out_w) / 2;  // first physical row of the image
-    const int y0 = (MD_PANEL_W - out_h) / 2;  // landscape top margin
-    // Physical columns [719 - y0 - out_h + 1, 719 - y0] hold the image; source row sy
-    // lands at px = 719 - y0 - 3 sy - k, i.e. reversed.
-    const int px_first = MD_PANEL_W - y0 - out_h;
-    for (int sx = 0; sx < w; ++sx) {
-        uint16_t* row = fb + (size_t)(x0 + sx * SCALE) * MD_PANEL_W;
-        memset(row, 0, (size_t)px_first * 2);
-        uint16_t* dst = row + px_first;
-        for (int sy = h - 1; sy >= 0; --sy) {
-            const uint16_t c = pal[lines[sy * 320 + sx]];
-            dst[0] = c;
-            dst[1] = c;
-            dst[2] = c;
-            dst += 3;
-        }
-        memset(dst, 0, (size_t)(MD_PANEL_W - px_first - out_h) * 2);
-        memcpy(row + MD_PANEL_W, row, MD_PANEL_W * 2);
-        memcpy(row + 2 * MD_PANEL_W, row, MD_PANEL_W * 2);
+    ppa_client_config_t ppa_cfg = {.oper_type = PPA_OPERATION_SRM, .max_pending_trans_num = 1};
+    s_rgb[0] = alloc_rgb();
+    s_rgb[1] = alloc_rgb();
+    if (!s_rgb[0] || !s_rgb[1] || ppa_register_client(&ppa_cfg, &s_ppa) != ESP_OK) {
+        ESP_LOGE(TAG, "PPA or picture buffers unavailable");
+        return false;
     }
+    s_last_log = esp_timer_get_time();
+    return xTaskCreatePinnedToCore(presenter_task, "md_present", 4096, NULL, configMAX_PRIORITIES - 2,
+                                   &s_presenter, 1) == pdPASS;
 }
 
 bool md_video_present(const uint8_t* lines, int width, int height, const uint16_t* palette) {
-    if (s_flip_pending) {
-        if (xSemaphoreTake(s_vsync, 0) != pdTRUE) {
-            ++s_skipped;
-            return false;
-        }
-        s_flip_pending = false;
+    portENTER_CRITICAL(&s_lock);
+    // Never the picture the presenter reads; reuse an unclaimed one (newest frame wins).
+    const int i = s_busy == 0 ? 1 : s_busy == 1 ? 0 : (s_ready >= 0 ? s_ready : 0);
+    const bool replacing = s_ready == i;
+    s_ready = -1;
+    portEXIT_CRITICAL(&s_lock);
+    if (replacing)
+        ++s_replaced;
+
+    uint16_t* out = s_rgb[i];
+    for (int y = 0; y < height; ++y) {
+        const uint8_t* src = lines + y * 320;
+        for (int x = 0; x < width; ++x)
+            *out++ = palette[src[x]];
     }
-    const int64_t t0 = esp_timer_get_time();
-    const int back = s_cur ^ 1;
-    uint16_t* fb = s_board->fb[back];
-    if (width != s_last_w || height != s_last_h) {
-        // Mode change (H32/H40, NTSC/PAL): clear the old image area in both buffers.
-        for (int b = 0; b < 2; ++b) {
-            memset(s_board->fb[b], 0, FB_BYTES);
-            esp_cache_msync(s_board->fb[b], FB_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        }
-        s_last_w = width;
-        s_last_h = height;
-    }
-    blit(fb, lines, width, height, palette);
-    const int x0 = (MD_PANEL_H - width * SCALE) / 2;
-    xSemaphoreTake(s_vsync, 0);
-    // Passing the DPI frame buffer itself makes the driver flip to it (no copy).
-    esp_lcd_panel_draw_bitmap(s_board->panel, 0, x0, MD_PANEL_W, x0 + width * SCALE,
-                              fb + (size_t)x0 * MD_PANEL_W);
-    s_cur = back;
-    s_flip_pending = true;
-    const int64_t t1 = esp_timer_get_time();
-    s_blit_us += t1 - t0;
-    ++s_shown;
-    if (t1 - s_last_log >= 2000000) {
-        ESP_LOGI(TAG, "shown=%lu skipped=%lu per 2 s, blit avg=%lld us", (unsigned long)s_shown,
-                 (unsigned long)s_skipped, (long long)(s_shown ? s_blit_us / s_shown : 0));
-        s_shown = s_skipped = 0;
-        s_blit_us = 0;
-        s_last_log = t1;
-    }
+    esp_cache_msync(s_rgb[i], RGB_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    s_rgb_w[i] = width;
+    s_rgb_h[i] = height;
+
+    portENTER_CRITICAL(&s_lock);
+    s_ready = i;
+    portEXIT_CRITICAL(&s_lock);
+    xTaskNotifyGive(s_presenter);
     return true;
 }

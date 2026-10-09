@@ -52,6 +52,13 @@ typedef struct {
 
 static bool read_launch(launch_t* out) {
     FILE* f = fopen(LAUNCH_FILE, "r");
+#ifdef MD_TEST_ROM
+    if (!f) {
+        memset(out, 0, sizeof(*out));
+        strlcpy(out->rom, MD_TEST_ROM, sizeof(out->rom));
+        return true;
+    }
+#endif
     if (!f)
         return false;
     memset(out, 0, sizeof(*out));
@@ -190,6 +197,7 @@ static void run_game(uint8_t* rom, size_t rom_size) {
             vTaskDelay(pdMS_TO_TICKS((next - now) / 1000));
         } else {
             skip = (skip == 0 && now - next > frame_us / 2) ? 1 : 0;
+            vTaskDelay(1);  // let IDLE run even when behind (watchdogs, USB/audio tasks)
             if (now - next > 10 * frame_us)
                 next = now;  // way behind (e.g. loading): do not try to catch up
         }
@@ -222,7 +230,8 @@ void md_maybe_run(const esp_partition_t* factory) {
     static md_board_t board;
     if (!md_board_init(&board))
         return_to_main();
-    md_video_init(&board);
+    if (!md_video_init(&board))
+        return_to_main();
     md_board_backlight(80);
     run_game(rom, rom_size);
     return_to_main();

@@ -26,6 +26,7 @@ mmap_generate_*.h
 # Local logs, backups and the updater's build output
 logs/
 updater/build/
+updater/build-*/
 updater/sdkconfig
 updater/sdkconfig.old
 updater/managed_components/
