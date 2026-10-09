@@ -1271,6 +1271,11 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
                         PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                         PRIVATE TEXT_FONT_SIZE=${TEXT_FONT_SIZE} TEXT_FONT_BPP=${TEXT_FONT_BPP}
                         )
+    # Tab5 keeps the panic PC/RA/abort text in RTC memory (tab5_reset_diag.cc):
+    # there is no core-dump partition and crashes happen with no monitor attached.
+    if(CONFIG_BOARD_TYPE_QDTECH_TAB5)
+        target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler")
+    endif()
     # ESP32-S3 LVGL builtin pool: PSRAM boards allocate it from PSRAM.
     # Boards that set CONFIG_SPIRAM=n must not keep the 1MB chip-default
     # pool as a .dram0.bss array (build.py also switches those variants
