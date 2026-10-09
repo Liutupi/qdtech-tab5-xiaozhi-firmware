@@ -12,5 +12,8 @@ namespace tab5_diag {
 void Start();
 // e.g. "BROWNOUT at 216 s (audio on, internal free 41 KB, min 8 KB) · 3 times", or "".
 std::string LastAbnormalReset();
+// Call right before rebooting into the ota_0 app (updater / MD): the reset that brings
+// the device back to factory is then logged but not counted as a fault.
+void MarkLeavingForOtherApp();
 
 }  // namespace tab5_diag

@@ -109,7 +109,13 @@ void Start() {
     const esp_reset_reason_t why = esp_reset_reason();
     const char* fault = ReasonName(why);
     Settings settings("tab5diag", true);
-    if (fault) {
+    // A reset that ends a session in the other app (ota_0: updater / MD) is not a
+    // factory fault, and that app may have overwritten the RTC records.
+    const bool away = settings.GetInt("away", 0) != 0;
+    if (away) {
+        settings.SetInt("away", 0);
+        ESP_LOGI(TAG, "back from the ota_0 app (reset_reason=%d, not counted)", int(why));
+    } else if (fault) {
         char text[160];
         if (g_record.magic == kMagic)
             std::snprintf(text, sizeof(text), "%s at %u s (audio %s, internal free %u KB, min %u KB)", fault,
@@ -136,6 +142,12 @@ void Start() {
 }
 
 std::string LastAbnormalReset() { return g_last; }
+
+void MarkLeavingForOtherApp() {
+    Settings settings("tab5diag", true);
+    settings.SetInt("away", 1);
+    g_crash.magic = 0;
+}
 
 }  // namespace tab5_diag
 
