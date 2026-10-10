@@ -71,6 +71,17 @@ int main(int argc, char** argv) {
                 assert(got[y * L::kOutW + x] ==
                        Reference(src.data(), bg.data(), x, y, overlay.data()));
         assert(got[400 * L::kOutW + 60] == bg[400 * L::kOutW + 60]);
+        // A new sky must replace transparent pixels and decorations as well
+        // as the partially blended edge, without retaining the previous sky.
+        auto evening = bg;
+        for (auto& pixel : evening)
+            pixel ^= 0xffff;
+        masked.SetBackground(evening.data());
+        masked.Compose(src.data(), out.data());
+        for (int y = 0; y < L::kOutH; ++y)
+            for (int x = 0; x < L::kOutW; ++x)
+                assert(got[y * L::kOutW + x] ==
+                       Reference(src.data(), evening.data(), x, y, overlay.data()));
     }
 
     // Mailbox composer path: read into aligned staging, publish composed slot.

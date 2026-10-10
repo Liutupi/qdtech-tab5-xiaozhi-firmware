@@ -6,6 +6,7 @@
 #include "lvgl.h"
 #include "nabo_scene_mailbox.h"
 #include "nabo_scene_policy.h"
+#include "nabo_scene_stream.h"
 #include "nabo_sky.h"
 #include "nabo_three_state.h"
 #include "nabo_wake_matches.h"
@@ -76,7 +77,7 @@ private:
     uint8_t retired_ = 0;
     uint32_t epoch_ = 1, last_generation_ = 0;
     int last_clip_ = -1;
-    uint64_t last_frame_ms_ = 0, request_since_ = 0;
+    nabo_sd::FrameContinuity continuity_;
     bool was_sleeping_ = false, detached_ = false;
 };
 #endif

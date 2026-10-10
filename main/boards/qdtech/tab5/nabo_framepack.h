@@ -59,6 +59,7 @@ struct FrameTrace {
     Phase phase = None;
     uint32_t read_bytes = 0, read_chunks = 0, read_us = 0, read_max_us = 0;
     uint32_t crc_bytes = 0, crc_chunks = 0, crc_us = 0, crc_max_us = 0;
+    uint32_t crc_expected = 0, crc_actual = 0;
     uint64_t Now() const { return clock_us ? clock_us() : 0; }
     void Reset() {
         const Clock clock = clock_us;
@@ -213,6 +214,10 @@ public:
         }
         if (cancel.Changed())
             return finish(Error::Cancelled);
+        if (trace) {
+            trace->crc_expected = e.crc;
+            trace->crc_actual = ~crc;
+        }
         if (~crc != e.crc)
             return finish(Error::Crc);
         verified_[i / 32] |= 1u << (i % 32);

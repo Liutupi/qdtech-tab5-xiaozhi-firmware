@@ -30,19 +30,12 @@ using Layout = nabo_sd::ComposeLayout;
 static_assert(Layout::kSrcBytes == kBytes, "compositor expects the 320x412 pack frame");
 constexpr size_t kOutBytes = Layout::kOutBytes;  // composed opaque RGB565 slot
 constexpr int kVideoX = 39;                       // head clip / image origin in root
-// Transient slowness (boot load, SDIO Wi-Fi bursts) skips frames; only a run of
-// timeouts disables the clip. Format/CRC/IO errors stay fatal immediately.
-constexpr unsigned kMaxConsecutiveTimeouts = 8;
-constexpr uint32_t kTimeoutBackoffMs = 250;
 // Measured on device with aligned DMA: ~5MB/s, single 8KB calls stalling up to
 // 170ms while SDIO Wi-Fi shares the controller. 64KB reads cut the call count
 // 8x; budgets cover a stalled-but-progressing frame instead of discarding it.
 constexpr size_t kReadChunk = 64 * 1024;
 // kCallDeadlineMs bounds one blocking read call and, separately, the frame CRC.
-constexpr uint32_t kCallDeadlineMs = 150, kReadDeadlineMs = 200, kFrameDeadlineMs = 260;
-// The UI keeps the last video frame through gaps up to this long before the
-// static face returns; before the first frame of a clip the old 160ms applies.
-constexpr uint64_t kHoldVideoMs = 1000, kFirstFrameMs = 160;
+constexpr uint32_t kCallDeadlineMs = 300, kReadDeadlineMs = 500, kFrameDeadlineMs = 600;
 constexpr const char* kPaths[] = {"/sdcard/tab5/nabo/idle.nab", "/sdcard/tab5/nabo/transition.nab",
                                   "/sdcard/tab5/nabo/sleep.nab", "/sdcard/tab5/nabo/work.nab"};
 constexpr unsigned kCounts[] = {113, 81, 207, 50};
@@ -178,7 +171,7 @@ public:
                  unsigned(pool_us), unsigned(sizeof(nabo_sd::SceneMailbox::PumpTrace)),
                  unsigned(kReadDeadlineMs), unsigned(kCallDeadlineMs), unsigned(kCallDeadlineMs),
                  unsigned(kFrameDeadlineMs), unsigned(kReadChunk), unsigned(nabo_sd::kChunk),
-                 unsigned(kHoldVideoMs));
+                 unsigned(nabo_sd::FrameContinuity::kHoldVideoMs));
         return instance;
     }
     nabo_sd::SceneMailbox mailbox;
@@ -222,15 +215,15 @@ private:
     void Loop() {
         int open_clip = -1;
         uint64_t reported = 0;
-        uint32_t frames = 0, max_us = 0, busy = 0, sampled = 0, timeouts = 0;
-        unsigned timeout_clip = 4;
+        uint32_t frames = 0, max_us = 0, busy = 0, sampled = 0;
+        nabo_sd::StreamRecovery recovery[4];
         for (;;) {
             // Mounting runs asynchronously after Wi-Fi claims the SDMMC host.
             // Before it completes, keep the static face without poisoning a clip.
             const uint32_t token = Tab5SdReady() ? mailbox.Requested() : 0;
             if (token) {
                 unsigned clip = nabo_sd::SceneMailbox::Clip(token);
-                if (clip < 4 && !Failed(clip)) {
+                if (clip < 4 && recovery[clip].Ready(source_.NowMs())) {
                     const int64_t begin = esp_timer_get_time();
                     nabo_sd::Error e = nabo_sd::Error::Ok;
                     nabo_sd::SceneMailbox::PumpTrace trace;
@@ -269,9 +262,19 @@ private:
                     }
                     if (e == nabo_sd::Error::Ok) {
                         e = mailbox.Pump(pack_, token, &trace);
+                        if (e == nabo_sd::Error::Crc && trace.attempted) {
+                            // A transient read or one bad payload must not
+                            // disable all 207 sleep frames. Re-read once; the
+                            // mailbox never publishes a frame with a bad CRC.
+                            ESP_LOGW("NaboSD",
+                                     "clip=%u frame=%u CRC expected=%08lx actual=%08lx; rereading",
+                                     clip, unsigned(token & 255),
+                                     static_cast<unsigned long>(trace.frame.crc_expected),
+                                     static_cast<unsigned long>(trace.frame.crc_actual));
+                            e = mailbox.Pump(pack_, token, &trace);
+                        }
                         if (trace.published) {
                             ++frames;
-                            timeouts = 0;
                         }
                         if (trace.busy)
                             ++busy;
@@ -302,19 +305,14 @@ private:
                                  unsigned(t.crc_bytes), unsigned(t.crc_chunks), unsigned(t.crc_us),
                                  unsigned(t.crc_max_us));
                     }
-                    if (e == nabo_sd::Error::Timeout && clip != timeout_clip) {
-                        timeout_clip = clip;
-                        timeouts = 0;
-                    }
-                    if (e == nabo_sd::Error::Timeout &&
-                        ++timeouts < kMaxConsecutiveTimeouts) {
-                        // Keep the clip open; the UI shows the static face until a
-                        // later frame arrives. Back off so a slow card cannot spin.
-                        ESP_LOGW("NaboSD", "clip=%u timeout %u/%u; skipping frame", clip,
-                                 unsigned(timeouts), kMaxConsecutiveTimeouts);
-                        vTaskDelay(pdMS_TO_TICKS(kTimeoutBackoffMs));
-                    } else if (e != nabo_sd::Error::Ok && e != nabo_sd::Error::Cancelled) {
-                        timeouts = 0;
+                    recovery[clip].Result(e, source_.NowMs(), trace.attempted);
+                    if (e == nabo_sd::Error::Timeout) {
+                        ESP_LOGW("NaboSD",
+                                 "clip=%u slow read; retrying without disabling animation", clip);
+                    } else if (e == nabo_sd::Error::Crc && trace.attempted) {
+                        ESP_LOGW("NaboSD", "clip=%u frame=%u CRC failed twice; skipping bad frame",
+                                 clip, unsigned(token & 255));
+                    } else if (recovery[clip].Failed()) {
                         failures_.fetch_or(1u << clip);
                         source_.Close();
                         open_clip = -1;
@@ -603,6 +601,8 @@ uint16_t* Tab5SdScene::CaptureBackground() {
 void Tab5SdScene::Source(const lv_image_dsc_t* dsc) {
     if (source_ == dsc)
         return;
+    if (source_ == &live_)
+        ESP_LOGI("NaboSD", "video -> static clip=%d", last_clip_);
     // Leaving video: the hidden layer is not drawn again, but release only after
     // the render that removes it, as the LVGL path may still reference it.
     if (live_slot_ >= 0)
@@ -623,6 +623,8 @@ void Tab5SdScene::Present(nabo_sd::SceneMailbox::Lease next, uint64_t now) {
     lv_image_cache_drop(&live_);
     live_slot_ = next.slot;
     if (source_ != &live_) {
+        ESP_LOGI("NaboSD", "static -> video clip=%u frame=%u",
+                 nabo_sd::SceneMailbox::Clip(next.token), unsigned(next.token & 255));
         // Entering video goes through LVGL once, replacing the static layers.
         if (previous >= 0)
             retired_ |= 1u << previous;
@@ -751,21 +753,20 @@ bool Tab5SdScene::Tick(uint64_t now, Input input) {
     const int clip = selection.clip;
     const unsigned frame = selection.frame;
     if (scene.generation != last_generation_ || clip != last_clip_) {
+        ESP_LOGI("NaboSD", "scene clip=%d -> %d frame=%u", last_clip_, clip, frame);
         ++epoch_;
         last_generation_ = scene.generation;
         last_clip_ = clip;
-        request_since_ = now;
-        last_frame_ms_ = 0;
+        continuity_.Begin(now);
     }
     if (reader_ && clip >= 0 && !reader_->Failed(clip)) {
         reader_->mailbox.Request(clip, frame, epoch_);
         auto next = reader_->mailbox.TakeReady();
         if (next.slot >= 0) {
             Present(next, now);
-            last_frame_ms_ = now;
+            continuity_.Presented(now);
         }
-        if (now - (last_frame_ms_ ? last_frame_ms_ : request_since_) >
-            (last_frame_ms_ ? kHoldVideoMs : kFirstFrameMs))
+        if (continuity_.Expired(now))
             Source(&nabo_sd_neutral);
     } else {
         if (reader_) {

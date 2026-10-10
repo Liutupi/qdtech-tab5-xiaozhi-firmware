@@ -42,7 +42,7 @@ class Tab5SdSceneTests(unittest.TestCase):
             fixture(eye, 204, 93, [0, 3280, 3360, 3440, 3480], 5000)
             for name, args in [("mailbox", [idle]), ("states", []),
                                ("policy", []), ("pack", [eye]), ("trace", [idle]),
-                               ("composer", [idle])]:
+                               ("composer", [idle]), ("stream", [])]:
                 binary = tmp / name
                 subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                     "-I", str(BOARD), str(TESTS / f"tab5_sd_{name}_smoke.cc"),

@@ -79,28 +79,41 @@ public:
         const uint8_t* alpha = src + size_t(L::kSrcW) * L::kSrcH * 2;
         auto* dst = reinterpret_cast<uint16_t*>(out);
         const uint16_t* const background = background_.load(std::memory_order_acquire);
+        // The worker stack is internal RAM. Stage one row and the small scale
+        // lookup there, so the per-pixel loop does not interleave random PSRAM
+        // reads/writes across colour, alpha, background and output planes.
+        uint16_t row[L::kOutW], color_row[L::kSrcW], scaled_x[L::kOutW];
+        uint8_t alpha_row[L::kSrcW];
+        std::memcpy(scaled_x, sx_, sizeof(scaled_x));
+        int loaded_y = -1;
         for (int y = 0; y < L::kOutH; ++y) {
             const uint16_t* bg = background + size_t(y) * L::kOutW;
-            uint16_t* row = dst + size_t(y) * L::kOutW;
+            uint16_t* target = dst + size_t(y) * L::kOutW;
             int x0 = 0, x1 = L::kOutW;
             if (y >= L::kHeadBottom) {
                 if (y < L::kBodyY0 || y >= L::kBodyY1) {
-                    std::memcpy(row, bg, size_t(L::kOutW) * 2);
+                    std::memcpy(target, bg, sizeof(row));
                     continue;
                 }
                 x0 = L::kBodyX0;
                 x1 = L::kBodyX1;
-                std::memcpy(row, bg, size_t(x0) * 2);
-                std::memcpy(row + x1, bg + x1, size_t(L::kOutW - x1) * 2);
             }
-            const size_t s = size_t(sy_[y]) * L::kSrcW;
-            const uint16_t* crow = color + s;
-            const uint8_t* arow = alpha + s;
+            std::memcpy(row, bg, sizeof(row));
+            if (loaded_y != sy_[y]) {
+                loaded_y = sy_[y];
+                const size_t s = size_t(loaded_y) * L::kSrcW;
+                std::memcpy(color_row, color + s, sizeof(color_row));
+                std::memcpy(alpha_row, alpha + s, sizeof(alpha_row));
+            }
             const uint8_t* orow = overlay_ ? overlay_ + size_t(y) * L::kOutW : nullptr;
             for (int x = x0; x < x1; ++x) {
-                const unsigned i = sx_[x];
-                row[x] = orow && orow[x] ? bg[x] : Blend(crow[i], bg[x], arow[i]);
+                const unsigned i = scaled_x[x];
+                const uint8_t a = alpha_row[i];
+                if (a <= 3 || (orow && orow[x]))
+                    continue;
+                row[x] = a >= 252 ? color_row[i] : Blend(color_row[i], row[x], a);
             }
+            std::memcpy(target, row, sizeof(row));
         }
     }
 

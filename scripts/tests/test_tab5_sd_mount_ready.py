@@ -25,6 +25,7 @@ def harness(scene_source, mount_source):
 #include <iterator>
 #include <vector>
 #include "nabo_scene_mailbox.h"
+#include "nabo_scene_stream.h"
 template<typename... Args> void FakeLog(const char*, const char*, Args...) {}
 #define ESP_LOGI(...) FakeLog(__VA_ARGS__)
 #define ESP_LOGW(...) FakeLog(__VA_ARGS__)
@@ -35,15 +36,13 @@ unsigned uxTaskGetStackHighWaterMark(void*) { return 0; }
 constexpr size_t kBytes = 320 * 412 * 3;
 constexpr const char* kPaths[] = {"idle", "transition", "sleep", "work"};
 constexpr unsigned kCounts[] = {113, 81, 207, 50};
-constexpr unsigned kMaxConsecutiveTimeouts = 8;
-constexpr uint32_t kTimeoutBackoffMs = 250;
 constexpr size_t kReadChunk = 64 * 1024;
-constexpr uint32_t kCallDeadlineMs = 150, kReadDeadlineMs = 200, kFrameDeadlineMs = 260;
+''' + re.search(r"constexpr uint32_t kCallDeadlineMs[^;]*;", scene_source).group(0) + r'''
 static unsigned slow_reads;
 static uint64_t now_ms;
 static unsigned ticks, limit, mount_at, restore_file_at, cancel_at;
 static unsigned opens, premature_opens, reads, displayed, yielded;
-static bool file_present, slow_io;
+static bool file_present, slow_io, corrupt_once;
 static std::vector<uint8_t> original, data;
 ''' + ready + '\n' + getter + r'''
 int64_t esp_timer_get_time() { return int64_t(now_ms * 1000); }
@@ -60,9 +59,12 @@ struct SdSource : nabo_sd::Source {
     uint64_t NowMs() const override { return now_ms; }
     size_t ReadAt(uint32_t at, uint8_t* out, size_t n) override {
         ++reads;
-        if (slow_io || reads <= slow_reads) now_ms += 200;  // beyond one-call deadline
+        if (slow_io || reads <= slow_reads) now_ms += kCallDeadlineMs + 1;
         if (uint64_t(at) + n > data.size()) return 0;
         std::memcpy(out, data.data() + at, n);
+        if (corrupt_once && n > 5 && at == nabo_sd::U32(data.data() + 32)) {
+            out[5] ^= 1; corrupt_once = false;
+        }
         return n;
     }
 };
@@ -84,27 +86,31 @@ void vTaskDelay(unsigned ms) {
     now_ms += ms;
     ++ticks;
     auto lease = reader->mailbox.TakeReady();
-    if (lease.slot >= 0) { ++displayed; reader->mailbox.Release(lease); }
+    if (lease.slot >= 0) {
+        assert(nabo_sd::Crc(lease.pixels, kBytes) == reader->pack_.At(lease.token & 255).crc);
+        ++displayed; reader->mailbox.Release(lease);
+    }
     if (ticks >= limit) throw Stop{};
     if (ticks >= mount_at) s_ready = true;
     if (ticks >= restore_file_at) file_present = true;
     if (ticks >= cancel_at) reader->mailbox.CancelAll();
     else reader->mailbox.Request(0, (ticks / 10) % 113, 1);
 }
-enum Case { Delayed, Absent, MissingFile, BadCrc, BadHeader, SlowIo, CancelBeforeMount, TransientSlow };
+enum Case { Delayed, Absent, MissingFile, BadCrc, BadHeader, SlowIo, CancelBeforeMount, TransientSlow, TransientCrc };
 void run(Case which) {
     now_ms = ticks = opens = premature_opens = reads = displayed = yielded = 0;
-    s_ready = false; file_present = true; slow_io = false; slow_reads = 0;
+    s_ready = false; file_present = true; slow_io = false; slow_reads = 0; corrupt_once = false;
     mount_at = 20; restore_file_at = cancel_at = 0xffffffffu; limit = 100;
     data = original;
     if (which == Delayed) { mount_at = 1800; limit = 1880; }
     if (which == Absent) { mount_at = 0xffffffffu; limit = 500; }
     if (which == MissingFile) { file_present = false; restore_file_at = 60; }
-    if (which == BadCrc) data[nabo_sd::U32(data.data()+32)+5] ^= 1;
+    if (which == BadCrc) { data[nabo_sd::U32(data.data()+32)+5] ^= 1; limit = 400; }
     if (which == BadHeader) data[0] ^= 1;
     if (which == SlowIo) slow_io = true;
     if (which == CancelBeforeMount) { mount_at = 60; cancel_at = 20; }
-    if (which == TransientSlow) slow_reads = kMaxConsecutiveTimeouts - 1;
+    if (which == TransientSlow) { slow_reads = 12; limit = 3000; }
+    if (which == TransientCrc) corrupt_once = true;
     Reader r; reader = &r; r.mailbox.Request(0, 0, 1);
     try { r.Loop(); } catch (const Stop&) {}
     assert(yielded == limit && premature_opens == 0);
@@ -113,18 +119,24 @@ void run(Case which) {
         std::puts("PASS delayed mount at 7.2s recovers: zero early IO, one open, frames delivered");
     } else if (which == TransientSlow) {
         assert(opens == slow_reads + 1 && displayed > 0 && !r.Failed(0));
-        std::puts("PASS transient read timeouts below the limit skip frames and recover");
+        std::puts("PASS 12 consecutive timeouts recover without reboot once storage resumes");
+    } else if (which == TransientCrc) {
+        assert(opens == 1 && displayed > 0 && !r.Failed(0) && !corrupt_once);
+        std::puts("PASS transient payload corruption is reread; only verified frames publish");
+    } else if (which == BadCrc) {
+        assert(opens == 1 && displayed > 0 && !r.Failed(0));
+        std::puts("PASS corrupt payload frames never publish; valid frames keep animating");
     } else if (which == Absent || which == CancelBeforeMount) {
         assert(opens == 0 && reads == 0 && displayed == 0 && !r.Failed(0));
         std::puts("PASS absent card / cancelled pending request: static, no IO, no permanent fault, yields");
     } else if (which == SlowIo) {
-        // Header reads time out too: bounded retries with backoff, then sticky.
-        assert(opens == kMaxConsecutiveTimeouts && reads == kMaxConsecutiveTimeouts);
-        assert(displayed == 0 && r.Failed(0));
-        std::puts("PASS persistent timeout: bounded retries with backoff, then sticky fallback");
+        // Header reads time out too: bounded backoff keeps retries available.
+        assert(opens > 1 && opens < limit / 2 && reads == opens);
+        assert(displayed == 0 && !r.Failed(0));
+        std::puts("PASS persistent timeout: bounded backoff, no permanent animation fault");
     } else {
         assert(opens == 1 && displayed == 0 && r.Failed(0));
-        std::puts("PASS genuine missing file / CRC / bad header: one open, sticky fallback");
+        std::puts("PASS missing file / bad header: one open, sticky fallback");
     }
 }
 int main(int argc, char** argv) {
@@ -132,7 +144,7 @@ int main(int argc, char** argv) {
     std::ifstream file(argv[1], std::ios::binary);
     original.assign(std::istreambuf_iterator<char>(file), {});
     assert(!original.empty());
-    for (Case c : {Delayed, Absent, MissingFile, BadCrc, BadHeader, SlowIo, CancelBeforeMount, TransientSlow})
+    for (Case c : {Delayed, Absent, MissingFile, BadCrc, BadHeader, SlowIo, CancelBeforeMount, TransientSlow, TransientCrc})
         run(c);
 }
 '''
