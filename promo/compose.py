@@ -11,7 +11,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 W, H, FPS = 1920, 1080, 30
 UIW, UIH = 1280, 720
 BEAT = 0.5
-TOTAL = 76.5
+TOTAL = 98.5
 NF = int(TOTAL * FPS)
 FONTS = '/home/user/fonts_src/noto-cjk/Sans/OTF/SimplifiedChinese'
 INTER = '/usr/share/fonts/opentype/inter'
@@ -94,25 +94,30 @@ def load_taps(path):
 def P(u, v, px, py, s, yaw=0, pitch=0, roll=0): return np.array([u, v, px, py, s, yaw, pitch, roll], np.float64)
 SHOTS = [  # (t0, t1, pose_from, pose_to, ease)
     (0.0, 3.6, P(-40, 360, 760, 560, 2.5, -40, 10, -5), P(300, 380, 1080, 600, 1.15, -18, 6, -2), 'out'),
-    (3.6, 9.6, P(290, 400, 1210, 560, 1.45, -12, 4, 0), P(290, 400, 1190, 560, 1.62, -4, 3, 0), 'io'),
-    (9.6, 13.4, P(640, 360, 1250, 560, 0.66, -20, 6, 1), P(640, 360, 1235, 560, 0.69, -9, 4, 0), 'io'),
+    (3.6, 10.0, P(290, 400, 1210, 560, 1.45, -12, 4, 0), P(290, 400, 1190, 560, 1.62, -4, 3, 0), 'io'),
+    (10.0, 13.4, P(640, 360, 1250, 560, 0.66, -20, 6, 1), P(640, 360, 1235, 560, 0.69, -9, 4, 0), 'io'),
     (13.4, 15.6, P(665, 58, 960, 520, 2.25, -6, 4, 0), P(665, 58, 960, 520, 2.45, 4, 2, 0), 'io'),
     (15.6, 18.0, P(905, 184, 960, 560, 1.95, 8, 3, 0), P(905, 184, 960, 560, 2.1, 2, 2, 0), 'io'),
-    (18.0, 21.7, P(640, 360, 1265, 560, 0.66, -14, 5, 0), P(640, 360, 1250, 560, 0.69, -6, 3, 0), 'io'),
-    (21.7, 28.0, P(560, 390, 1000, 540, 1.30, -8, 3, 0), P(600, 390, 990, 540, 1.46, 0, 2, 0), 'io'),
-    (28.0, 30.0, P(640, 360, 1290, 570, 0.66, 26, 4, -1), P(640, 360, 1275, 570, 0.68, 12, 3, 0), 'expo'),
-    (30.0, 37.0, P(680, 545, 980, 470, 1.75, -7, 3, 0), P(680, 520, 980, 470, 1.85, -2, 2, 0), 'io'),
-    (37.0, 41.0, P(830, 345, 960, 440, 1.45, 5, 2, 0), P(860, 345, 960, 440, 1.55, -2, 2, 0), 'io'),
-    (41.0, 44.0, P(640, 360, 960, 560, 0.86, 0, 3, 0), P(640, 360, 960, 560, 0.80, -8, 4, 0), 'io'),
-    (44.0, 48.0, P(840, 378, 960, 430, 1.55, -5, 3, 0), P(840, 400, 960, 430, 1.7, 4, 2, 0), 'io'),
-    (48.0, 52.0, P(640, 360, 650, 560, 0.66, 18, 5, 0), P(640, 360, 670, 560, 0.69, 9, 3, 0), 'io'),
-    (52.0, 58.0, P(640, 360, 1260, 560, 0.67, -10, 4, 0), P(640, 360, 1240, 560, 0.67, -22, 6, 1), 'io'),
-    (58.0, 60.3, P(600, 380, 960, 470, 1.30, -4, 3, 0), P(600, 380, 960, 470, 1.40, 2, 2, 0), 'io'),
-    (60.3, 62.0, P(1000, 330, 1000, 400, 1.5, 6, 2, 0), P(1000, 330, 1000, 400, 1.62, 0, 2, 0), 'expo'),
-    (62.0, 64.0, P(640, 360, 650, 560, 0.66, 22, 5, 0), P(640, 360, 670, 560, 0.68, 12, 3, 0), 'expo'),
-    (64.0, 66.0, P(640, 360, 1270, 560, 0.66, -22, 5, 0), P(640, 360, 1255, 560, 0.68, -12, 3, 0), 'expo'),
-    (66.0, 70.0, P(640, 360, 520, 600, 0.44, -24, 10, -2), P(640, 360, 480, 600, 0.40, -34, 12, -3), 'io'),
-    (70.0, 76.5, P(640, 360, 960, 690, 0.58, -6, 6, 0), P(640, 360, 960, 690, 0.62, 0, 3, 0), 'out'),
+    (18.0, 24.4, P(290, 330, 1230, 540, 1.30, -10, 4, 0), P(290, 330, 1210, 540, 1.42, -4, 3, 0), 'io'),
+    (24.4, 28.0, P(400, 250, 1180, 470, 1.9, -6, 3, 0), P(420, 240, 1180, 470, 2.15, 2, 2, 0), 'io'),
+    (28.0, 31.7, P(640, 360, 1265, 560, 0.66, -14, 5, 0), P(640, 360, 1250, 560, 0.69, -6, 3, 0), 'io'),
+    (31.7, 38.0, P(560, 390, 1000, 540, 1.30, -8, 3, 0), P(600, 390, 990, 540, 1.46, 0, 2, 0), 'io'),
+    (38.0, 40.0, P(640, 360, 1290, 570, 0.66, 26, 4, -1), P(640, 360, 1275, 570, 0.68, 12, 3, 0), 'expo'),
+    (40.0, 47.0, P(680, 545, 980, 470, 1.75, -7, 3, 0), P(680, 520, 980, 470, 1.85, -2, 2, 0), 'io'),
+    (47.0, 51.0, P(830, 345, 960, 440, 1.45, 5, 2, 0), P(860, 345, 960, 440, 1.55, -2, 2, 0), 'io'),
+    (51.0, 54.0, P(640, 360, 960, 560, 0.86, 0, 3, 0), P(640, 360, 960, 560, 0.80, -8, 4, 0), 'io'),
+    (54.0, 58.0, P(840, 378, 960, 430, 1.55, -5, 3, 0), P(840, 400, 960, 430, 1.7, 4, 2, 0), 'io'),
+    (58.0, 62.0, P(640, 360, 650, 560, 0.66, 18, 5, 0), P(640, 360, 670, 560, 0.69, 9, 3, 0), 'io'),
+    (62.0, 68.0, P(640, 360, 1260, 560, 0.67, -10, 4, 0), P(640, 360, 1240, 560, 0.67, -22, 6, 1), 'io'),
+    (68.0, 70.3, P(600, 380, 960, 470, 1.30, -4, 3, 0), P(600, 380, 960, 470, 1.40, 2, 2, 0), 'io'),
+    (70.3, 72.0, P(1000, 330, 1000, 400, 1.5, 6, 2, 0), P(1000, 330, 1000, 400, 1.62, 0, 2, 0), 'expo'),
+    (72.0, 75.2, P(640, 360, 650, 560, 0.66, 22, 5, 0), P(640, 360, 670, 560, 0.70, 10, 3, 0), 'expo'),
+    (75.2, 78.0, P(640, 360, 1270, 560, 0.66, -22, 5, 0), P(640, 360, 1255, 560, 0.68, -12, 3, 0), 'expo'),
+    (78.0, 82.0, P(640, 360, 650, 560, 0.66, 20, 5, 0), P(640, 360, 670, 560, 0.69, 9, 3, 0), 'expo'),
+    (82.0, 84.0, P(640, 360, 1270, 560, 0.66, -22, 5, 0), P(640, 360, 1255, 560, 0.68, -12, 3, 0), 'expo'),
+    (84.0, 86.0, P(640, 360, 650, 560, 0.66, 22, 5, 0), P(640, 360, 670, 560, 0.68, 12, 3, 0), 'expo'),
+    (86.0, 90.0, P(640, 360, 520, 600, 0.44, -24, 10, -2), P(640, 360, 480, 600, 0.40, -34, 12, -3), 'io'),
+    (90.0, 98.5, P(640, 360, 960, 690, 0.58, -6, 6, 0), P(640, 360, 960, 690, 0.62, 0, 3, 0), 'out'),
 ]
 def shot_at(t):
     for i, s in enumerate(SHOTS):
@@ -181,8 +186,8 @@ def vignette():
         VIG = np.clip(1.08 - 0.42 * d ** 2.2, 0.35, 1)[..., None]
     return VIG
 
-ACCENT = [CYAN, CYAN, AMBER, AMBER, AMBER, CYAN, CYAN, PINK, PINK, VIOLET, VIOLET, PINK, VIOLET, AMBER, MINT, MINT,
-          PERI, VIOLET, CYAN, CYAN]
+ACCENT = [CYAN, CYAN, AMBER, AMBER, AMBER, CYAN, VIOLET, CYAN, CYAN, PINK, PINK, VIOLET, VIOLET, PINK, VIOLET, AMBER, MINT, MINT,
+          PERI, PERI, PINK, VIOLET, CYAN, CYAN, CYAN]
 
 # ------------------------------------------------------------------ typography
 _tc = {}
@@ -270,7 +275,7 @@ def subtitle(img, t, t0, t1, s):
     a = clamp((t - t0) / 0.25) * clamp((t1 - t) / 0.25)
     it = text_img(s, 'medium', 38)
     w = it[0].shape[1]
-    y0 = 948 if not (70.0 <= t) else 960
+    y0 = 948
     img[y0 - 14:y0 + 64, int(960 - w / 2 - 30):int(960 + w / 2 + 30)] *= (1 - 0.35 * a)
     blit_text(img, it, 960, y0, a, 'c')
 
@@ -354,7 +359,7 @@ def render(fi, ui, taps):
     add_glow(img, 1500, 950, 700, VIOLET, 0.05)
     quad = project(p)
     c = quad.mean(0)
-    add_glow(img, c[0], c[1], 520 * p[4] + 300, accent, 0.20 + 0.06 * math.exp(-((t % BEAT) / BEAT) * 5) * (1 if 28 <= t < 30 or 44 <= t < 52 or 58 <= t < 66 else 0))
+    add_glow(img, c[0], c[1], 520 * p[4] + 300, accent, 0.20 + 0.06 * math.exp(-((t % BEAT) / BEAT) * 5) * (1 if 38 <= t < 40 or 54 <= t < 62 or 68 <= t < 84 else 0))
     # dust
     for i, (x, y, z, s) in enumerate(DUST):
         xx = (x * W + t * (8 + 20 * z)) % W; yy = (y * H - t * (6 + 14 * z)) % H
@@ -391,7 +396,7 @@ def render(fi, ui, taps):
     img += cv2.resize(bloom, (W, H)) * 0.45
     # beat punch on drops + cut flash
     cut = min(abs(t - s[0]) for s in SHOTS)
-    if t > 0.1 and cut < 0.12 and any(abs(t - x) < 0.12 for x in (28.0, 58.0, 74.0)):
+    if t > 0.1 and cut < 0.12 and any(abs(t - x) < 0.12 for x in (38.0, 68.0, 96.0)):
         img += 60 * (1 - cut / 0.12)
     img *= vignette()
     g = cv2.resize(GRAIN[fi % len(GRAIN)], (W, H), interpolation=cv2.INTER_NEAREST)[..., None]
@@ -401,48 +406,69 @@ def render(fi, ui, taps):
     img *= f
     return np.clip(img, 0, 255).astype(np.uint8)
 
+SKY_TAGS = [(18.0, 19.6, '晴 · 12:30'), (19.6, 21.2, '多云'), (21.2, 22.8, '小雨'), (22.8, 24.4, '日落 · 18:22'),
+            (24.4, 25.6, '夜晚 · 21:30'), (25.6, 26.08, '10/14 · 蛾眉月'), (26.08, 26.56, '10/18 · 上弦月'),
+            (26.56, 27.04, '10/22 · 盈凸月'), (27.04, 27.52, '10/26 · 满月'), (27.52, 28.0, '10/30 · 亏凸月')]
+def sky_tag(img, t):
+    for t0, t1, label in SKY_TAGS:
+        if t0 <= t < t1:
+            it = text_img(label, 'bold', 40)
+            w = it[0].shape[1]
+            a = clamp((t - t0) / 0.12) * clamp((28.0 - t) / 0.2)
+            x0, y0 = 140, 720 if t < 24.4 else 860
+            img[y0 - 12:y0 + 64, x0 - 22:x0 + w + 22] = img[y0 - 12:y0 + 64, x0 - 22:x0 + w + 22] * (1 - 0.5 * a) + hexc('0f2133') * 0.5 * a
+            img[y0 - 12:y0 + 64, x0 - 22:x0 - 18] = img[y0 - 12:y0 + 64, x0 - 22:x0 - 18] * (1 - a) + VIOLET * a
+            blit_text(img, it, x0, y0, a)
+
 def overlays(img, t):
     kinetic_block(img, t, 0.8, 3.5, 140, 700, 'M5STACK TAB5  ×  NABO', '一块屏，住着一位伙伴', None, CYAN, head_size=80)
-    kinetic_block(img, t, 3.9, 9.4, 140, 380, 'PRESENCE', ['走近，', '它就醒来'], '本地人体感应 · 画面不出设备', CYAN)
+    kinetic_block(img, t, 3.9, 9.8, 140, 380, 'PRESENCE', ['走近，', '它就醒来'], '本地人体感应 · 画面不出设备', CYAN)
     subtitle(img, t, 4.85, 9.6, '“你好！我是纳波，很高兴见到你！”')
-    kinetic_block(img, t, 9.8, 13.25, 140, 360, 'HOME', ['每天的', '第一眼'], '翻页时钟 · 每日一句 · 临床干货 · 节日提醒', AMBER)
-    kinetic_block(img, t, 18.15, 21.6, 140, 360, 'VOICE', ['说一声', '“你好 Nabo”'], '离线唤醒 · 实时语音 · 表情随声而动', CYAN, head_size=80)
-    subtitle(img, t, 18.8, 21.7, '你：“你好 Nabo，今天有什么新歌？”')
-    kinetic_block(img, t, 21.85, 22.95, 140, 840, None, '等回复时，看一眼手机', None, CYAN, head_size=52)
-    scrim(img, t, 21.85, 22.95)
-    subtitle(img, t, 23.05, 27.75, 'Nabo：“早上好！今天的 Muse 电台上线啦，现在听吗？”')
-    kinetic_block(img, t, 28.05, 29.95, 140, 360, 'MUSE RADIO', ['Muse', '每日音乐电台'], '主播阿南 · 每天 07:30 准时开播', PINK, head_size=86)
-    scrim(img, t, 30.2, 41.0); scrim(img, t, 44.2, 47.9); scrim(img, t, 58.1, 61.95)
-    kinetic_block(img, t, 30.3, 36.8, 140, 880, None, '原声播客，字幕逐句同步', None, PINK, head_size=60)
-    kinetic_block(img, t, 37.2, 40.9, 140, 880, None, '跟着声音律动 · 今日 10 首歌单', None, VIOLET, head_size=60)
-    kinetic_block(img, t, 44.2, 47.9, 140, 840, 'MUSIC', '说出歌名，整首播放', None, PINK, head_size=72)
-    kinetic_block(img, t, 48.2, 51.85, 1780, 360, 'LYRICS', ['歌词，', '一句一句跟上'], '网易云完整歌曲 · 逐句歌词', VIOLET, align='r', head_size=80)
-    kinetic_block(img, t, 52.2, 57.85, 140, 360, 'RADIO', ['网络电台'], '真实电台直播流 · 一触即播', AMBER)
-    kinetic_block(img, t, 58.1, 60.25, 140, 840, 'ICU TOOLS', 'ICU 数值工具', None, MINT, head_size=72)
-    kinetic_block(img, t, 60.4, 61.95, 140, 860, None, 'eGFR · 氧合 · 血气 · 静脉泵换算', '结果仅供临床复核', MINT, head_size=52)
-    kinetic_block(img, t, 62.05, 63.95, 1780, 400, 'IR REMOTE', ['红外', '学习遥控'], '电视 · 空调 · 投影仪', PERI, align='r', head_size=80)
-    kinetic_block(img, t, 64.05, 65.95, 140, 400, 'MUSE INBOX', ['消息', '直达桌面'], 'NAS 与 Muse 推送，第一时间送达', VIOLET, head_size=80)
-    if 66.0 <= t < 70.0:
-        kinetic_block(img, t, 66.1, 69.9, 900, 150, 'HARDWARE', '小身材，全能硬件', None, CYAN, head_size=72)
-        chip(img, t, 66.4, 900, 340, '5 英寸 1280×720', '高清触控屏 · LVGL 原生分辨率', CYAN)
-        chip(img, t, 66.65, 900, 472, 'ESP32-P4 + ESP32-C6', '双芯协同 · Wi-Fi 6', CYAN)
-        chip(img, t, 66.9, 900, 604, '32 MB PSRAM · 16 MB Flash', '本地模型与流畅动画', CYAN)
-        chip(img, t, 67.15, 900, 736, '200 万像素摄像头 · 双麦克风', '看得见，也听得清', CYAN)
-        if t >= 67.6:
-            u = ease_expo(clamp((t - 67.6) / 0.6)); a = clamp((t - 67.6) / 0.3) * clamp((69.9 - t) / 0.3)
+    kinetic_block(img, t, 10.2, 13.25, 140, 360, 'HOME', ['每天的', '第一眼'], '翻页时钟 · 每日一句 · 临床干货 · 节日提醒', AMBER)
+    kinetic_block(img, t, 18.2, 24.3, 140, 330, 'LIVE SKY', ['窗外的天空，', '跟着真实世界变'], '实时天气 · 日出日落 · 真实月相', VIOLET, head_size=76)
+    scrim(img, t, 24.5, 27.95)
+    kinetic_block(img, t, 24.5, 27.95, 140, 760, None, '月亮阴晴圆缺，一天一个样', None, VIOLET, head_size=56)
+    sky_tag(img, t)
+    kinetic_block(img, t, 28.15, 31.6, 140, 360, 'VOICE', ['说一声', '“你好 Nabo”'], '离线唤醒 · 实时语音 · 表情随声而动', CYAN, head_size=80)
+    subtitle(img, t, 28.8, 31.5, '你：“你好 Nabo，今天有什么新歌？”')
+    kinetic_block(img, t, 31.85, 32.95, 140, 840, None, '等回复时，看一眼手机', None, CYAN, head_size=52)
+    scrim(img, t, 31.85, 32.95)
+    subtitle(img, t, 33.05, 37.6, 'Nabo：“早上好！今天的 NABO 电台上线啦，现在听吗？”')
+    kinetic_block(img, t, 38.05, 39.95, 140, 360, 'NABO RADIO', ['NABO', '每日音乐电台'], '主播阿南 · 每天 07:30 准时开播', PINK, head_size=86)
+    scrim(img, t, 40.2, 51.0); scrim(img, t, 54.2, 57.9); scrim(img, t, 68.1, 71.95)
+    kinetic_block(img, t, 40.3, 46.8, 140, 880, None, '原声播客，字幕逐句同步', None, PINK, head_size=60)
+    kinetic_block(img, t, 47.2, 50.9, 140, 880, None, '跟着声音律动 · 今日 10 首歌单', None, VIOLET, head_size=60)
+    kinetic_block(img, t, 54.2, 57.9, 140, 840, 'MUSIC', '说出歌名，整首播放', None, PINK, head_size=72)
+    kinetic_block(img, t, 58.2, 61.85, 1780, 360, 'LYRICS', ['歌词，', '一句一句跟上'], '网易云完整歌曲 · 逐句歌词', VIOLET, align='r', head_size=80)
+    kinetic_block(img, t, 62.2, 67.85, 140, 360, 'RADIO', ['网络电台'], '真实电台直播流 · 一触即播', AMBER)
+    kinetic_block(img, t, 68.1, 70.25, 140, 840, 'ICU TOOLS', 'ICU 数值工具', None, MINT, head_size=72)
+    kinetic_block(img, t, 70.4, 71.95, 140, 860, None, 'eGFR · 氧合 · 血气 · 静脉泵换算', '结果仅供临床复核', MINT, head_size=52)
+    kinetic_block(img, t, 72.1, 75.1, 1780, 360, 'MI HOME', ['米家中控'], '场景 · 灯光 · 空调，一键直达', PERI, align='r', head_size=88)
+    kinetic_block(img, t, 75.3, 77.9, 140, 400, 'IR REMOTE', ['红外', '学习遥控'], '电视 · 空调 · 投影仪', PERI, head_size=80)
+    kinetic_block(img, t, 78.1, 81.9, 1780, 360, 'GAMES', ['FC + MD', '经典游戏'], 'USB 手柄 · SD 卡 ROM · 中文游戏名', PINK, align='r', head_size=80)
+    kinetic_block(img, t, 82.05, 83.95, 140, 400, 'NABO INBOX', ['每日推送'], 'Muse 整理 · NAS 推送', VIOLET, head_size=80)
+    kinetic_block(img, t, 84.05, 85.95, 1780, 400, 'SETTINGS', ['在线升级'], 'Wi-Fi · 亮度 · 音量 · OTA', CYAN, align='r', head_size=80)
+    if 86.0 <= t < 90.0:
+        kinetic_block(img, t, 86.1, 89.9, 900, 150, 'HARDWARE', '小身材，全能硬件', None, CYAN, head_size=72)
+        chip(img, t, 86.4, 900, 340, '5 英寸 1280×720', '高清触控屏 · LVGL 原生分辨率', CYAN)
+        chip(img, t, 86.65, 900, 472, 'ESP32-P4 + ESP32-C6', '双芯协同 · Wi-Fi 6', CYAN)
+        chip(img, t, 86.9, 900, 604, '32 MB PSRAM · 16 MB Flash', '本地模型与流畅动画', CYAN)
+        chip(img, t, 87.15, 900, 736, '200 万像素摄像头 · 双麦克风', '看得见，也听得清', CYAN)
+        if t >= 87.6:
+            u = ease_expo(clamp((t - 87.6) / 0.6)); a = clamp((t - 87.6) / 0.3) * clamp((89.9 - t) / 0.3)
             card = photo('back', 290)
             blit_rgba(img, card, 1520 + (1 - u) * 120, 340, a)
             it = text_img('NP-F550 电池 · 7.4V 2000mAh', 'medium', 22)
             blit_text(img, it, 1520 + 163 + (1 - u) * 120, 340 + card.shape[0] + 16, a, 'c')
-    if t >= 70.0:
-        u = t - 70.0
+    if t >= 90.0:
+        u = t - 90.0
         a = clamp(u / 0.6) * clamp((TOTAL - 0.3 - t) / 1.2)
         it = text_img('NABO', 'interb', 150, track=0.18)
         blit_text(img, it, 960, 70, a, 'c', grad=(WHITE, CYAN * 0.6 + WHITE * 0.4), reveal=clamp(u / 0.8))
         it2 = text_img('土皮助手 · 你的桌面 AI 伙伴', 'medium', 40, color=(220, 232, 244))
         blit_text(img, it2, 960, 268, a * ease_out(clamp((u - 0.5) / 0.6)), 'c')
         if u > 4.0:
-            it3 = text_img('M5Stack Tab5  ·  ESP32-P4  ·  画面为实机固件界面渲染', 'regular', 24, color=(130, 150, 175))
+            it3 = text_img('M5Stack Tab5  ·  固件 v1.0.10  ·  画面为实机固件界面渲染', 'regular', 24, color=(130, 150, 175))
             blit_text(img, it3, 960, 1012, clamp((u - 4.0) / 0.5) * clamp((TOTAL - t) / 1.0), 'c')
 
 G = {}

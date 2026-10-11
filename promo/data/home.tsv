@@ -1,0 +1,10 @@
+V	1
+D	switch.bedroom_pc	卧室电脑开机	switch	off	卧室	-	-	-
+D	light.monitor_bar	显示器挂灯	light	on	卧室	128	-	-
+D	climate.bedroom	空调	climate	cool	卧室	-	26	27.5
+D	media_player.tv	客厅的小米电视	media_player	off	客厅	-	-	-
+D	light.living	客厅主灯	light	on	客厅	200	-	-
+D	light.bulb	灯泡	light	on	书房	200	-	-
+D	climate.kids	空调	climate	off	小孩房间	-	24	25.5
+S	bedroom_pc	卧室电脑	卧室	1	1
+S	cinema	家庭影院	客厅	1	1

@@ -1,12 +1,17 @@
-# Tab5 × Nabo 宣传片(定稿)
+# Tab5 × Nabo 宣传片
 
-成片:`tab5_nabo_promo.mp4`(1920×1080,30 fps,76 秒)。
+- `tab5_nabo_promo_v1010.mp4`:固件 v1.0.10 版(约 98 秒),新增窗外天空(实时天气、日出日落、真实月相)、米家中控、FC + MD 游戏。
+- `tab5_nabo_promo.mp4`:上一版定稿(76 秒)。
+
+脚本(`timeline.py`、`music.py`、`compose.py`)对应 v1.0.10 版。
 
 ## 画面
 - 设备屏幕上的每一帧都是**真实固件界面**:在电脑上用 LVGL 9.5 编译运行 `main/boards/qdtech/tab5/` 的原生界面代码
   (主页、应用页、Muse 电台、网络电台、ICU、红外、Muse 推送、SD 半身窗口场景),使用固件自带字体与 Nabo 资源,
   以及设备从 SD 卡加载的 Noto common 30 字体。硬件接口由 `hostui/shim`、`hostui/src/stubs.cc` 替身。
 - Nabo 的睡觉、入睡/醒来、待机、看手机动画来自 Release `sd-nabo-v1` 的四个 `.nab` 动画包,由固件自己的 SD 场景读取器播放。
+- 窗外天空由固件 `nabo_sky.h` 渲染;harness 用 `settime`/`setdate`/`weather` 命令切换时间、日期(月相)和天气。
+- 米家中控使用 Home Assistant 演示目录 `data/home.tsv`(设备名取自仓库测试数据),MD 游戏目录为 `data/md.tsv`。
 - 界面事件(点击、语音状态、播客、点歌、电台、ICU 输入等)由 `timeline.py` 生成的 `film.txt` 驱动。
 
 ## 声音
@@ -24,6 +29,6 @@
    把四个 `.nab` 放到 `/sdcard/tab5/nabo/`。
 2. `python3 timeline.py <promo> <promo/data>`
 3. `python3 music.py <GeneralUser-GS.sf2> ../assets/nabo/greeting.ogg <promo>`(生成 `music.wav` 与界面用的 `level.txt`)
-4. 在 hostui 中:`./harness <promo>/film.txt 76500 film.rgb .`
+4. 在 hostui 中:`./harness <promo>/film.txt 98500 film.rgb .`
 5. `python3 compose.py film.rgb film.txt video.mp4`,再用 ffmpeg 合并 `music.wav`。
 字体:思源黑体 Noto Sans CJK SC(OFL)与 Inter。

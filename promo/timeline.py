@@ -1,67 +1,90 @@
-"""Tab5 UI event script v3 (film seconds; 120 BPM, bar = 2 s) + tap times + VO placements."""
+"""Tab5 UI event script for the v1.0.10 promo (film seconds; 120 BPM, bar = 2 s).
+Writes film.txt (host harness), taps.txt (click sounds) and vo/placements.json (real audio)."""
 import os, sys, json
 OUT, D = sys.argv[1], sys.argv[2]
 ev, taps, vo = [], [], []
 def at(t, c, a=''): ev.append((t, c, a))
 def tap(t, x, y, hold=90): at(t, 'touch', f'{x} {y} {hold}'); taps.append(t)
 def play(t, src, a, b, kind): vo.append((round(t, 3), src, a, b, kind)); return t + (b - a)
+def sky(t, time=None, date=None, weather=None):
+    if date: at(t, 'setdate', date)
+    if time: at(t, 'settime', time)
+    if weather is not None: at(t, 'weather', f'{weather} 362 1095')
+    at(t + 0.01, 'skyrefresh')
 
 at(-6.0, 'preroll'); at(-6.0, 'episodes', f'{D}/episodes.txt'); at(-6.0, 'messages', f'{D}/messages.txt')
-at(-6.0, 'levelfile', f'{OUT}/level.txt'); at(-5.9, 'inbox', '0')
-at(-5.8, 'fw', '当前版本 v1.0.9 · 已是最新|检查更新|0|0')
+at(-6.0, 'levelfile', f'{OUT}/level.txt'); at(-6.0, 'mdcatalog', f'{D}/md.tsv')
+at(-5.95, 'homecatalog', f'{D}/home.tsv'); at(-5.9, 'inbox', '0')
+at(-5.8, 'fw', '当前版本 v1.0.10 · 已是最新|检查更新|0|0')
+sky(-5.8, time='06:02:00', weather=0)
 at(-5.8, 'sleep', '1'); at(-5.5, 'dailypage', '3')
-# wake (transition clip), then greet with the real device voice
-at(3.6, 'welcome')
-at(4.75, 'playback', '1'); at(9.55, 'playback', '0')
+# 0-10 s: dawn; someone walks up -> wake (transition clip) -> greeting (real device voice)
+at(3.6, 'welcome'); at(4.75, 'playback', '1'); at(9.55, 'playback', '0')
+# 10-18 s: home in daylight
+sky(10.0, time='08:15:00')
 at(11.0, 'dailypage', '6'); at(15.0, 'dailypage', '5')
-# voice turn: listen -> user speaks -> waiting (phone clip) -> Nabo answers
-tap(18.0, 904, 590)
-at(18.2, 'status', '连接中...'); at(18.6, 'status', '聆听中...')
-e = 21.7
-at(e - 0.2, 'chat', 'user|你好 Nabo，今天有什么新歌？')
-at(e + 0.05, 'status', '待命'); at(e + 0.1, 'waiting', '1')
-t_reply = 23.0
-at(t_reply - 0.05, 'waiting', '0')
-at(t_reply, 'status', '说话中...'); at(t_reply, 'playback', '1')
-at(t_reply + 0.05, 'chat', 'assistant|早上好！今天的 Muse 电台上线啦，现在听吗？')
-e = t_reply + 4.7
-at(e + 0.1, 'playback', '0'); at(e + 0.1, 'status', '待命')
-tap(27.55, 1055, 305)
-tap(27.85, 331, 227)
-# podcast: real narrated audio, transcript follows the audio clock
-tap(30.0, 1080, 189)
-at(30.12, 'radio', '每日音乐电台 · 10月6日|Playing|')
-at(30.15, 'podseek', '220'); play(30.15, 'muse_podcast_2026-10-06.mp3', 0.22, 10.58, 'podcast')
-at(40.85, 'podseek', '24350'); play(40.85, 'muse_podcast_2026-10-06.mp3', 24.35, 27.0, 'podcast')
-# song with synced lyrics
-at(43.9, 'page', 'radio')
-at(43.95, 'music', f'把今天调亮一点|Muse|{D}/song.lrc')
-at(44.0, 'radio', '把今天调亮一点|Playing|')
-# live radio with a DJ
-tap(51.9, 238, 245)
-at(52.0, 'stopmusic'); at(52.05, 'radio', '中国之声|Playing|MP3 · 64 kbps')
-play(52.1, 'radio_live_6s.mp3', 0.0, 5.95, 'radio')
-# ICU pump calculator
-at(57.9, 'page', 'icu4')
+# 18-28 s: the sky behind Nabo follows the real world
+sky(18.0, time='12:30:00', weather=0)
+sky(19.6, weather=3)
+sky(21.2, weather=61)
+sky(22.8, time='18:22:00', weather=0)
+sky(24.4, time='21:30:00', weather=0)
+for i, d in enumerate(('2026-10-14', '2026-10-18', '2026-10-22', '2026-10-26', '2026-10-30')):
+    sky(25.6 + 0.48 * i, date=d)
+sky(28.0, date='2026-10-06', time='08:16:30', weather=0)
+# 28-38 s: voice turn (listening -> phone while waiting -> answer)
+tap(28.0, 904, 590)
+at(28.2, 'status', '连接中...'); at(28.6, 'status', '聆听中...')
+at(31.5, 'chat', 'user|你好 Nabo，今天有什么新歌？')
+at(31.75, 'status', '待命'); at(31.8, 'waiting', '1')
+at(32.95, 'waiting', '0'); at(33.0, 'status', '说话中...'); at(33.0, 'playback', '1')
+at(33.05, 'chat', 'assistant|早上好！今天的 NABO 电台上线啦，现在听吗？')
+at(37.6, 'playback', '0'); at(37.6, 'status', '待命')
+tap(37.55, 1055, 305); tap(37.85, 331, 227)
+# 40-54 s: NABO 电台, real podcast audio; transcript follows the audio clock
+tap(40.0, 1080, 189)
+at(40.12, 'radio', '每日音乐电台 · 10月6日|Playing|')
+at(40.15, 'podseek', '220'); play(40.15, 'muse_podcast_2026-10-06.mp3', 0.22, 10.58, 'podcast')
+at(50.85, 'podseek', '24350'); play(50.85, 'muse_podcast_2026-10-06.mp3', 24.35, 27.0, 'podcast')
+# 54-62 s: a song with synced lyrics
+at(53.9, 'page', 'radio'); at(53.95, 'music', f'把今天调亮一点|Muse|{D}/song.lrc'); at(54.0, 'radio', '把今天调亮一点|Playing|')
+# 62-68 s: live radio (real recording)
+tap(61.9, 238, 245); at(62.0, 'stopmusic'); at(62.05, 'radio', '中国之声|Playing|MP3 · 64 kbps')
+play(62.1, 'radio_live_6s.mp3', 0.0, 5.95, 'radio')
+# 68-72 s: ICU pump calculator on the real keypad
+at(67.9, 'page', 'icu4')
 def field(i): return (513, 231 + 67 * i)
 def key(ch):
     order = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', '删除']
     i = order.index(ch); return (460 + 173 * (i % 3), 217 + 83 * (i // 3))
-t = 58.1
+t = 68.1
 for fi, val in ((1, '4'), (3, '3'), (4, '80')):
     tap(t, *field(fi)); t += 0.2
     for ch in val: tap(t, *key(ch)); t += 0.2
     tap(t, 766, 553); t += 0.2
 tap(t, 513, 634)
-at(61.9, 'page', 'ir'); tap(62.4, 452, 282, 160); tap(63.2, 622, 282, 160)
-at(63.9, 'page', 'muse')
-at(65.9, 'page', 'close'); at(65.9, 'radio', '中国之声|Stopped|'); at(65.95, 'idle')
-at(65.95, 'status', '待命'); at(65.95, 'dailypage', '3')
-at(70.3, 'touchnabo')
+# 72-78 s: 米家中控 (Home Assistant scenes and devices) and its IR remote
+at(71.9, 'radio', '中国之声|Stopped|'); at(71.9, 'page', 'home')
+tap(72.5, 608, 208, 140)     # 家庭影院 · 开
+tap(73.3, 565, 632, 140)     # 客厅主灯 · 关闭
+tap(74.0, 755, 440, 140)     # 卧室空调 +
+tap(74.5, 755, 440, 140)
+tap(75.3, 893, 48, 120)      # 红外遥控
+tap(76.4, 452, 282, 160); tap(77.2, 622, 282, 160)
+# 78-82 s: games: FC list, then MD
+at(77.9, 'page', 'games')
+tap(80.0, 893, 259, 120); at(80.1, 'gamemode', 'md')
+# 82-84 s: NABO 每日推送
+at(81.9, 'page', 'muse')
+# 84-86 s: settings / OTA
+at(83.9, 'page', 'settings')
+# 86 s: back home; 90.3 s: Nabo waves goodbye
+at(85.9, 'page', 'close'); at(85.95, 'idle'); at(85.95, 'status', '待命'); at(85.95, 'dailypage', '3')
+at(90.3, 'touchnabo')
 ev.sort(key=lambda e: e[0])
 with open(os.path.join(OUT, 'film.txt'), 'w') as f:
     for t, c, a in ev: f.write(f'{int(round(t * 1000))} {c} {a}'.rstrip() + '\n')
 open(os.path.join(OUT, 'taps.txt'), 'w').write('\n'.join(f'{x + 0.09:.3f}' for x in taps))
 os.makedirs(os.path.join(OUT, 'vo'), exist_ok=True)
 json.dump(vo, open(os.path.join(OUT, 'vo/placements.json'), 'w'), ensure_ascii=False)
-print(len(ev), 'events', vo)
+print(len(ev), 'events', len(taps), 'taps')

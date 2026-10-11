@@ -13,6 +13,10 @@
 #include "tab5_native_display.h"
 #include "cbin_font.h"
 #include "board.h"
+#include "tab5_home_hub.h"
+#include "tab5_sky_weather.h"
+#include "tab5_md_launcher.h"
+namespace host { extern tab5_home::Status home_status; extern std::function<void()> home_changed; extern tab5_sky::WeatherNow weather; extern std::shared_ptr<const tab5_md::Catalog> md_catalog; }
 #include "freertos/queue.h"
 
 static int64_t g_us = 0;
@@ -224,7 +228,14 @@ int main(int argc, char** argv) {
         }
         return p;
     };
+    static std::vector<std::string> nes = {"超级马里奥兄弟", "魂斗罗", "冒险岛2", "坦克大战", "赤色要塞", "双截龙2", "热血物语", "吞食天地2", "忍者神龟3", "沙罗曼蛇"};
+    static int nes_sel = 0;
+    actions.nes_rom_count = [] { return int(nes.size()); };
+    actions.nes_rom_name = [](int i) { return nes[i % nes.size()]; };
+    actions.nes_rom_index = [] { return nes_sel; };
+    actions.nes_select = [](int i) { nes_sel = i; };
     display->SetAppsActions(std::move(actions), [] {});
+    host::home_changed = [display] { display->apps_->SetHomeStatus(host::home_status); };
 
     // Load the event script.
     std::vector<Event> events;
@@ -258,6 +269,27 @@ int main(int argc, char** argv) {
             else if (e.cmd == "emotion") display->SetEmotion(e.arg.c_str());
             else if (e.cmd == "touch") { int hold = 90; sscanf(e.arg.c_str(), "%d %d %d", &g_tx, &g_ty, &hold); g_pressed = true;
                 touches.push_back({g_us + 1000 * hold, false}); }
+            else if (e.cmd == "settime" || e.cmd == "setdate") {
+                time_t now = time(nullptr); struct tm lt; localtime_r(&now, &lt);
+                if (e.cmd == "settime") { int h = 0, m = 0, sec = 0; sscanf(e.arg.c_str(), "%d:%d:%d", &h, &m, &sec); lt.tm_hour = h; lt.tm_min = m; lt.tm_sec = sec; }
+                else { int y, mo, d; sscanf(e.arg.c_str(), "%d-%d-%d", &y, &mo, &d); lt.tm_year = y - 1900; lt.tm_mon = mo - 1; lt.tm_mday = d; }
+                g_epoch_base = mktime(&lt) - g_us / 1000000;
+            }
+            else if (e.cmd == "weather") {
+                int code = 0, rise = 360, set = 1095; sscanf(e.arg.c_str(), "%d %d %d", &code, &rise, &set);
+                host::weather.valid = true; host::weather.wmo_code = code; host::weather.sunrise_min = rise; host::weather.sunset_min = set; host::weather.version++;
+            }
+            else if (e.cmd == "skyrefresh") { if (display->sd_scene_) display->sd_scene_->sky_checked_ms_ = uint64_t(g_us / 1000) - 31000; }
+            else if (e.cmd == "homecatalog") {
+                auto c = std::make_shared<tab5_home::Catalog>();
+                tab5_home::ParseCatalog(ReadFile(e.arg), c.get());
+                host::home_status.configured = host::home_status.paired = host::home_status.ok = true;
+                host::home_status.message = "已连接 Home Assistant";
+                host::home_status.catalog = c; host::home_status.version++;
+                display->apps_->SetHomeStatus(host::home_status);
+            }
+            else if (e.cmd == "mdcatalog") host::md_catalog = std::make_shared<tab5_md::Catalog>(tab5_md::ParseCatalog(ReadFile(e.arg)));
+            else if (e.cmd == "gamemode") display->apps_->SetGameMode(e.arg == "md");
             else if (e.cmd == "podseek") g_pod_start_us = g_us - atoll(e.arg.c_str()) * 1000;
             else if (e.cmd == "waiting") g_waiting = atoi(e.arg.c_str()) != 0;
             else if (e.cmd == "playback") g_playback = atoi(e.arg.c_str()) != 0;
@@ -298,6 +330,8 @@ int main(int argc, char** argv) {
                 else if (e.arg == "ir") ap->OpenIr();
                 else if (e.arg == "muse") ap->OpenMuse();
                 else if (e.arg == "settings") ap->OpenSettings();
+                else if (e.arg == "home") ap->OpenHomeHub();
+                else if (e.arg == "games") ap->OpenNes();
                 else if (e.arg == "close") ap->Close();
                 else if (e.arg.rfind("icu", 0) == 0) ap->OpenIcu(atoi(e.arg.c_str() + 3));
             }
