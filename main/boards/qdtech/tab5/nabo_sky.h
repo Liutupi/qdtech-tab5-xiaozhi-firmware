@@ -287,7 +287,8 @@ struct Point {
 
 class SkyFx {
 public:
-    static constexpr int kStars = 46, kLights = 40, kDrops = 70, kFlakes = 55, kClouds = 3;
+    static constexpr int kStars = 46, kLights = 40, kDrops = 70, kFlakes = 55, kClouds = 5;
+    static constexpr int kFarClouds = 2;  // clouds_[0..1]: small, faint, slow (drawn first: parallax)
     static constexpr int kCloudW = 216, kCloudH = 120;
 
     // Empty until Reset(); draws nothing. Rebuild in place with Reset(): clouds are
@@ -348,6 +349,29 @@ public:
                 }
             }
         }
+        if (sky_.weather == Weather::Clear && night) {
+            // A shooting star about every 23 s: a 0.9 s streak with a fading tail, a
+            // different path each time (hash of the cycle number).
+            constexpr uint32_t kCycleMs = 23000, kFlightMs = 900;
+            const uint32_t cycle = t_ms / kCycleMs, into = t_ms % kCycleMs;
+            if (into < kFlightMs) {
+                Lcg r{cycle * 2654435761u + 17};
+                const float x0 = 150 + r.Unit() * 280, y0 = 28 + r.Unit() * 70;
+                const float dx = -(0.75f + r.Unit() * 0.35f), dy = 0.42f + r.Unit() * 0.2f;
+                const float head = 230.0f * into / kFlightMs;  // px travelled
+                const float life = 1.0f - float(into) / kFlightMs;
+                const uint16_t streak = To565(Hex(0xf4f8ff));
+                for (int k = 0; k < 46; ++k) {
+                    const float d = head - k;
+                    if (d < 0)
+                        break;
+                    const unsigned a = unsigned(255 * life * (1.0f - k / 46.0f));
+                    plot(int(x0 + dx * d), int(y0 + dy * d), streak, a);
+                    if (k < 6)
+                        plot(int(x0 + dx * d), int(y0 + dy * d) + 1, streak, a / 2);
+                }
+            }
+        }
         if (night && sky_.weather != Weather::Snow) {
             const uint16_t lamp = To565(Hex(0xffd68c));
             for (int i = 0; i < light_count_; ++i) {
@@ -367,6 +391,16 @@ public:
                 for (int k = 0; k < 18; ++k) {
                     plot(x - k / 5, y + k, rain, 110);
                     plot(x - k / 5 + 1, y + k, rain, 60);
+                }
+                // Splash where the drop lands on the sill line: two droplets flying apart.
+                const int landed = y + 17 - (kFxBottom - 14);
+                if (landed >= 0 && landed < 14) {
+                    const int sx = x - 3, sy = kFxBottom - 3 - landed / 3;
+                    const unsigned a = unsigned(150 * (14 - landed) / 14);
+                    plot(sx - landed / 2 - 1, sy, rain, a);
+                    plot(sx + landed / 2 + 1, sy, rain, a);
+                    plot(sx - landed / 2 - 2, sy + 1, rain, a / 2);
+                    plot(sx + landed / 2 + 2, sy + 1, rain, a / 2);
                 }
             }
         }
@@ -412,32 +446,52 @@ private:
         float x0 = 0, y = 0;       // start x (panel) and top
         float speed = 0;           // px per second, drifting left
         uint8_t alpha = 0;
+        std::array<uint16_t, kCloudH> row_color{};  // lit top -> shaded underside
     };
 
     // Soft cloud masks: five overlapping feathered ellipses, rendered once per sky.
     void BuildClouds() {
-        static constexpr float kStart[kClouds][3] = {{120, 120, 46}, {330, 200, 34}, {40, 250, 30}};
+        // {x, y, size}: two far clouds (small, high, slow) then the three near ones.
+        static constexpr float kStart[kClouds][3] = {
+            {260, 62, 20}, {470, 98, 25}, {120, 120, 46}, {330, 200, 34}, {40, 250, 30}};
         const bool heavy = sky_.weather != Weather::Clear;
-        cloud_count_ = sky_.weather == Weather::Clear && sky_.period == Period::Night ? 1 : kClouds;
-        cloud_color_ = To565(Hex(palette_.cloud));
+        const bool clear_night = sky_.weather == Weather::Clear && sky_.period == Period::Night;
+        first_cloud_ = 0;
+        cloud_count_ = clear_night ? kFarClouds + 1 : kClouds;
+        const Rgb lit = Hex(palette_.cloud), sky_top = Hex(palette_.top), shade = Hex(palette_.skyline);
         static constexpr float kParts[5][3] = {
             {-1.1f, .25f, .55f}, {-.45f, -.15f, .75f}, {.35f, -.05f, .68f}, {1.0f, .3f, .5f}, {0, .35f, .7f}};
         for (int i = 0; i < kClouds; ++i) {
+            const bool far = i < kFarClouds;
+            const int near_index = i - kFarClouds;
             const float s = std::min(58.0f, kStart[i][2] * (heavy ? 1.25f : 1.0f));
             Cloud& c = clouds_[i];
-            c.w = std::min(kCloudW, int(3.6f * s) + 2);
-            c.h = std::min(kCloudH, int(2.0f * s) + 2);
-            c.x0 = kStart[i][0] + (heavy ? i * 40 : 0) - c.w / 2.0f;
-            c.y = (heavy ? 55.0f + i * 28 : kStart[i][1]) - c.h / 2.0f;
-            c.speed = (heavy ? 3.0f : 5.0f) + i * 1.5f;
-            c.alpha = uint8_t(palette_.cloud_alpha - i * 18);
+            // Far clouds are flat, wide wisps (high stratus); near ones are puffy cumulus.
+            const float stretch_x = far ? 1.7f : 1.0f, stretch_y = far ? 0.55f : 1.0f;
+            c.w = std::min(kCloudW, int(3.6f * s * stretch_x) + 2);
+            c.h = std::min(kCloudH, int(2.0f * s * stretch_y) + 2);
+            c.x0 = kStart[i][0] + (heavy && !far ? near_index * 40 : 0) - c.w / 2.0f;
+            c.y = (heavy && !far ? 55.0f + near_index * 28 : kStart[i][1]) - c.h / 2.0f;
+            // Far clouds drift at ~40% speed: parallax depth.
+            c.speed = far ? (heavy ? 1.3f : 2.0f) + i * 0.6f : (heavy ? 3.0f : 5.0f) + near_index * 1.5f;
+            const bool night = sky_.period == Period::Night;
+            // At night clouds only faintly catch the light (dark blobs looked heavy).
+            const float dim = night ? 0.55f : 1.0f;
+            c.alpha = uint8_t((far ? palette_.cloud_alpha * 0.55f : palette_.cloud_alpha - near_index * 18) * dim);
+            // Far clouds take on the sky colour (aerial perspective); every cloud is lit on
+            // top and a little shaded underneath.
+            const Rgb base = far ? Mix(lit, sky_top, 0.35f) : lit;
+            for (int y = 0; y < c.h; ++y) {
+                const float v = float(y) / std::max(1, c.h - 1);
+                c.row_color[y] = To565(Mix(base, shade, std::max(0.0f, v - 0.45f) * (far ? 0.25f : 0.45f)));
+            }
             const float cx = c.w / 2.0f, cy = c.h / 2.0f;
             for (int y = 0; y < c.h; ++y)
                 for (int x = 0; x < c.w; ++x) {
                     float cover = 0;
                     for (const auto& p : kParts) {
-                        const float rx = p[2] * s, ry = p[2] * s * .72f;
-                        const float dx = (x - (cx + p[0] * s)) / rx, dy = (y - (cy + p[1] * s)) / ry;
+                        const float rx = p[2] * s * stretch_x, ry = p[2] * s * .72f * stretch_y;
+                        const float dx = (x - (cx + p[0] * s * stretch_x)) / rx, dy = (y - (cy + p[1] * s * stretch_y)) / ry;
                         cover = std::max(cover, std::clamp((1.0f - std::sqrt(dx * dx + dy * dy)) / .35f, 0.0f, 1.0f));
                     }
                     masks_[i][y * kCloudW + x] = uint8_t(cover * 255);
@@ -448,7 +502,7 @@ private:
     template <typename AlphaAt>
     NABO_SKY_HOT void DrawClouds(uint32_t t_ms, uint16_t* out, int out_w, int out_h, int origin_x, AlphaAt alpha_at) const {
         const float t = float(t_ms % 3600000u) / 1000.0f;
-        for (int i = 0; i < cloud_count_; ++i) {
+        for (int i = first_cloud_; i < cloud_count_; ++i) {
             const Cloud& c = clouds_[i];
             // Drift left across the panel and wrap; the soft edge hides entry and exit.
             const float span = float(kPanelW + c.w);
@@ -466,7 +520,7 @@ private:
                     const int px = left + x, ox = px - origin_x;
                     if (ox < 0 || ox >= out_w || alpha_at(ox, py) > 8)
                         continue;
-                    out[py * out_w + ox] = Blend565(cloud_color_, out[py * out_w + ox],
+                    out[py * out_w + ox] = Blend565(c.row_color[y], out[py * out_w + ox],
                                                     Fade(m * c.alpha / 255, px, py));
                 }
             }
@@ -483,8 +537,7 @@ private:
     std::array<Point, kDrops> drops_{};
     std::array<Point, kFlakes> flakes_{};
     std::array<Cloud, kClouds> clouds_{};
-    int cloud_count_ = 0;
-    uint16_t cloud_color_ = 0;
+    int first_cloud_ = 0, cloud_count_ = 0;
     std::array<std::array<uint8_t, kCloudW * kCloudH>, kClouds> masks_{};
 };
 

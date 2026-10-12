@@ -39,6 +39,7 @@ private:
     static nabo_sky::Sky CurrentSky();
     bool BuildSkyLayers();
     void ApplySkyToBackground(const uint16_t* panel);
+    void ApplySkyToBackground(const uint16_t* from, const uint16_t* to, unsigned alpha);
     void UpdateSky(uint64_t now);
     static void SkyJob(void* arg);
     lv_obj_t *root_ = nullptr, *head_ = nullptr, *body_ = nullptr, *eyes_ = nullptr,

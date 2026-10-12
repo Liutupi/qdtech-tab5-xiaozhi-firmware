@@ -510,9 +510,19 @@ bool Tab5SdScene::BuildSkyLayers() {
 }
 // background = K + t * sky, in place. The reader may compose one frame that mixes old
 // and new sky rows while this runs; that is a single 1/8 s frame a few times a day.
-void Tab5SdScene::ApplySkyToBackground(const uint16_t* panel) {
+void Tab5SdScene::ApplySkyToBackground(const uint16_t* panel) { ApplySkyToBackground(nullptr, panel, 255); }
+
+// background = K + t * mix(from, to, alpha); alpha 255 (or no `from`) is plain `to`.
+void Tab5SdScene::ApplySkyToBackground(const uint16_t* from, const uint16_t* to, unsigned alpha) {
+    static uint16_t row[Layout::kOutW];  // weather task only
     for (int y = 0; y < Layout::kOutH; ++y) {
-        const uint16_t* sky = panel + size_t(y) * kSkyW + kVideoX;
+        const uint16_t* sky = to + size_t(y) * kSkyW + kVideoX;
+        if (from && alpha < 255) {
+            const uint16_t* old = from + size_t(y) * kSkyW + kVideoX;
+            for (int x = 0; x < Layout::kOutW; ++x)
+                row[x] = nabo_sky::Blend565(sky[x], old[x], alpha);
+            sky = row;
+        }
         uint16_t* bg = background_ + size_t(y) * Layout::kOutW;
         if (y < sky_mask_top_) {
             std::memcpy(bg, sky, size_t(Layout::kOutW) * 2);
@@ -540,9 +550,18 @@ void Tab5SdScene::SkyJob(void* arg) {
     auto* self = static_cast<Tab5SdScene*>(arg);
     const int64_t started = esp_timer_get_time();
     nabo_sky::RenderSkyBase(self->sky_pending_, self->sky_next_, kSkyW, kSkyH);
-    self->ApplySkyToBackground(self->sky_next_);
     self->fx_[1 - self->sky_slot_].Reset(self->sky_pending_);
     self->sky_job_ms_ = uint32_t((esp_timer_get_time() - started) / 1000);
+    // Cross-fade the sky behind Nabo over ~2 s instead of jumping: blend the shown sky
+    // (sky_buf_, still on screen and unchanged) into the new one in 8 steps. Only the
+    // compositor background changes, so no extra buffer is needed; the moving details
+    // (clouds keep their positions, they follow time) switch at the end.
+    constexpr int kSteps = 8;
+    for (int k = 1; k <= kSteps; ++k) {
+        self->ApplySkyToBackground(self->sky_buf_, self->sky_next_, unsigned(k * 255 / kSteps));
+        if (k < kSteps)
+            vTaskDelay(pdMS_TO_TICKS(250));
+    }
     self->sky_job_.store(kSkyJobDone, std::memory_order_release);
 }
 void Tab5SdScene::UpdateSky(uint64_t now) {
