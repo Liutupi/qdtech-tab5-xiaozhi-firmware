@@ -203,8 +203,7 @@ private:
                             int width, int height, void (*callback)(lv_event_t*), void* user_data);
     static void SetLabelTextIfChanged(lv_obj_t* label, const char* text);
     void Show(lv_obj_t* page);
-    // Slides a page that just became visible in; forward pages come from the right,
-    // the app home (and the 米家 page when leaving the IR remote) from the left.
+    // Fades through dark (backlight) when a different page became visible.
     void AnimateEnter(lv_obj_t* page);
     lv_obj_t* current_page_ = nullptr;
     void BuildHome();

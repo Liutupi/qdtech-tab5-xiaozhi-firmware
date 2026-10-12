@@ -14,6 +14,7 @@
 #include "esp_lvgl_port.h"
 #include "usb_gamepad_host.h"
 #include "tab5_nes_video.h"
+#include "tab5_page_fade.h"
 #include "tab5_ui_motion.h"
 #include "misc/cache/instance/lv_image_cache.h"
 
@@ -170,13 +171,10 @@ void Tab5NativeApps::Show(lv_obj_t* page) {
 void Tab5NativeApps::AnimateEnter(lv_obj_t* page) {
     if (!page || page == current_page_)
         return;
-    const bool back_to_hub = mijia_page_ && page == mijia_page_->object() && ir_page_ &&
-                             current_page_ == ir_page_->object();
-    const bool forward = page != home_page_ && !back_to_hub;
     current_page_ = page;
     // The game page hands the panel to emulator video; keep it still.
     if (page != game_page_)
-        tab5_ui::SlideIn(page, forward);
+        tab5_ui::PageFade::Get().Start();
 }
 
 void Tab5NativeApps::OpenApps() { Show(home_page_); }
@@ -382,6 +380,8 @@ void Tab5NativeApps::OpenIcu(int mode, const std::string& external_result, bool 
 
 void Tab5NativeApps::Close() {
     game_page_visible_.store(false, std::memory_order_release);
+    if (IsVisible() && current_page_ != game_page_)
+        tab5_ui::PageFade::Get().Start();
     current_page_ = nullptr;
     if (mijia_page_) mijia_page_->Hide();  // stops the fast device poll
     lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);

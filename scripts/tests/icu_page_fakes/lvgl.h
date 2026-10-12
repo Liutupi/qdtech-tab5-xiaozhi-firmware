@@ -81,7 +81,7 @@ inline lv_obj_t* lv_obj_get_child(lv_obj_t* obj, int index) {
 inline void* lv_event_get_user_data(lv_event_t* event) { return event->user_data; }
 inline lv_obj_t* lv_event_get_target(lv_event_t* event) { return event->target; }
 
-// tab5_ui_motion.h (press feel / page slide): styles and animations are no-ops here.
+// tab5_ui_motion.h (press feel): styles are no-ops here.
 using lv_style_prop_t = uint8_t;
 constexpr lv_style_prop_t LV_STYLE_PROP_INV = 0;
 constexpr lv_style_prop_t LV_STYLE_TRANSFORM_WIDTH = 1;
@@ -91,7 +91,6 @@ struct lv_style_t {};
 struct lv_style_transition_dsc_t {};
 struct lv_anim_t {};
 using lv_anim_path_cb_t = int32_t (*)(const lv_anim_t*);
-using lv_anim_exec_xcb_t = void (*)(void*, int32_t);
 inline int32_t lv_anim_path_ease_out(const lv_anim_t*) { return 0; }
 inline int32_t lv_anim_path_overshoot(const lv_anim_t*) { return 0; }
 inline void lv_style_init(lv_style_t*) {}
@@ -102,12 +101,3 @@ inline void lv_style_set_transform_width(lv_style_t*, int32_t) {}
 inline void lv_style_set_transform_height(lv_style_t*, int32_t) {}
 inline void lv_style_set_translate_y(lv_style_t*, int32_t) {}
 inline void lv_obj_add_style(lv_obj_t*, const lv_style_t*, int) {}
-inline void lv_obj_set_style_translate_x(lv_obj_t*, int32_t, int) {}
-inline void lv_anim_init(lv_anim_t*) {}
-inline bool lv_anim_delete(void*, lv_anim_exec_xcb_t) { return false; }
-inline void lv_anim_set_var(lv_anim_t*, void*) {}
-inline void lv_anim_set_values(lv_anim_t*, int32_t, int32_t) {}
-inline void lv_anim_set_duration(lv_anim_t*, uint32_t) {}
-inline void lv_anim_set_path_cb(lv_anim_t*, lv_anim_path_cb_t) {}
-inline void lv_anim_set_exec_cb(lv_anim_t*, lv_anim_exec_xcb_t) {}
-inline void lv_anim_start(lv_anim_t*) {}
