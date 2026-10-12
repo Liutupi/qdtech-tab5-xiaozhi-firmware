@@ -17,7 +17,11 @@ SMOKE = r'''
 #include "nabo_sky.h"
 using namespace nabo_sky;
 int main() {
-    const int W = 512, H = 558;
+    const int W = kPanelW, H = kPanelH;
+    static_assert(kVideoRight - kVideoLeft + 1 == 512);
+    // The wide window's complete body region sits past the soft sky margin.
+    assert(EdgeFactor(kVideoLeft + 12, 340) == 1.0f);
+    assert(EdgeFactor(kVideoLeft + 490, 340) == 1.0f);
     assert(PeriodAt(12 * 60) == Period::Day && PeriodAt(2 * 60) == Period::Night);
     assert(PeriodAt(18 * 60 + 15) == Period::Dusk && PeriodAt(6 * 60) == Period::Dusk);
     assert(PeriodAt(23 * 60) == Period::Night && PeriodAt(19 * 60 + 30) == Period::Night);
@@ -57,13 +61,21 @@ int main() {
             for (int y = kFxBottom; y < H; ++y)
                 for (int x = 0; x < W; ++x)
                     assert(f[y * W + x] == a[y * W + x]);  // never below the window line
-            // Nothing drawn where composed frames end (x < 39 or x > 472): no cut-off edge.
+            // Nothing drawn beyond the composed region: no cut-off edge.
             for (int y = 0; y < H; ++y)
-                for (int x = 0; x <= 39; ++x)
+                for (int x = 0; x <= kVideoLeft; ++x)
                     assert(f[y * W + x] == a[y * W + x] && f[y * W + W - 1 - x] == a[y * W + W - 1 - x]);
-            // Output frames start at the head clip (x = 39) and are 434 wide.
-            std::vector<uint16_t> part(434 * H, 0);
-            fx->Draw(4321, part.data(), 434, H, 39, [](int, int) { return 0; });
+            // Full background and its cropped compositor region must agree.
+            constexpr int video_w = kVideoRight - kVideoLeft + 1;
+            std::vector<uint16_t> part(video_w * H), full = a;
+            for (int y = 0; y < H; ++y)
+                std::copy_n(a.data() + y * W + kVideoLeft, video_w,
+                            part.data() + y * video_w);
+            fx->Draw(4321, part.data(), video_w, H, kVideoLeft, [](int, int) { return 0; });
+            fx->Draw(4321, full.data(), W, H, 0, [](int, int) { return 0; });
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < video_w; ++x)
+                    assert(part[y * video_w + x] == full[y * W + kVideoLeft + x]);
             if (w != int(Weather::Clear)) {  // clouds drift
                 std::vector<uint16_t> c0 = a, c1 = a;
                 fx->Draw(0, c0.data(), W, H, 0, [](int, int) { return 0; });

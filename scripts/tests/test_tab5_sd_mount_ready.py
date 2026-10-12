@@ -26,6 +26,9 @@ def harness(scene_source, mount_source):
 #include <vector>
 #include "nabo_scene_mailbox.h"
 #include "nabo_scene_stream.h"
+#include "nabo_action_library.h"
+#include "nabo_wide_composer.h"
+using Layout = nabo_sd::WideLayout;
 template<typename... Args> void FakeLog(const char*, const char*, Args...) {}
 #define ESP_LOGI(...) FakeLog(__VA_ARGS__)
 #define ESP_LOGW(...) FakeLog(__VA_ARGS__)
@@ -74,6 +77,8 @@ public:
     nabo_sd::SceneMailbox mailbox;
     SdSource source_;
     nabo_sd::Pack pack_;
+    nabo_sd::WideComposer composer_{nullptr, nullptr};
+    std::atomic<bool> lively_{false};
     std::atomic<uint32_t> failures_{0};
     Reader() : a(kBytes), b(kBytes), mailbox(a.data(), b.data(), kBytes) {}
     bool Failed(unsigned clip) { return failures_.load() & (1u << clip); }
@@ -135,8 +140,8 @@ void run(Case which) {
         assert(displayed == 0 && !r.Failed(0));
         std::puts("PASS persistent timeout: bounded backoff, no permanent animation fault");
     } else {
-        assert(opens == 1 && displayed == 0 && r.Failed(0));
-        std::puts("PASS missing file / bad header: one open, sticky fallback");
+        assert(opens == (which == MissingFile ? 2u : 1u) && displayed == 0 && r.Failed(0));
+        std::puts("PASS missing preferred and legacy files / bad header: bounded opens, sticky fallback");
     }
 }
 int main(int argc, char** argv) {

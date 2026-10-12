@@ -43,11 +43,11 @@ public:
     }
     static constexpr int kSlots = 3;
     void Request(unsigned clip, unsigned frame, uint32_t generation) {
-        if (clip >= 4 || frame >= 256) {
+        if (clip >= 18 || frame >= 256) {
             CancelAll();
             return;
         }
-        const uint32_t epoch = ((generation & 0x1fffffu) << 3) | (clip + 1);
+        const uint32_t epoch = ((generation & 0x7ffffu) << 5) | (clip + 1);
         epoch_.store(epoch, std::memory_order_release);
         request_.store((epoch << 8) | frame, std::memory_order_release);
     }
@@ -66,7 +66,7 @@ public:
         compose_context_ = context;
     }
     uint32_t Requested() const { return request_.load(std::memory_order_acquire); }
-    static unsigned Clip(uint32_t token) { return ((token >> 8) & 7) - 1; }
+    static unsigned Clip(uint32_t token) { return ((token >> 8) & 31) - 1; }
     Error Pump(Pack& pack, uint32_t token, PumpTrace* trace = nullptr) {
         if (trace)
             trace->Reset();

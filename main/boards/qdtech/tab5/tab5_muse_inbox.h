@@ -44,6 +44,14 @@ struct ResolvedTrack {
     std::string song_id;
 };
 
+struct RelayConnection {
+    std::string url;
+    std::string server_name;
+};
+// Reuse a recently TLS-verified relay address for narrated audio. This only takes
+// a short cache lock; it never resolves DNS or waits for an inbox HTTP transfer.
+RelayConnection CachedRelayConnection(const std::string& url);
+
 struct Snapshot {
     bool ok = false;          // last poll succeeded
     bool ever_ok = false;     // at least one poll succeeded since boot

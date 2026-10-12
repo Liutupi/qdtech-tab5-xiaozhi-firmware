@@ -35,6 +35,7 @@
 #include "mp3dec.h"
 #include "settings.h"
 #include "tab5_audio_codec.h"
+#include "tab5_muse_inbox.h"
 #include "wifi_manager.h"
 
 #include <esp_timer.h>
@@ -1622,8 +1623,13 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         custom_url_fatal_error_ = false;
     }
 
+    const auto relay_connection = tab5_muse::CachedRelayConnection(url);
     esp_http_client_config_t config = {};
-    config.url = url.c_str();
+    config.url = relay_connection.url.c_str();
+    if (!relay_connection.server_name.empty()) {
+        config.common_name = relay_connection.server_name.c_str();
+        ESP_LOGI(TAG, "using verified Muse relay address for audio");
+    }
     // TLS handshake to qtfm/qingting can take several seconds on slower WAN
     // links (e.g. phone hotspots). Keep connect/read timeout generous; mid-stream
     // hangs are still cut by the 5s stall watchdog after data starts flowing.
@@ -1633,7 +1639,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     // scratch buffer only increases the risk of TLS/MQTT allocation failures.
     config.buffer_size = 4096;
     config.buffer_size_tx = 1024;
-    config.disable_auto_redirect = false;
+    config.disable_auto_redirect = !relay_connection.server_name.empty();
     config.max_redirection_count = 5;
     config.crt_bundle_attach = esp_crt_bundle_attach;
 
@@ -1643,6 +1649,8 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         return false;
     }
 
+    if (!relay_connection.server_name.empty())
+        esp_http_client_set_header(client, "Host", relay_connection.server_name.c_str());
     esp_http_client_set_header(client, "User-Agent", "Mozilla/5.0 ESP32 Radio");
     esp_http_client_set_header(client, "Accept", "audio/mpeg,*/*");
     esp_http_client_set_header(client, "Icy-MetaData", "0");
@@ -1878,6 +1886,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     playback_clock_.Begin(url, stream_generation);
     int bytes_left = 0;
     int decoded_frames = 0;
+    int64_t last_progress_log_us = 0;
     bool logged_complete = false;
     int decode_errors = 0;
     size_t total_bytes = 0;
@@ -1923,12 +1932,16 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         // the larger first fill because its servers deliver in bursts.
         const int initial_target = playing_custom_url_ ? 6 * 1024 : kInitialReadTargetBytes;
         const int target_bytes = decoded_frames == 0 ? initial_target : steady_target;
-        while (bytes_left < target_bytes && bytes_left < kReadBufferSize &&
-               play_requested_ && !stop_requested_ &&
+        while (bytes_left < target_bytes && bytes_left < kReadBufferSize && play_requested_ &&
+               !stop_requested_ &&
                stream_generation == stream_generation_.load(std::memory_order_relaxed)) {
-            const size_t got = xStreamBufferReceive(
-                reader->ring, read_buffer + bytes_left, kReadBufferSize - bytes_left,
-                pdMS_TO_TICKS(20));
+            // The network task fills the ring independently. Waiting for its
+            // next burst while we already hold complete MP3 frames can drain
+            // the small I2S DMA queue and make a healthy stream stutter.
+            const TickType_t refill_wait =
+                decoded_frames > 0 && bytes_left >= 2048 ? 0 : pdMS_TO_TICKS(20);
+            const size_t got = xStreamBufferReceive(reader->ring, read_buffer + bytes_left,
+                                                    kReadBufferSize - bytes_left, refill_wait);
             if (got > 0) {
                 bytes_left += static_cast<int>(got);
                 continue;
@@ -2052,9 +2065,16 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
                 ESP_LOGI(TAG, "timing: first audio frame %d ms after connect start",
                          static_cast<int>((esp_timer_get_time() - t_start_us) / 1000));
             }
-            ESP_LOGI(TAG, "playing station=%s frames=%d rate=%d channels=%d total=%u KB",
+            const int64_t progress_now = esp_timer_get_time();
+            ESP_LOGI(TAG,
+                     "playing station=%s frames=%d rate=%d channels=%d total=%u KB "
+                     "buffered=%d ring=%u interval_ms=%lld",
                      station_name.c_str(), decoded_frames, frame_info.samprate, frame_info.nChans,
-                     static_cast<unsigned>(total_bytes / 1024));
+                     static_cast<unsigned>(total_bytes / 1024), bytes_left,
+                     static_cast<unsigned>(xStreamBufferBytesAvailable(reader->ring)),
+                     static_cast<long long>(
+                         last_progress_log_us ? (progress_now - last_progress_log_us) / 1000 : 0));
+            last_progress_log_us = progress_now;
         }
     }
 
