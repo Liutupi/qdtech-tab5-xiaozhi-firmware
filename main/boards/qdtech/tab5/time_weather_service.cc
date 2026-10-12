@@ -1,5 +1,7 @@
 #include "time_weather_service.h"
 #include "tab5_daily_content.h"
+#include "tab5_sky_weather.h"
+#include "tab5_weather_obs.h"
 
 #include <cmath>
 #include <cctype>
@@ -107,10 +109,17 @@ void TimeWeatherService::LoadLocationCacheFromNvs() {
         }
     }
 
+    // The CMA station must match the location: an explicit "cma" setting, else the
+    // Zhongshan station for the default (Zhongshan) coordinates, else Open-Meteo only.
+    std::string station = settings.GetString("cma", "");
+    if (station.empty() && std::fabs(latitude - 22.5176) < 0.3 && std::fabs(longitude - 113.3928) < 0.3)
+        station = tab5_weather::kDefaultCmaStation;
+
     std::lock_guard<std::mutex> lock(location_mutex_);
     location_city_ = city;
     location_latitude_ = latitude;
     location_longitude_ = longitude;
+    location_cma_station_ = station;
     location_loaded_ = true;
 }
 
@@ -244,7 +253,7 @@ void TimeWeatherService::TaskWrapper(void* arg) {
 }
 
 void TimeWeatherService::Task() {
-    static constexpr int kWeatherRefreshSeconds = 3600;
+    static constexpr int kWeatherRefreshSeconds = 20 * 60;  // CMA stations report every 10-60 min
     static constexpr int kWeatherLowMemoryRetrySeconds = 300;
     static constexpr int kClockRefreshSeconds = 5;
     int weather_ticks = kWeatherRefreshSeconds;
@@ -485,10 +494,20 @@ bool TimeWeatherService::FetchWeather() {
     double latitude = 22.5176;
     double longitude = 113.3928;
     CopyLocationCache(&city, &latitude, &longitude);
-    
-    char url[256];
+    std::string station;
+    {
+        std::lock_guard<std::mutex> lock(location_mutex_);
+        station = location_cma_station_;
+    }
+    // Observed weather first; the model forecast only when the station is unavailable.
+    if (!station.empty() && FetchCmaWeather(city, station))
+        return true;
+
+    // ECMWF matched the observations best of the Open-Meteo models for Zhongshan; the
+    // default "best_match" reported drizzle under a clear sky.
+    char url[300];
     snprintf(url, sizeof(url),
-             "http://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,relative_humidity_2m,precipitation,rain,showers,weather_code,cloud_cover,is_day&timezone=Asia%%2FShanghai&forecast_days=1",
+             "http://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,relative_humidity_2m,precipitation,rain,showers,weather_code,cloud_cover,is_day&models=ecmwf_ifs025&timezone=Asia%%2FShanghai&forecast_days=1",
              latitude, longitude);
     
     char* response = static_cast<char*>(heap_caps_calloc(1, WEATHER_RESPONSE_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -601,13 +620,68 @@ bool TimeWeatherService::FetchWeather() {
     last_weather_code_ = refined_code;
     last_weather_valid_ = true;
     SetWeatherSafe(temp_text, summary, refined_code);
-    
+    tab5_sky::WeatherService::GetInstance().Publish(refined_code);
+
     cJSON_Delete(root);
     heap_caps_free(response);
     weather_failure_count_ = 0;
     ESP_LOGI(TAG, "weather ok %s %s raw=%d refined=%d rain=%.2f cloud=%d humidity=%d updated=%s",
              temp_text, summary, raw_code, refined_code, fmax(precipitation, fmax(rain, showers)),
              cloud_cover, humidity, last_update_);
+    return true;
+}
+
+bool TimeWeatherService::FetchCmaWeather(const std::string& city, const std::string& station) {
+    char* response = static_cast<char*>(heap_caps_calloc(1, WEATHER_RESPONSE_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!response)
+        return false;
+    char url[96];
+    snprintf(url, sizeof(url), "http://www.nmc.cn/rest/real/%s", station.c_str());
+    esp_http_client_config_t config = {};
+    config.url = url;
+    config.timeout_ms = 6000;
+    config.event_handler = HttpEventHandler;
+    config.user_data = response;
+    config.buffer_size = 1024;
+    config.buffer_size_tx = 512;
+    int status = 0;
+    esp_err_t err = ESP_ERR_NO_MEM;
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client) {
+        esp_http_client_set_header(client, "Accept", "application/json");
+        esp_http_client_set_header(client, "Connection", "close");
+        err = esp_http_client_perform(client);
+        status = esp_http_client_get_status_code(client);
+        esp_http_client_cleanup(client);
+    }
+    tab5_weather::Observation obs;
+    const bool ok = err == ESP_OK && status == 200 && tab5_weather::ParseCmaReal(response, &obs);
+    heap_caps_free(response);
+    if (!ok) {
+        ESP_LOGW(TAG, "CMA weather unavailable (%s, http %d); falling back to Open-Meteo", esp_err_to_name(err),
+                 status);
+        return false;
+    }
+
+    char temp_text[16];
+    char summary[96];
+    snprintf(temp_text, sizeof(temp_text), "%d C", (int)lround(obs.temperature));
+    if (obs.time[0])
+        snprintf(last_update_, sizeof(last_update_), "%s", obs.time);
+    if (obs.humidity >= 0)
+        snprintf(summary, sizeof(summary), "%s %s %s H%d%%", city.c_str(), WeatherDesc(obs.wmo_code), last_update_,
+                 obs.humidity);
+    else
+        snprintf(summary, sizeof(summary), "%s %s %s", city.c_str(), WeatherDesc(obs.wmo_code), last_update_);
+    snprintf(last_temperature_, sizeof(last_temperature_), "%s", temp_text);
+    snprintf(last_summary_, sizeof(last_summary_), "%s", summary);
+    last_weather_code_ = obs.wmo_code;
+    last_weather_valid_ = true;
+    SetWeatherSafe(temp_text, summary, obs.wmo_code);
+    tab5_sky::WeatherService::GetInstance().Publish(obs.wmo_code);
+    weather_failure_count_ = 0;
+    ESP_LOGI(TAG, "weather ok (CMA %s) %s %s info=%s rain=%.1f%s%s", station.c_str(), temp_text, summary,
+             obs.info, obs.rain, obs.warning ? " WARNING: " : "", obs.warning ? obs.warning_text : "");
     return true;
 }
 

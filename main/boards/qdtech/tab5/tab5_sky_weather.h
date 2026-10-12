@@ -6,9 +6,10 @@
 #include <atomic>
 #include <mutex>
 
-// Current weather and today's sunrise/sunset for the sky behind Nabo (Open-Meteo,
-// plain HTTP, no key). Location comes from the existing "weather_cfg" NVS settings
-// (default Zhongshan). Refreshes every 30 minutes on its own small PSRAM-stack task.
+// Current weather and today's sunrise/sunset for the sky behind Nabo. The weather code is
+// published by TimeWeatherService (CMA station observation, Open-Meteo fallback), so the sky
+// and the home weather always agree; sunrise/sunset are computed locally from the
+// "weather_cfg" location (default Zhongshan). The small PSRAM-stack task runs sky jobs.
 namespace tab5_sky {
 
 struct WeatherNow {
@@ -25,6 +26,8 @@ public:
     // Call from a normal (internal-RAM stack) task: reads NVS, then starts polling.
     void Start();
     WeatherNow Current();
+    // Any task: the latest weather (WMO code) from the home weather service.
+    void Publish(int wmo_code);
     // Runs fn(arg) once on the weather task (CPU-heavy sky rendering off the LVGL task).
     // The job must not touch NVS/flash: the task stack is in PSRAM. One job at a time;
     // returns false when the task is not running or a job is still pending.
@@ -34,7 +37,6 @@ private:
     WeatherService() = default;
     static void TaskEntry(void* arg);
     void Run();
-    bool Fetch();
 
     std::mutex mutex_;
     WeatherNow now_;

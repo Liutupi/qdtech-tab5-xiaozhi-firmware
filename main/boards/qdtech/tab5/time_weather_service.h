@@ -30,6 +30,8 @@ private:
     std::string location_city_ = "Zhongshan";
     double location_latitude_ = 22.5176;
     double location_longitude_ = 113.3928;
+    // CMA station for the configured location ("weather_cfg"/"cma"); empty = Open-Meteo only.
+    std::string location_cma_station_ = "YIWau";
     bool location_loaded_ = false;
     char last_temperature_[16] = "-- C";
     char last_summary_[96] = "Weather pending";
@@ -46,6 +48,8 @@ private:
     bool WaitTimeReady();
     void UpdateTime();
     bool FetchWeather();
+    // CMA station observation (www.nmc.cn); false when unavailable (caller falls back).
+    bool FetchCmaWeather(const std::string& city, const std::string& station);
     int WeatherRetrySeconds() const;
     void ShowCachedWeather(const char* status);
     void SetWeatherSafe(const char* temperature, const char* summary, int weather_code);
