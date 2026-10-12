@@ -1,4 +1,5 @@
 #include "tab5_podcast_page.h"
+#include "tab5_ui_motion.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -79,6 +80,7 @@ void Tab5PodcastPage::Build() {
     lv_obj_set_size(back, 216, 60);
     lv_obj_set_style_bg_color(back, lv_color_hex(0x254c66), 0);
     lv_obj_set_style_bg_color(back, lv_color_hex(0x39718b), LV_STATE_PRESSED);
+    tab5_ui::AddPressFeel(back);
     lv_obj_set_style_radius(back, 18, 0);
     lv_obj_set_style_shadow_width(back, 0, 0);
     auto* back_label = Text(back, "返回应用", &qd_font_lxgw_28, kText, 0, 0, 216);
@@ -98,6 +100,7 @@ void Tab5PodcastPage::Build() {
     lv_obj_set_size(refresh, 208, 60);
     lv_obj_set_style_bg_color(refresh, lv_color_hex(0x3a2f78), 0);
     lv_obj_set_style_bg_color(refresh, lv_color_hex(0x5a4fb0), LV_STATE_PRESSED);
+    tab5_ui::AddPressFeel(refresh);
     lv_obj_set_style_radius(refresh, 18, 0);
     lv_obj_set_style_shadow_width(refresh, 0, 0);
     refresh_label_ = Text(refresh, "刷新节目", &qd_font_cjk_28, kText, 0, 0, 208);
@@ -138,6 +141,7 @@ void Tab5PodcastPage::Build() {
     lv_obj_set_style_bg_grad_color(play, lv_color_hex(kViolet), 0);
     lv_obj_set_style_bg_grad_dir(play, LV_GRAD_DIR_HOR, 0);
     lv_obj_set_style_bg_color(play, lv_color_hex(0xd77d9a), LV_STATE_PRESSED);
+    tab5_ui::AddPressFeel(play);
     lv_obj_set_style_shadow_width(play, 0, 0);
     play_label_ = Text(play, "播放播客", &qd_font_lxgw_28, 0x1a1033, 0, 0, 240);
     lv_obj_set_style_text_align(play_label_, LV_TEXT_ALIGN_CENTER, 0);
@@ -155,6 +159,7 @@ void Tab5PodcastPage::Build() {
     lv_obj_set_style_radius(songs, 29, 0);
     lv_obj_set_style_bg_color(songs, lv_color_hex(0x3a2f78), 0);
     lv_obj_set_style_bg_color(songs, lv_color_hex(0x5a4fb0), LV_STATE_PRESSED);
+    tab5_ui::AddPressFeel(songs);
     lv_obj_set_style_shadow_width(songs, 0, 0);
     songs_label_ = Text(songs, "播放推荐歌曲", &qd_font_lxgw_28, kText, 0, 0, 240);
     lv_obj_set_style_text_align(songs_label_, LV_TEXT_ALIGN_CENTER, 0);
@@ -308,6 +313,7 @@ void Tab5PodcastPage::RenderList() {
         lv_obj_set_style_radius(row, 18, 0);
         lv_obj_set_style_bg_color(row, lv_color_hex(selected ? 0x2a2550 : 0x10263a), 0);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x2f3a63), LV_STATE_PRESSED);
+        tab5_ui::AddPressFeel(row);
         lv_obj_set_style_border_color(row, lv_color_hex(selected ? kViolet : 0x2a4a62), 0);
         lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
         lv_obj_set_style_pad_all(row, 0, 0);
@@ -395,6 +401,7 @@ void Tab5PodcastPage::RenderEpisode() {
         lv_obj_set_style_radius(row, 14, 0);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x10263a), 0);
         lv_obj_set_style_bg_color(row, lv_color_hex(0x3a2f78), LV_STATE_PRESSED);
+        tab5_ui::AddPressFeel(row);
         lv_obj_set_style_border_width(row, 0, 0);
         lv_obj_set_style_pad_all(row, 0, 0);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);

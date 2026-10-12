@@ -14,6 +14,7 @@
 #include "esp_lvgl_port.h"
 #include "usb_gamepad_host.h"
 #include "tab5_nes_video.h"
+#include "tab5_ui_motion.h"
 #include "misc/cache/instance/lv_image_cache.h"
 
 LV_FONT_DECLARE(qd_font_lxgw_28);
@@ -90,6 +91,7 @@ lv_obj_t* Tab5NativeApps::Button(lv_obj_t* parent, const char* text, int x, int 
     lv_obj_set_style_border_width(button, 1, 0);
     lv_obj_set_style_radius(button, 18, 0);
     lv_obj_set_style_shadow_width(button, 0, 0);
+    tab5_ui::AddPressFeel(button);
     lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
     auto* label = lv_label_create(button);
     lv_label_set_text(label, text);
@@ -162,6 +164,19 @@ void Tab5NativeApps::Show(lv_obj_t* page) {
     lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
     game_page_visible_.store(page == game_page_, std::memory_order_release);
+    AnimateEnter(page);
+}
+
+void Tab5NativeApps::AnimateEnter(lv_obj_t* page) {
+    if (!page || page == current_page_)
+        return;
+    const bool back_to_hub = mijia_page_ && page == mijia_page_->object() && ir_page_ &&
+                             current_page_ == ir_page_->object();
+    const bool forward = page != home_page_ && !back_to_hub;
+    current_page_ = page;
+    // The game page hands the panel to emulator video; keep it still.
+    if (page != game_page_)
+        tab5_ui::SlideIn(page, forward);
 }
 
 void Tab5NativeApps::OpenApps() { Show(home_page_); }
@@ -221,6 +236,7 @@ void Tab5NativeApps::OpenHomeHub() {
     mijia_page_->Show();
     lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
+    AnimateEnter(mijia_page_->object());
 }
 
 void Tab5NativeApps::SetHomeStatus(const tab5_home::Status& status) {
@@ -242,6 +258,7 @@ void Tab5NativeApps::OpenIr() {
     ir_page_->Show();
     lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
+    AnimateEnter(ir_page_->object());
 }
 
 void Tab5NativeApps::OpenPodcast() {
@@ -270,6 +287,7 @@ void Tab5NativeApps::OpenPodcast() {
     Show(nullptr);
     podcast_page_->SetPlayback(radio_playing_, radio_station_name_.c_str());
     podcast_page_->Show();
+    AnimateEnter(podcast_page_->object());
     Schedule(actions_.muse_refresh);
 }
 
@@ -364,6 +382,7 @@ void Tab5NativeApps::OpenIcu(int mode, const std::string& external_result, bool 
 
 void Tab5NativeApps::Close() {
     game_page_visible_.store(false, std::memory_order_release);
+    current_page_ = nullptr;
     if (mijia_page_) mijia_page_->Hide();  // stops the fast device poll
     lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
 }
@@ -409,6 +428,7 @@ void Tab5NativeApps::BuildHome() {
         lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_bg_color(card, lv_color_hex(0x234761), LV_STATE_PRESSED);
         lv_obj_set_style_border_color(card, lv_color_hex(accent), LV_STATE_PRESSED);
+        tab5_ui::AddPressFeel(card);
         auto* accent_bar = Card(card, 24, 21, 7, 44, accent, accent, 3);
         lv_obj_remove_flag(accent_bar, LV_OBJ_FLAG_CLICKABLE);
         auto* heading = Label(card, title, &qd_font_lxgw_36, 0xf5f9fd, 51, 15, 470);

@@ -20,6 +20,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -58,6 +59,8 @@
 #include "tab5_native_apps.h"
 #include "tab5_radio_status_mailbox.h"
 #include "tab5_sd_scene.h"
+#include "tab5_sky_weather.h"
+#include "tab5_ui_motion.h"
 
 LV_FONT_DECLARE(qd_font_lxgw_28);
 LV_FONT_DECLARE(qd_font_cjk_28);
@@ -292,6 +295,19 @@ class QdtechTab5Display : public MipiLcdDisplay {
     std::unique_ptr<Tab5NativeApps> apps_;
     std::function<void()> radio_voice_action_;
     lv_obj_t* date_label_ = nullptr;
+    // Weather strip under the chat button: CMA condition, temperature, humidity and wind,
+    // or an active weather warning tinted by its colour grade (tap for the full alert).
+    lv_obj_t* weather_chip_ = nullptr;
+    lv_obj_t* weather_icon_ = nullptr;
+    lv_obj_t* weather_icon_mark_ = nullptr;
+    lv_obj_t* weather_text_ = nullptr;
+    lv_obj_t* weather_temp_ = nullptr;
+    lv_obj_t* weather_degree_ = nullptr;
+    lv_obj_t* weather_detail_ = nullptr;
+    uint32_t weather_obs_version_ = 0;
+    tab5_weather::Observation weather_obs_;
+    std::string weather_announced_;  // warning already shown in the conversation panel
+    bool weather_blink_ = false;
     lv_obj_t* status_dot_ = nullptr;
     lv_obj_t* clock_digits_[6] = {};
     lv_obj_t* clock_flaps_[6] = {};
@@ -1002,6 +1018,169 @@ class QdtechTab5Display : public MipiLcdDisplay {
         return false;
     }
 
+    static uint32_t WeatherDotColor(int wmo) {
+        if (wmo <= 1)
+            return 0xf7c84d;  // clear
+        if (wmo <= 3)
+            return 0xa9c3d3;  // cloudy / overcast
+        if (wmo == 45 || wmo == 48)
+            return 0x8fa3b0;  // fog / haze
+        if ((wmo >= 71 && wmo <= 77) || wmo == 85 || wmo == 86)
+            return 0xe8f4ff;  // snow
+        if (wmo >= 95)
+            return 0xb48cff;  // thunderstorm
+        return 0x5aa8ff;      // rain and showers
+    }
+
+    // Colour grade -> {background, border/icon}. Unknown grades read as orange.
+    static void WarningColors(int level, uint32_t* fill, uint32_t* accent) {
+        switch (level) {
+            case 1: *fill = 0x15344f; *accent = 0x5aa8ff; break;
+            case 2: *fill = 0x3b3415; *accent = 0xf2c94c; break;
+            case 4: *fill = 0x4a1b20; *accent = 0xff5a5f; break;
+            default: *fill = 0x452a10; *accent = 0xff9a3c; break;
+        }
+    }
+
+    // Called once per second with the display lock held. Only touches LVGL when the
+    // observation changed, plus a 1 Hz blink of the 26 px warning icon.
+    void UpdateWeatherChip(bool app_visible) {
+        if (!weather_chip_)
+            return;
+        auto& service = tab5_sky::WeatherService::GetInstance();
+        const auto now = service.Current();
+        if (now.obs_version != weather_obs_version_) {
+            weather_obs_version_ = now.obs_version;
+            weather_obs_ = now.obs;
+            RenderWeatherChip();
+            AnnounceWeatherWarning();
+        }
+        if (weather_obs_.valid && weather_obs_.warning && !app_visible) {
+            weather_blink_ = !weather_blink_;
+            lv_obj_set_style_bg_opa(weather_icon_, weather_blink_ ? LV_OPA_COVER : LV_OPA_40, 0);
+        }
+    }
+
+    void RenderWeatherChip() {
+        const auto& obs = weather_obs_;
+        if (!obs.valid) {
+            lv_obj_add_flag(weather_chip_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+        lv_obj_remove_flag(weather_chip_, LV_OBJ_FLAG_HIDDEN);
+        char temp[16];
+        std::snprintf(temp, sizeof(temp), "%ld", std::lround(obs.temperature));
+        lv_label_set_text(weather_temp_, temp);
+        if (obs.warning) {
+            ESP_LOGI("Tab5Weather", "warning strip: %s (level %d)", obs.warning_title, obs.warning_level);
+            uint32_t fill = 0, accent = 0;
+            WarningColors(obs.warning_level, &fill, &accent);
+            lv_obj_set_style_bg_color(weather_chip_, lv_color_hex(fill), 0);
+            lv_obj_set_style_border_color(weather_chip_, lv_color_hex(accent), 0);
+            lv_obj_set_style_border_width(weather_chip_, 2, 0);
+            lv_obj_set_style_bg_color(weather_icon_, lv_color_hex(accent), 0);
+            lv_obj_set_style_radius(weather_icon_, 7, 0);
+            lv_obj_remove_flag(weather_icon_mark_, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(weather_text_, obs.warning_title);
+            lv_obj_set_style_text_color(weather_text_, lv_color_hex(accent), 0);
+            lv_label_set_text(weather_detail_, "点按查看");
+            return;
+        }
+        lv_obj_set_style_bg_color(weather_chip_, lv_color_hex(0x122b43), 0);
+        lv_obj_set_style_border_color(weather_chip_, lv_color_hex(0x2c536c), 0);
+        lv_obj_set_style_border_width(weather_chip_, 1, 0);
+        lv_obj_set_style_bg_color(weather_icon_, lv_color_hex(WeatherDotColor(obs.wmo_code)), 0);
+        lv_obj_set_style_bg_opa(weather_icon_, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(weather_icon_, 13, 0);
+        lv_obj_add_flag(weather_icon_mark_, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(weather_text_, obs.info[0] ? obs.info : "实况");
+        lv_obj_set_style_text_color(weather_text_, lv_color_hex(0xe1eff6), 0);
+        char detail[96];
+        if (obs.humidity >= 0)
+            std::snprintf(detail, sizeof(detail), "湿度 %d%%%s%s", obs.humidity, obs.wind[0] ? " · " : "",
+                          obs.wind);
+        else
+            std::snprintf(detail, sizeof(detail), "%s", obs.wind);
+        lv_label_set_text(weather_detail_, detail);
+    }
+
+    // A warning that was not there before goes to the conversation panel once, so it is
+    // noticed even when nobody looks at the strip; never over a running conversation.
+    void AnnounceWeatherWarning() {
+        const auto& obs = weather_obs_;
+        if (!obs.valid || !obs.warning) {
+            if (obs.valid)
+                weather_announced_.clear();
+            return;
+        }
+        if (weather_announced_ == obs.warning_text)
+            return;
+        weather_announced_ = obs.warning_text;
+        if (active_ || speaking_)
+            return;
+        ShowWeatherDetail();
+    }
+
+    void ShowWeatherDetail() {
+        const auto& obs = weather_obs_;
+        if (!obs.valid || !prompt_label_ || !message_label_)
+            return;
+        char prompt[96];
+        char message[320];
+        if (obs.warning) {
+            std::snprintf(prompt, sizeof(prompt), "天气预警 · %s", obs.time);
+            std::snprintf(message, sizeof(message), "%s\n当前%s %.1f度，注意出行安全。", obs.warning_text,
+                          obs.info, obs.temperature);
+        } else {
+            std::snprintf(prompt, sizeof(prompt), "中国气象局实况 · %s", obs.time);
+            std::snprintf(message, sizeof(message), "%s %.1f度，体感 %.1f度\n湿度 %d%%  %s%s降水 %.1f 毫米",
+                          obs.info, obs.temperature, obs.feels_like, obs.humidity, obs.wind,
+                          obs.wind[0] ? "  " : "", obs.rain);
+        }
+        lv_label_set_text(prompt_label_, prompt);
+        lv_label_set_text(message_label_, message);
+    }
+
+    void BuildWeatherChip(lv_obj_t* screen) {
+        weather_chip_ = Card(screen, 581, 655, 449, 52, 0x122b43, 0x2c536c, 26);
+        lv_obj_add_flag(weather_chip_, LV_OBJ_FLAG_CLICKABLE);
+        tab5_ui::AddPressFeel(weather_chip_);
+        lv_obj_set_flex_flow(weather_chip_, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(weather_chip_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_left(weather_chip_, 18, 0);
+        lv_obj_set_style_pad_right(weather_chip_, 18, 0);
+        lv_obj_set_style_pad_column(weather_chip_, 10, 0);
+        lv_obj_add_event_cb(
+            weather_chip_,
+            [](lv_event_t* event) {
+                static_cast<QdtechTab5Display*>(lv_event_get_user_data(event))->ShowWeatherDetail();
+            },
+            LV_EVENT_CLICKED, this);
+        weather_icon_ = Card(weather_chip_, 0, 0, 26, 26, 0xf7c84d, 0xf7c84d, 13);
+        lv_obj_set_style_border_width(weather_icon_, 0, 0);
+        weather_icon_mark_ = Label(weather_icon_, "!", &qd_font_lxgw_28, 0x1b1b1b, 0, -4, 26);
+        lv_obj_set_style_text_align(weather_icon_mark_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_add_flag(weather_icon_mark_, LV_OBJ_FLAG_HIDDEN);
+        // The CJK font has the CMA wording but no degree sign: draw a small ring instead.
+        weather_text_ = Label(weather_chip_, "", &qd_font_cjk_28, 0xe1eff6, 0, 0, 10);
+        lv_obj_set_width(weather_text_, LV_SIZE_CONTENT);
+        weather_temp_ = Label(weather_chip_, "", &qd_font_cjk_28, 0xf7fbff, 0, 0, 10);
+        lv_obj_set_width(weather_temp_, LV_SIZE_CONTENT);
+        weather_degree_ = Card(weather_chip_, 0, 0, 9, 9, 0x122b43, 0xf7fbff, 5);
+        lv_obj_set_style_bg_opa(weather_degree_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(weather_degree_, 2, 0);
+        lv_obj_set_style_translate_y(weather_degree_, -9, 0);
+        lv_obj_set_style_margin_left(weather_degree_, -7, 0);
+        weather_detail_ = Label(weather_chip_, "", &qd_font_cjk_28, 0x9bb7ca, 0, 0, 10);
+        lv_label_set_long_mode(weather_detail_, LV_LABEL_LONG_DOT);
+        lv_obj_set_flex_grow(weather_detail_, 1);
+        lv_obj_set_height(weather_detail_, 36);
+        for (auto* child : {weather_icon_, weather_text_, weather_temp_, weather_degree_, weather_detail_})
+            lv_obj_add_flag(child, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_flag(weather_chip_, LV_OBJ_FLAG_HIDDEN);
+    }
+
     void UpdateClock(bool app_visible = false) {
         const bool returning_home = home_clock_hidden_ && !app_visible;
         if (home_clock_hidden_ != app_visible) {
@@ -1020,6 +1199,7 @@ class QdtechTab5Display : public MipiLcdDisplay {
         if (now == last_clock_second_ && !returning_home)
             return;
         last_clock_second_ = now;
+        UpdateWeatherChip(app_visible);
         tm local{};
         if (!localtime_r(&now, &local) || local.tm_year < 125)
             return;
@@ -1785,6 +1965,7 @@ public:
 #endif
         auto* daily_card = Card(screen, 581, 112, 647, 143, 0x122b43, 0x2c536c, 26);
         lv_obj_add_flag(daily_card, LV_OBJ_FLAG_CLICKABLE);
+        tab5_ui::AddPressFeel(daily_card);
         lv_obj_add_event_cb(
             daily_card,
             [](lv_event_t* event) {
@@ -1815,6 +1996,8 @@ public:
 
         auto* apps_button = Card(screen, 1005, 279, 100, 53, 0x193b56, 0x3a7490, 18);
         lv_obj_add_flag(apps_button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(apps_button, lv_color_hex(0x2a5675), LV_STATE_PRESSED);
+        tab5_ui::AddPressFeel(apps_button);
         auto* apps_label = Label(apps_button, "应用", &qd_font_lxgw_28, 0xb6e8f4, 14, 10, 72);
         lv_obj_set_style_text_align(apps_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_add_event_cb(
@@ -1827,6 +2010,8 @@ public:
             LV_EVENT_CLICKED, this);
         auto* settings_button = Card(screen, 1114, 279, 100, 53, 0x193b56, 0x3a7490, 18);
         lv_obj_add_flag(settings_button, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(settings_button, lv_color_hex(0x2a5675), LV_STATE_PRESSED);
+        tab5_ui::AddPressFeel(settings_button);
         auto* settings_label =
             Label(settings_button, "设置", &qd_font_lxgw_28, 0xb6e8f4, 14, 10, 72);
         lv_obj_set_style_text_align(settings_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -1843,6 +2028,7 @@ public:
         lv_obj_set_size(button, 647, 108);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x69d0e8), 0);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x99e4f1), LV_STATE_PRESSED);
+        tab5_ui::AddPressFeel(button);
         lv_obj_set_style_radius(button, 30, 0);
         lv_obj_set_style_shadow_width(button, 0, 0);
         lv_obj_add_event_cb(
@@ -1864,6 +2050,7 @@ public:
         lv_obj_set_style_text_color(button_label_, lv_color_hex(0x0b2b3f), 0);
         lv_obj_center(button_label_);
 
+        BuildWeatherChip(screen);
         auto* meter = Card(screen, 1040, 655, 159, 52, 0x1b3a52, 0x1b3a52, 25);
         for (int i = 0; i < 5; ++i)
             waveform_[i] = Card(meter, 32 + i * 22, 17, 7, 18, 0x69d0e8, 0x69d0e8, 4);
@@ -2189,6 +2376,8 @@ public:
             DisplayLockGuard lock(this);
             const_cast<lv_font_t*>(&qd_font_lxgw_28)->fallback = sd_fallback_font_;
             const_cast<lv_font_t*>(&qd_font_lxgw_36)->fallback = sd_fallback_font_;
+            // CMA wording such as 霾 is outside the built-in CJK subset.
+            const_cast<lv_font_t*>(&qd_font_cjk_28)->fallback = sd_fallback_font_;
             ESP_LOGI("Tab5Font", "SD fallback font ready: %s", cand);
             return true;
         }

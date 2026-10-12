@@ -1,4 +1,5 @@
 #include "tab5_icu_page.h"
+#include "tab5_ui_motion.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -54,6 +55,7 @@ lv_obj_t* Tab5IcuPage::Button(lv_obj_t* parent, const char* text,
     lv_obj_set_size(obj, w, h);
     lv_obj_set_style_bg_color(obj, lv_color_hex(0x22465e), 0);
     lv_obj_set_style_bg_color(obj, lv_color_hex(0x39718b), LV_STATE_PRESSED);
+    tab5_ui::AddPressFeel(obj);
     lv_obj_set_style_radius(obj, 14, 0);
     lv_obj_set_style_shadow_width(obj, 0, 0);
     lv_obj_add_event_cb(obj, callback, LV_EVENT_CLICKED, user);

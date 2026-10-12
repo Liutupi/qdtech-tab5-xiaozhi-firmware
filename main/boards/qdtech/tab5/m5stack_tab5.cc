@@ -2209,8 +2209,11 @@ public:
         esp_sntp_set_sync_interval(10 * 60 * 1000);
         // Until the first sync the RTC can still hold a stale time (8 h off after a soft
         // reset), which flipped the sky to night for a minute: the sky waits for this.
-        esp_sntp_set_time_sync_notification_cb(
-            [](struct timeval*) { tab5_sky::WeatherService::GetInstance().MarkClockSynced(); });
+        esp_sntp_set_time_sync_notification_cb([](struct timeval*) {
+            if (!tab5_sky::WeatherService::GetInstance().ClockSynced())
+                ESP_LOGI(TAG, "SNTP synced");
+            tab5_sky::WeatherService::GetInstance().MarkClockSynced();
+        });
         esp_sntp_init();
         ESP_LOGI(TAG, "SNTP started (CST-8)");
         // LAN MCP bridge for OpenClaw / host agents (ws://<ip>:8080/ws).

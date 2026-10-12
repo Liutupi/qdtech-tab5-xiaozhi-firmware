@@ -1,4 +1,5 @@
 #include "tab5_ir_remote_page.h"
+#include "tab5_ui_motion.h"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -113,6 +114,7 @@ lv_obj_t* Tab5IrRemotePage::MakeButton(lv_obj_t* parent, const std::string& text
     lv_obj_set_size(b, w, h);
     lv_obj_set_style_bg_color(b, lv_color_hex(bg), 0);
     lv_obj_set_style_bg_color(b, lv_color_lighten(lv_color_hex(bg), LV_OPA_30), LV_STATE_PRESSED);
+    tab5_ui::AddPressFeel(b);
     lv_obj_set_style_radius(b, 16, 0);
     lv_obj_set_style_shadow_width(b, 0, 0);
     lv_obj_set_style_border_width(b, 1, 0);

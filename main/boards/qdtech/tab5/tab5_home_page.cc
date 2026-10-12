@@ -1,4 +1,5 @@
 #include "tab5_home_page.h"
+#include "tab5_ui_motion.h"
 
 #include <cmath>
 #include <cstdio>
@@ -230,6 +231,8 @@ lv_obj_t* Tab5HomePage::MakeButton(lv_obj_t* parent, const char* text, int w, in
     auto* b = lv_button_create(parent);
     lv_obj_set_size(b, w, h);
     lv_obj_set_style_bg_color(b, lv_color_hex(bg), 0);
+    lv_obj_set_style_bg_color(b, lv_color_lighten(lv_color_hex(bg), LV_OPA_30), LV_STATE_PRESSED);
+    tab5_ui::AddPressFeel(b);
     lv_obj_set_style_radius(b, 16, 0);
     lv_obj_set_style_shadow_width(b, 0, 0);
     auto* l = lv_label_create(b);

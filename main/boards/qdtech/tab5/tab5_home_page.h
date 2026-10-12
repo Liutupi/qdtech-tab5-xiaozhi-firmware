@@ -16,6 +16,7 @@ public:
     Tab5HomePage(lv_obj_t* parent, std::function<void()> back, std::function<void()> open_ir);
     ~Tab5HomePage();
     void Show();
+    lv_obj_t* object() const { return root_; }
     void Hide();
     bool IsVisible() const;
     // Display lock held. Rebuilds the grid only when the catalog changed.

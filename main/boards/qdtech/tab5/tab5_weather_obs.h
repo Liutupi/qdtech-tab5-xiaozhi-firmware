@@ -26,9 +26,43 @@ struct Observation {
     int wmo_code = -1;       // WMO-style code the UI already understands
     char info[24] = {};      // CMA wording, e.g. 晴 / 多云 / 小雨
     char time[6] = {};       // "HH:MM" of the observation
+    double feels_like = 0;   // °C (CMA "feelst"); equals temperature when not reported
+    char wind[32] = {};      // e.g. 东南风 微风
     bool warning = false;    // an active CMA weather warning (typhoon, rainstorm...)
-    char warning_text[48] = {};
+    int warning_level = 0;   // 0 none, 1 blue/white, 2 yellow, 3 orange, 4 red
+    char warning_title[48] = {};  // short, e.g. 暴雨黄色预警
+    char warning_text[160] = {};  // the full alert line, e.g. 中山市气象台发布暴雨黄色预警信号
 };
+
+// Copies at most cap-1 bytes without cutting a UTF-8 sequence in half.
+inline void CopyUtf8(char* dst, size_t cap, const char* src) {
+    if (!cap)
+        return;
+    size_t n = src ? std::strlen(src) : 0;
+    if (n >= cap) {
+        n = cap - 1;
+        while (n > 0 && (static_cast<unsigned char>(src[n]) & 0xC0) == 0x80)
+            --n;  // src[n] would be a continuation byte: drop the partial character
+    }
+    if (n)
+        std::memcpy(dst, src, n);
+    dst[n] = 0;
+}
+
+// Colour grade named in a CMA signal level or alert line (blue < yellow < orange < red).
+inline int WarningLevel(const char* text) {
+    if (!text)
+        return 0;
+    if (std::strstr(text, "红色"))
+        return 4;
+    if (std::strstr(text, "橙色"))
+        return 3;
+    if (std::strstr(text, "黄色"))
+        return 2;
+    if (std::strstr(text, "蓝色") || std::strstr(text, "白色"))
+        return 1;
+    return 0;
+}
 
 // CMA weather phenomenon codes (the "img" field) to WMO weather codes.
 inline int CmaToWmo(int img) {
@@ -71,6 +105,12 @@ inline const char* JsonStr(const cJSON* obj, const char* key) {
     return cJSON_IsString(item) && item->valuestring ? item->valuestring : "";
 }
 
+// CMA fills absent text fields with "9999".
+inline const char* JsonText(const cJSON* obj, const char* key) {
+    const char* text = JsonStr(obj, key);
+    return std::strcmp(text, "9999") == 0 ? "" : text;
+}
+
 // Parses the /rest/real/<station> object. CMA uses 9999 for "no data".
 inline bool ParseCmaReal(const char* json, Observation* out) {
     *out = Observation{};
@@ -91,17 +131,39 @@ inline bool ParseCmaReal(const char* json, Observation* out) {
     const double rain = JsonNum(weather, "rain", 9999);
     out->rain = rain >= 0 && rain < 1000 ? rain : 0;
     out->wmo_code = wmo;
-    std::snprintf(out->info, sizeof(out->info), "%s", JsonStr(weather, "info"));
+    const double feels = JsonNum(weather, "feelst", 9999);
+    out->feels_like = feels > -60 && feels < 70 ? feels : temperature;
+    CopyUtf8(out->info, sizeof(out->info), JsonText(weather, "info"));
+    const cJSON* wind = cJSON_GetObjectItemCaseSensitive(root, "wind");
+    const char* direct = JsonText(wind, "direct");
+    const char* power = JsonText(wind, "power");
+    char wind_text[64];
+    std::snprintf(wind_text, sizeof(wind_text), "%s%s%s", direct, *direct && *power ? " " : "", power);
+    CopyUtf8(out->wind, sizeof(out->wind), wind_text);
     // "2026-10-12 15:20" -> "15:20"
     const char* published = JsonStr(root, "publish_time");
     const char* space = std::strchr(published, ' ');
     if (space && std::strlen(space + 1) >= 5)
         std::snprintf(out->time, sizeof(out->time), "%.5s", space + 1);
     const cJSON* warn = cJSON_GetObjectItemCaseSensitive(root, "warn");
-    const char* alert = JsonStr(warn, "alert");
-    if (*alert && std::strcmp(alert, "9999") != 0) {
+    const char* alert = JsonText(warn, "alert");
+    const char* type = JsonText(warn, "signaltype");
+    const char* level = JsonText(warn, "signallevel");
+    if (*alert || *type) {
         out->warning = true;
-        std::snprintf(out->warning_text, sizeof(out->warning_text), "%s", alert);
+        CopyUtf8(out->warning_text, sizeof(out->warning_text), *alert ? alert : type);
+        out->warning_level = WarningLevel(*level ? level : alert);
+        char title[96];
+        if (*type && *level) {
+            std::snprintf(title, sizeof(title), "%s%s预警", type, level);
+        } else {
+            // "中山市气象台发布暴雨黄色预警信号" -> "暴雨黄色预警"
+            const char* from = std::strstr(alert, "发布");
+            std::snprintf(title, sizeof(title), "%s", from ? from + std::strlen("发布") : alert);
+            if (char* signal = std::strstr(title, "信号"))
+                *signal = 0;
+        }
+        CopyUtf8(out->warning_title, sizeof(out->warning_title), *title ? title : "天气预警");
     }
     out->valid = true;
     cJSON_Delete(root);

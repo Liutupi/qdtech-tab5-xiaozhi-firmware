@@ -23,6 +23,7 @@ constexpr int kRefreshSeconds = 20 * 60;  // CMA stations report every 10-60 min
 constexpr int kRetrySeconds = 5 * 60;
 constexpr int kFirstDelayMs = 30000;  // let Wi-Fi, SNTP and the XiaoZhi session settle
 constexpr size_t kMaxBody = 8 * 1024;
+constexpr int kObsMaxAgeSeconds = 3 * 3600;  // older CMA readings are no longer shown
 // The board runs on China time (SNTP sets CST-8). A fixed offset keeps sunrise/sunset
 // consistent with localtime() even in the seconds before the TZ is applied.
 constexpr double kUtcOffsetHours = 8.0;
@@ -114,6 +115,13 @@ void WeatherService::Publish(int wmo_code) {
     ++now_.version;
 }
 
+void WeatherService::SetObservation(const tab5_weather::Observation& obs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    now_.obs = obs;
+    ++now_.obs_version;
+    obs_tick_ = xTaskGetTickCount();
+}
+
 void WeatherService::TaskEntry(void* arg) { static_cast<WeatherService*>(arg)->Run(); }
 
 bool WeatherService::Post(void (*fn)(void*), void* arg) {
@@ -165,12 +173,21 @@ bool WeatherService::Fetch() {
         tab5_weather::Observation obs;
         if (status == 200 && tab5_weather::ParseCmaReal(body.c_str(), &obs)) {
             code = obs.wmo_code;
+            SetObservation(obs);
             source = "CMA";
-            ESP_LOGI(TAG, "weather CMA %s: %s %.1fC %d%% rain %.1fmm (code %d)%s%s", obs.time, obs.info,
-                     obs.temperature, obs.humidity, obs.rain, code, obs.warning ? " WARNING: " : "",
+            ESP_LOGI(TAG, "weather CMA %s: %s %.1fC %d%% %s rain %.1fmm (code %d)%s%s", obs.time, obs.info,
+                     obs.temperature, obs.humidity, obs.wind, obs.rain, code, obs.warning ? " WARNING: " : "",
                      obs.warning ? obs.warning_text : "");
         } else {
             ESP_LOGW(TAG, "CMA weather unavailable (http %d); falling back to ECMWF", status);
+            bool stale = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                stale = now_.obs.valid &&
+                        xTaskGetTickCount() - obs_tick_ > pdMS_TO_TICKS(kObsMaxAgeSeconds * 1000);
+            }
+            if (stale)
+                SetObservation(tab5_weather::Observation{});
         }
     }
     if (code < 0) {

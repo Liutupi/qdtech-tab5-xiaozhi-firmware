@@ -18,6 +18,7 @@ class Tab5IrRemotePage {
 public:
     explicit Tab5IrRemotePage(lv_obj_t* parent, std::function<void()> back);
     void Show();
+    lv_obj_t* object() const { return root_; }
     void Hide();
 
 private:

@@ -7,6 +7,8 @@
 #include <mutex>
 #include <string>
 
+#include "tab5_weather_obs.h"
+
 // Current weather and today's sunrise/sunset for the sky behind Nabo: the CMA station
 // observation (www.nmc.cn, plain HTTP, no key) with the ECMWF model via Open-Meteo as a
 // fallback, every 20 minutes on a small PSRAM-stack task (which also runs sky jobs).
@@ -18,7 +20,11 @@ struct WeatherNow {
     int wmo_code = -1;      // WMO weather code
     int sunrise_min = -1;   // local minutes since midnight
     int sunset_min = -1;
-    uint32_t version = 0;   // increments on every successful refresh
+    uint32_t version = 0;   // increments when wmo_code changes
+    // Latest CMA station observation (temperature, wind, active warning). obs.valid is
+    // false until the first CMA fetch and again when CMA has failed for three hours.
+    tab5_weather::Observation obs;
+    uint32_t obs_version = 0;  // increments on every observation update
 };
 
 class WeatherService {
@@ -42,11 +48,13 @@ private:
     static void TaskEntry(void* arg);
     void Run();
     bool Fetch();
+    void SetObservation(const tab5_weather::Observation& obs);
 
     std::mutex mutex_;
     WeatherNow now_;
     double latitude_ = 22.5176, longitude_ = 113.3928;
     std::string station_;  // CMA station code, empty = Open-Meteo only
+    TickType_t obs_tick_ = 0;  // when obs was last refreshed
     std::atomic<bool> clock_synced_{false};
     TaskHandle_t task_ = nullptr;
     void (*job_)(void*) = nullptr;
