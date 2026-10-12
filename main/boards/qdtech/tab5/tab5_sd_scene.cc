@@ -446,7 +446,9 @@ nabo_sky::Sky Tab5SdScene::CurrentSky() {
     const time_t now = time(nullptr);
     struct tm local;
     localtime_r(&now, &local);
-    const int minutes = local.tm_year + 1900 >= 2025 ? local.tm_hour * 60 + local.tm_min : 12 * 60;
+    // Until SNTP has synced, the RTC may hold a stale time: show the day sky meanwhile.
+    const bool trusted = tab5_sky::WeatherService::GetInstance().ClockSynced() && local.tm_year + 1900 >= 2025;
+    const int minutes = trusted ? local.tm_hour * 60 + local.tm_min : 12 * 60;
     const int sunrise = weather.sunrise_min > 0 ? weather.sunrise_min : 6 * 60;
     const int sunset = weather.sunset_min > 0 ? weather.sunset_min : 18 * 60 + 15;
     return nabo_sky::SelectSky(minutes, sunrise, sunset, weather.valid ? weather.wmo_code : -1,

@@ -2,6 +2,7 @@
 #include "button.h"
 #include "display/lcd_display.h"
 #include "tab5_reset_diag.h"
+#include "tab5_sky_weather.h"
 #if CONFIG_QDTECH_TAB5_NATIVE_UI
 #include "assets.h"
 #include "icu_calculators.h"
@@ -2206,6 +2207,10 @@ public:
         esp_sntp_setservername(0, "ntp.aliyun.com");
         esp_sntp_setservername(1, "pool.ntp.org");
         esp_sntp_set_sync_interval(10 * 60 * 1000);
+        // Until the first sync the RTC can still hold a stale time (8 h off after a soft
+        // reset), which flipped the sky to night for a minute: the sky waits for this.
+        esp_sntp_set_time_sync_notification_cb(
+            [](struct timeval*) { tab5_sky::WeatherService::GetInstance().MarkClockSynced(); });
         esp_sntp_init();
         ESP_LOGI(TAG, "SNTP started (CST-8)");
         // LAN MCP bridge for OpenClaw / host agents (ws://<ip>:8080/ws).
