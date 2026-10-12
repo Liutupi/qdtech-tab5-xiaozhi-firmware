@@ -1,0 +1,56 @@
+{
+  "release": "v1.0.13",
+  "compiled_source_commit": "6b795a40e06b61a6e6cacb3d8833c570a2eee9a8",
+  "variant": "qdtech-tab5-native",
+  "target": "esp32p4",
+  "chip_revision": "1.x (100-199)",
+  "SDK": "ESP-IDF v6.1-dirty",
+  "project_version": "1.0.13",
+  "sdkconfig_sha256": "83df3515c1d20a484fb6b0ac8c8456ac8ce4a7d42e1d6d31953d8ae332e14b55",
+  "main_app": {
+    "file": "qdtech-tab5-v1.0.13-app.bin",
+    "bytes": 12233504,
+    "sha256": "ceb6e7da849bd7d35a02b8921def64f47bd884dc0c677d5d0094c3115b329b64",
+    "partition": "factory",
+    "offset": "0x20000",
+    "capacity_bytes": 12582912,
+    "free_bytes": 349408
+  },
+  "updater": {
+    "version": "1.2.2",
+    "offset": "0xc20000",
+    "unchanged_from": "v1.0.11"
+  },
+  "animations": {
+    "file": "qdtech-tab5-v1.0.13-SD-animations.zip",
+    "device_directory": "/sdcard/tab5/nabo/lively-v1",
+    "unchanged_from": "v1.0.11"
+  },
+  "changes": [
+    "CMA (nmc.cn) station observations first for weather, ECMWF Open-Meteo fallback",
+    "local sunrise/sunset computed on device (NOAA)",
+    "sky trusts the clock only after SNTP sync",
+    "parallax far clouds, row-shaded clouds, shooting stars on clear nights, rain splashes",
+    "2 s cross-fade between sky states"
+  ],
+  "validation": {
+    "canonical_native_build": "passed",
+    "host_tests": 176,
+    "host_tests_result": "passed (1 skipped)",
+    "release_image_checksum_and_digest": "passed",
+    "release_image_chip_revision": "v1.0-v1.99",
+    "release_version_image_flashed_on_device": true,
+    "runtime_observation_seconds": 85,
+    "fresh_panic_assert_count": 0,
+    "device_internal_min_bytes": 14336,
+    "device_weather_reading": "CMA 16:25 晴 31.6C 57% sunrise 06:21 sunset 18:05",
+    "sky_fx_us_per_frame": 6142,
+    "pending": [
+      "sky cross-fade at dusk/night on device",
+      "shooting stars at night",
+      "extended idle soak",
+      "extended sleep/wake",
+      "voice interruption/reconnect"
+    ]
+  }
+}
