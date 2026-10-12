@@ -1,0 +1,99 @@
+{
+  "release": "v1.0.12",
+  "compiled_source_commit": "6f629d82808223417bb8fb167a7b006660820e4d",
+  "variant": "qdtech-tab5-native",
+  "target": "esp32p4",
+  "chip_revision": "1.x (100-199)",
+  "SDK": "ESP-IDF v6.1-dirty",
+  "project_version": "1.0.12",
+  "sdkconfig_sha256": "83df3515c1d20a484fb6b0ac8c8456ac8ce4a7d42e1d6d31953d8ae332e14b55",
+  "main_app": {
+    "file": "qdtech-tab5-v1.0.12-app.bin",
+    "bytes": 12225488,
+    "sha256": "9f72158f1b5c8cefd4f8df850a9e2f6afcb4a1dae2a2bdc66097fb43600cbe67",
+    "partition": "factory",
+    "offset": "0x20000",
+    "capacity_bytes": 12582912,
+    "free_bytes": 357424
+  },
+  "updater": {
+    "version": "1.2.2",
+    "offset": "0xc20000",
+    "unchanged_from": "v1.0.11"
+  },
+  "animations": {
+    "file": "qdtech-tab5-v1.0.12-SD-animations.zip",
+    "device_directory": "/sdcard/tab5/nabo/lively-v1",
+    "new_actions": 14,
+    "original_state_clips": 4,
+    "total_frames": 2026,
+    "nab_bytes": 191188761,
+    "unchanged_from": "v1.0.11"
+  },
+  "validation": {
+    "canonical_native_build": "passed",
+    "s3_representative_build": "passed",
+    "host_tests": 175,
+    "host_tests_result": "passed",
+    "all_SD_files_hashes_against_v1_0_11_manifest": "passed (18 files; unchanged)",
+    "same_sdkconfig_as_device_test": true,
+    "same_functional_source_as_device_test": true,
+    "device_test_app_sha256": "8be21960888c49e8598290a29a0778e2b62d653bc6d6397c789a8ae5ec3b0ea7",
+    "user_feedback": "both NABO radio and Mijia home-control pages, switching and playback normal",
+    "runtime_observation_seconds": 71,
+    "fresh_panic_assert_count": 0,
+    "device_playback_internal_free_bytes": 118355,
+    "device_after_playback_internal_free_bytes": 129775,
+    "release_version_image_separately_flashed": false,
+    "pending": [
+      "extended idle soak for previous MultiNet panic",
+      "extended sleep/wake",
+      "voice interruption/reconnect",
+      "full podcast"
+    ],
+    "release_image_checksum_and_digest": "passed",
+    "release_image_chip_revision_and_partition_size": "passed"
+  },
+  "files": {
+    "INSTALL.txt": {
+      "bytes": 2661,
+      "sha256": "81c4dcf722f57a5ffb14deabd18e4349ee3d0988d8c4cda5ae9e33e45c3f57f6"
+    },
+    "NABO-SD-pixels-overview.jpg": {
+      "bytes": 341487,
+      "sha256": "e5db8d1929c5e91496551dc8a4f1c1521f565f603609ff2fca4663b06513f967"
+    },
+    "NABO-SD-pixels-preview.mp4": {
+      "bytes": 19439816,
+      "sha256": "9dd33d0fe77a09421145e43582622acef725cd81c2d447924ce61db4d1f6734c"
+    },
+    "animation-manifest.json": {
+      "bytes": 13082,
+      "sha256": "f8e09744f17a96b638bd8da533922894283baeb37c02a093ec08c65aba68f6e9"
+    },
+    "qdtech-tab5-v1.0.12-SD-animations.zip": {
+      "bytes": 160052415,
+      "sha256": "dd54d43bfe490c9c205602f4fd49c08d96d0489caafa041d83c9b2a725851e02"
+    },
+    "qdtech-tab5-v1.0.12-app.bin": {
+      "bytes": 12225488,
+      "sha256": "9f72158f1b5c8cefd4f8df850a9e2f6afcb4a1dae2a2bdc66097fb43600cbe67"
+    },
+    "qdtech-tab5-v1.0.12-assets.bin": {
+      "bytes": 2767226,
+      "sha256": "4a2bcf441536c825edab4821361da339e91717d224b004725b4d0b3641e428f6"
+    },
+    "qdtech-tab5-v1.0.12-bootloader.bin": {
+      "bytes": 18192,
+      "sha256": "f3cc0e6eaebf06e837ac47e8e83c7d70494d126a85be7cd34d8c5f322439866d"
+    },
+    "qdtech-tab5-v1.0.12-partition-table.bin": {
+      "bytes": 3072,
+      "sha256": "07de3293b44eaee1bc1e4d075d682f2adb3a8dc23668cb54ff234a0d9c91daf3"
+    },
+    "qdtech-tab5-v1.0.12-updater.bin": {
+      "bytes": 907856,
+      "sha256": "173c6016c225f3b49a2db93e4717a68806aff23598549a4c83b0af34719905dc"
+    }
+  }
+}
