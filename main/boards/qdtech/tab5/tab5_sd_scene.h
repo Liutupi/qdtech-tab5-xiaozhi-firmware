@@ -4,8 +4,10 @@
 #include <atomic>
 
 #include "lvgl.h"
+#include "nabo_action_library.h"
 #include "nabo_scene_mailbox.h"
 #include "nabo_scene_policy.h"
+#include "nabo_scene_stream.h"
 #include "nabo_sky.h"
 #include "nabo_three_state.h"
 #include "nabo_wake_matches.h"
@@ -42,11 +44,11 @@ private:
     lv_obj_t *root_ = nullptr, *head_ = nullptr, *body_ = nullptr, *eyes_ = nullptr,
              *mouth_ = nullptr, *video_ = nullptr;
     uint16_t* background_ = nullptr;  // singleton-lifetime static art for the compositor
-    uint8_t* overlay_ = nullptr;       // front decorations baked into composed frames
+    uint8_t* overlay_ = nullptr;      // front decorations baked into composed frames
     // Sky (bottom layer). The compositor background is rebuilt from boot-time layers:
     // decorations' own colour (sky_k_) and the sky's share (sky_t_) from the first
     // decorated row down; rows above are pure sky.
-    static constexpr int kSkyW = 512, kSkyH = 558;
+    static constexpr int kSkyW = nabo_sky::kPanelW, kSkyH = nabo_sky::kPanelH;
     uint16_t* sky_buf_ = nullptr;   // shown by sky_img_
     uint16_t* sky_next_ = nullptr;  // next sky, rendered on the weather task
     lv_image_dsc_t sky_dsc_{};
@@ -72,11 +74,12 @@ private:
     nabo_scene::Controller controller_{nabo_scene::kWakeMatches};
     tab5_home::Animation speech_face_;
     nabo_scene::WorkClock work_clock_;
+    nabo_scene::ActionLibrary actions_;
     const lv_image_dsc_t* source_ = nullptr;
     uint8_t retired_ = 0;
     uint32_t epoch_ = 1, last_generation_ = 0;
     int last_clip_ = -1;
-    uint64_t last_frame_ms_ = 0, request_since_ = 0;
+    nabo_sd::FrameContinuity continuity_;
     bool was_sleeping_ = false, detached_ = false;
 };
 #endif

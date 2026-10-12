@@ -30,6 +30,29 @@ def fixture(path, width, height, timestamps, duration):
 
 
 class Tab5SdSceneTests(unittest.TestCase):
+    def test_compressed_contracts(self):
+        compiler = shutil.which("c++")
+        if not compiler:
+            self.skipTest("C++ host compiler unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            payload = bytes([0x15, ord('x'), 1, 0, 0x50]) + b'abcde'
+            index = struct.pack('<IIIIHHHHBBHI', 0, 128, len(payload), zlib.crc32(payload),
+                                0, 0, 5, 1, 2, 1, 0, 0)
+            header = bytearray(64)
+            header[:8] = b'NABOSD1\0'
+            struct.pack_into('<HHHHHH', header, 8, 3, 64, 5, 1, 5, 1)
+            struct.pack_into('<IIIIIIIII', header, 20, 1, 40, 64, 96, 15, 3,
+                             128 + len(payload), zlib.crc32(index), 0)
+            struct.pack_into('<I', header, 60, zlib.crc32(header[:60]))
+            pack = tmp / 'compressed.nab'
+            pack.write_bytes(header + index + bytes(32) + payload)
+            binary = tmp / 'lz4'
+            subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                            '-I', str(BOARD), str(TESTS/'tab5_sd_lz4_smoke.cc'),
+                            '-o', str(binary)], check=True)
+            subprocess.run([str(binary), str(pack)], check=True)
+
     def test_runtime_contracts(self):
         compiler = shutil.which("c++")
         if not compiler:
@@ -42,7 +65,8 @@ class Tab5SdSceneTests(unittest.TestCase):
             fixture(eye, 204, 93, [0, 3280, 3360, 3440, 3480], 5000)
             for name, args in [("mailbox", [idle]), ("states", []),
                                ("policy", []), ("pack", [eye]), ("trace", [idle]),
-                               ("composer", [idle])]:
+                               ("composer", [idle]), ("stream", []), ("actions", []),
+                               ("wide_composer", [])]:
                 binary = tmp / name
                 subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                     "-I", str(BOARD), str(TESTS / f"tab5_sd_{name}_smoke.cc"),

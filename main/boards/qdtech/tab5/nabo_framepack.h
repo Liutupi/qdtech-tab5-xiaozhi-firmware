@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include "nabo_lz4.h"
 
 #ifdef ESP_PLATFORM
 #include "esp_rom_crc.h"
@@ -54,11 +55,13 @@ struct Cancel {
 // Clock is injected so the firmware can use microseconds without changing Source.
 struct FrameTrace {
     using Clock = uint64_t (*)();
-    enum Phase { None, ReadPhase, CrcPhase, Complete };
+    enum Phase { None, ReadPhase, CrcPhase, DecodePhase, Complete };
     Clock clock_us = nullptr;
     Phase phase = None;
     uint32_t read_bytes = 0, read_chunks = 0, read_us = 0, read_max_us = 0;
     uint32_t crc_bytes = 0, crc_chunks = 0, crc_us = 0, crc_max_us = 0;
+    uint32_t crc_expected = 0, crc_actual = 0;
+    uint32_t decode_us = 0;
     uint64_t Now() const { return clock_us ? clock_us() : 0; }
     void Reset() {
         const Clock clock = clock_us;
@@ -87,10 +90,12 @@ public:
         if (e != Error::Ok)
             return e;
         const bool supported = (U16(h + 8) == 1 && U32(h + 40) == 1) ||
-                               (allow_scene && U16(h + 8) == 2 && U32(h + 40) == 2);
+                               (allow_scene && U16(h + 8) == 2 && U32(h + 40) == 2) ||
+                               (allow_scene && U16(h + 8) == 3 && U32(h + 40) == 3);
         if (std::memcmp(h, "NABOSD1\0", 8) || !supported || U16(h + 10) != 64 ||
             Crc(h, 60) != U32(h + 60))
             return Error::Format;
+        version_ = U16(h + 8);
         width_ = U16(h + 12);
         height_ = U16(h + 14);
         const uint16_t max_w = U16(h + 16), max_h = U16(h + 18);
@@ -119,10 +124,12 @@ public:
                 !entry.width || !entry.height || entry.width > max_w || entry.height > max_h ||
                 uint32_t(entry.x) + entry.width > width_ ||
                 uint32_t(entry.y) + entry.height > height_ ||
-                entry.bytes != uint32_t(entry.width) * entry.height * 3 ||
+                (raw[24] == 1 && entry.bytes != uint32_t(entry.width) * entry.height * 3) ||
+                !entry.bytes || entry.bytes > uint32_t(entry.width) * entry.height * 3 ||
                 entry.bytes > frame_capacity || entry.offset < data_offset ||
-                uint64_t(entry.offset) + entry.bytes > source.Size() || raw[24] != 1 ||
-                raw[25] != 1 || U16(raw + 26) || U32(raw + 28))
+                uint64_t(entry.offset) + entry.bytes > source.Size() ||
+                (raw[24] != 1 && !(version_ == 3 && raw[24] == 2)) || raw[25] != 1 ||
+                U16(raw + 26) || U32(raw + 28))
                 return Error::Bounds;
             previous = entry.at_ms;
         }
@@ -134,6 +141,11 @@ public:
     void SetReadChunk(size_t bytes) { read_chunk_ = bytes ? bytes : kChunk; }
     // Skip the payload CRC of a frame index that already passed since Open.
     void SetVerifyOnce(bool enabled) { verify_once_ = enabled; }
+    void SetDecodeBuffer(uint8_t* buffer, size_t capacity) {
+        encoded_ = buffer;
+        encoded_capacity_ = capacity;
+    }
+    unsigned Version() const { return version_; }
     bool Valid() const { return valid_; }
     uint32_t Duration() const { return duration_; }
     uint32_t Count() const { return count_; }
@@ -161,14 +173,39 @@ public:
         if (!valid_ || i >= count_)
             return Error::Bounds;
         const Entry e = At(i);
-        if (!out || e.bytes > capacity)
-            return Error::Capacity;
         const uint64_t frame_started = source_->NowMs();
+        const bool compressed = index_[i * 32 + 24] == 2;
+        const size_t decoded_bytes = size_t(e.width) * e.height * 3;
+        if (!out || decoded_bytes > capacity ||
+            (compressed && (!encoded_ || e.bytes > encoded_capacity_ || encoded_ == out)))
+            return Error::Capacity;
+        uint8_t* payload = compressed ? encoded_ : out;
+        auto decode = [&]() {
+            if (cancel.Changed())
+                return Error::Cancelled;
+            if (compressed) {
+                if (trace)
+                    trace->phase = FrameTrace::DecodePhase;
+                const uint64_t started = trace ? trace->Now() : 0;
+                const bool valid = DecodeLz4(payload, e.bytes, out, decoded_bytes);
+                if (trace)
+                    trace->decode_us = uint32_t(trace->Now() - started);
+                if (!valid)
+                    return Error::Format;
+            }
+            if (cancel.Changed())
+                return Error::Cancelled;
+            if (frame_total_ms_ && source_->NowMs() - frame_started > frame_total_ms_)
+                return Error::Timeout;
+            if (trace)
+                trace->phase = FrameTrace::Complete;
+            return Error::Ok;
+        };
         if (trace)
             trace->phase = FrameTrace::ReadPhase;
         const uint32_t read_ms =
             frame_total_ms_ ? std::min(frame_read_ms_, frame_total_ms_) : frame_read_ms_;
-        const Error result = Read(e.offset, out, e.bytes, cancel, trace, read_ms);
+        const Error result = Read(e.offset, payload, e.bytes, cancel, trace, read_ms);
         if (result != Error::Ok)
             return result;
         // Card content is immutable while open and every SD block transfer is
@@ -178,7 +215,7 @@ public:
                 return Error::Cancelled;
             if (trace)
                 trace->phase = FrameTrace::Complete;
-            return Error::Ok;
+            return decode();
         }
         if (trace)
             trace->phase = FrameTrace::CrcPhase;
@@ -199,7 +236,7 @@ public:
                 return finish(Error::Cancelled);
             const size_t chunk = std::min(kChunk, size_t(e.bytes) - off);
             const uint64_t chunk_started = trace ? trace->Now() : 0;
-            crc = CrcStep(crc, out + off, chunk);
+            crc = CrcStep(crc, payload + off, chunk);
             if (trace) {
                 trace->crc_bytes += chunk;
                 ++trace->crc_chunks;
@@ -213,10 +250,15 @@ public:
         }
         if (cancel.Changed())
             return finish(Error::Cancelled);
+        if (trace) {
+            trace->crc_expected = e.crc;
+            trace->crc_actual = ~crc;
+        }
         if (~crc != e.crc)
             return finish(Error::Crc);
         verified_[i / 32] |= 1u << (i % 32);
-        return finish(Error::Ok);
+        finish(Error::Ok);
+        return decode();
     }
 
 private:
@@ -258,6 +300,9 @@ private:
         }
         return finish(Error::Ok);
     }
+    uint8_t* encoded_ = nullptr;
+    size_t encoded_capacity_ = 0;
+    unsigned version_ = 0;
     Source* source_ = nullptr;
     std::array<uint8_t, kMaxEntries * 32> index_{};
     uint32_t count_ = 0, duration_ = 0, max_payload_ = 0, timeout_ms_ = 80;

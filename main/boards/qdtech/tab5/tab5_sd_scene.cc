@@ -2,21 +2,21 @@
 #ifdef CONFIG_QDTECH_TAB5_SD_SCENE
 #include <algorithm>
 #include <cstdio>
-#include <ctime>
 #include <cstring>
+#include <ctime>
 #include <new>
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "nabo_frame_composer.h"
-#include "nabo_sky.h"
-#include "tab5_sky_weather.h"
 #include "nabo_sd_static.h"
+#include "nabo_sky.h"
+#include "nabo_wide_composer.h"
 #include "src/misc/cache/instance/lv_image_cache.h"
 #include "src/misc/lv_area_private.h"
 #include "tab5_sd.h"
+#include "tab5_sky_weather.h"
 
 namespace {
 constexpr size_t kBytes = 320 * 412 * 3;
@@ -26,23 +26,17 @@ constexpr size_t kBytes = 320 * 412 * 3;
 // which measured ~2.5-3.8MB/s and missed every frame deadline.
 constexpr size_t kDmaAlign = 128;
 constexpr size_t kSlotBytes = kBytes + kDmaAlign;  // DMA staging for one raw frame
-using Layout = nabo_sd::ComposeLayout;
-static_assert(Layout::kSrcBytes == kBytes, "compositor expects the 320x412 pack frame");
+using Layout = nabo_sd::WideLayout;
+static_assert(Layout::kSrcBytes <= kBytes, "wide frames fit the existing staging buffer");
 constexpr size_t kOutBytes = Layout::kOutBytes;  // composed opaque RGB565 slot
-constexpr int kVideoX = 39;                       // head clip / image origin in root
-// Transient slowness (boot load, SDIO Wi-Fi bursts) skips frames; only a run of
-// timeouts disables the clip. Format/CRC/IO errors stay fatal immediately.
-constexpr unsigned kMaxConsecutiveTimeouts = 8;
-constexpr uint32_t kTimeoutBackoffMs = 250;
+constexpr int kVideoX = nabo_sky::kVideoLeft;    // window/image inside the wider sky
+static_assert(kVideoX + Layout::kOutW - 1 == nabo_sky::kVideoRight);
 // Measured on device with aligned DMA: ~5MB/s, single 8KB calls stalling up to
 // 170ms while SDIO Wi-Fi shares the controller. 64KB reads cut the call count
 // 8x; budgets cover a stalled-but-progressing frame instead of discarding it.
 constexpr size_t kReadChunk = 64 * 1024;
 // kCallDeadlineMs bounds one blocking read call and, separately, the frame CRC.
-constexpr uint32_t kCallDeadlineMs = 150, kReadDeadlineMs = 200, kFrameDeadlineMs = 260;
-// The UI keeps the last video frame through gaps up to this long before the
-// static face returns; before the first frame of a clip the old 160ms applies.
-constexpr uint64_t kHoldVideoMs = 1000, kFirstFrameMs = 160;
+constexpr uint32_t kCallDeadlineMs = 300, kReadDeadlineMs = 500, kFrameDeadlineMs = 600;
 constexpr const char* kPaths[] = {"/sdcard/tab5/nabo/idle.nab", "/sdcard/tab5/nabo/transition.nab",
                                   "/sdcard/tab5/nabo/sleep.nab", "/sdcard/tab5/nabo/work.nab"};
 constexpr unsigned kCounts[] = {113, 81, 207, 50};
@@ -131,7 +125,7 @@ public:
         if (instance)
             return instance;
         if (!background || heap_caps_get_free_size(MALLOC_CAP_SPIRAM) <
-                               2 * kOutBytes + kSlotBytes + 2 * 1024 * 1024)
+                               2 * kOutBytes + 2 * kSlotBytes + 2 * 1024 * 1024)
             return nullptr;
         const int64_t pool_started = esp_timer_get_time();
         constexpr uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
@@ -143,18 +137,19 @@ public:
         auto* c = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > kOutBytes + 4 * 1024 * 1024
                       ? static_cast<uint8_t*>(heap_caps_aligned_alloc(kDmaAlign, kOutBytes, caps))
                       : nullptr;
-        auto* staging =
-            static_cast<uint8_t*>(heap_caps_aligned_alloc(kDmaAlign, kSlotBytes, caps));
-        if (!mem || !a || !b || !staging) {
+        auto* staging = static_cast<uint8_t*>(heap_caps_aligned_alloc(kDmaAlign, kSlotBytes, caps));
+        auto* encoded = static_cast<uint8_t*>(heap_caps_aligned_alloc(kDmaAlign, kSlotBytes, caps));
+        if (!mem || !a || !b || !staging || !encoded) {
             heap_caps_free(mem);
             heap_caps_free(a);
             heap_caps_free(b);
             heap_caps_free(c);
             heap_caps_free(staging);
+            heap_caps_free(encoded);
             return nullptr;
         }
         const uint32_t pool_us = esp_timer_get_time() - pool_started;
-        auto* self = new (mem) Tab5SdSceneReader(a, b, c, staging, background, overlay);
+        auto* self = new (mem) Tab5SdSceneReader(a, b, c, staging, encoded, background, overlay);
         // Priority 2: above timer/UDP housekeeping, below LVGL(4) and audio(5/8).
         if (xTaskCreate(Run, "nabo_sd", 6144, self, 2, nullptr) != pdPASS) {
             self->~Tab5SdSceneReader();
@@ -163,11 +158,12 @@ public:
             heap_caps_free(b);
             heap_caps_free(c);
             heap_caps_free(staging);
+            heap_caps_free(encoded);
             return nullptr;
         }
         instance = self;
         ESP_LOGI("NaboSD", "pool=%u align=%u index=%u psram_free=%u internal_free=%u",
-                 unsigned((c ? 3 : 2) * kOutBytes + kSlotBytes), unsigned(kDmaAlign),
+                 unsigned((c ? 3 : 2) * kOutBytes + 2 * kSlotBytes), unsigned(kDmaAlign),
                  unsigned(sizeof(nabo_sd::Pack)),
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
@@ -178,18 +174,22 @@ public:
                  unsigned(pool_us), unsigned(sizeof(nabo_sd::SceneMailbox::PumpTrace)),
                  unsigned(kReadDeadlineMs), unsigned(kCallDeadlineMs), unsigned(kCallDeadlineMs),
                  unsigned(kFrameDeadlineMs), unsigned(kReadChunk), unsigned(nabo_sd::kChunk),
-                 unsigned(kHoldVideoMs));
+                 unsigned(nabo_sd::FrameContinuity::kHoldVideoMs));
         return instance;
     }
     nabo_sd::SceneMailbox mailbox;
     bool Failed(unsigned clip) const { return failures_.load() & (1u << clip); }
+    uint32_t Failures() const { return failures_.load(); }
+    bool LivelyReady() const { return lively_.load(std::memory_order_acquire); }
 
 private:
-    Tab5SdSceneReader(uint8_t* a, uint8_t* b, uint8_t* c, uint8_t* staging,
+    Tab5SdSceneReader(uint8_t* a, uint8_t* b, uint8_t* c, uint8_t* staging, uint8_t* encoded,
                       const uint16_t* background, const uint8_t* overlay)
         : mailbox(a, b, kOutBytes, kDmaAlign, c), composer_(background, overlay) {
         mailbox.SetComposer(staging, kSlotBytes, &ComposeThunk, this);
+        pack_.SetDecodeBuffer(encoded, kSlotBytes);
     }
+
 public:
     // New sky: the background now contains it, fx animates it on every composed frame.
     void SetSky(const uint16_t* background, const nabo_sky::SkyFx* fx) {
@@ -222,15 +222,15 @@ private:
     void Loop() {
         int open_clip = -1;
         uint64_t reported = 0;
-        uint32_t frames = 0, max_us = 0, busy = 0, sampled = 0, timeouts = 0;
-        unsigned timeout_clip = 4;
+        uint32_t frames = 0, max_us = 0, busy = 0, sampled = 0;
+        nabo_sd::StreamRecovery recovery[nabo_scene::kClipCount];
         for (;;) {
             // Mounting runs asynchronously after Wi-Fi claims the SDMMC host.
             // Before it completes, keep the static face without poisoning a clip.
             const uint32_t token = Tab5SdReady() ? mailbox.Requested() : 0;
             if (token) {
                 unsigned clip = nabo_sd::SceneMailbox::Clip(token);
-                if (clip < 4 && !Failed(clip)) {
+                if (clip < nabo_scene::kClipCount && recovery[clip].Ready(source_.NowMs())) {
                     const int64_t begin = esp_timer_get_time();
                     nabo_sd::Error e = nabo_sd::Error::Ok;
                     nabo_sd::SceneMailbox::PumpTrace trace;
@@ -239,7 +239,16 @@ private:
                     if (open_clip != int(clip)) {
                         open_clip = -1;
                         sampled = 0;
-                        if (!source_.Open(kPaths[clip]))
+                        char path[128];
+                        const char* id = clip < 4 ? (clip == 0   ? "idle"
+                                                     : clip == 1 ? "transition"
+                                                     : clip == 2 ? "sleep"
+                                                                 : "work")
+                                                  : nabo_scene::kActions[clip - 4].id;
+                        std::snprintf(path, sizeof(path), "/sdcard/tab5/nabo/lively-v1/%s.nab", id);
+                        const bool opened =
+                            source_.Open(path) || (clip < 4 && source_.Open(kPaths[clip]));
+                        if (!opened)
                             e = nabo_sd::Error::Io;
                         else {
                             e = pack_.Open(source_, kBytes, kCallDeadlineMs, true, kReadDeadlineMs,
@@ -247,15 +256,20 @@ private:
                             pack_.SetReadChunk(kReadChunk);
                             pack_.SetVerifyOnce(true);
                         }
-                        if (e == nabo_sd::Error::Ok && (pack_.Count() != kCounts[clip] ||
-                                                        pack_.Duration() != kCounts[clip] * 40 ||
-                                                        pack_.MaxPayload() != kBytes))
+                        const unsigned count =
+                            clip < 4 ? kCounts[clip] : nabo_scene::kActions[clip - 4].frames;
+                        const bool legacy = pack_.Version() != 3;
+                        const unsigned height = legacy ? 412 : Layout::kSrcH;
+                        const size_t bytes = 320 * height * 3;
+                        if (e == nabo_sd::Error::Ok &&
+                            (pack_.Count() != count || pack_.Duration() != count * 40 ||
+                             pack_.MaxPayload() != bytes || (clip >= 4 && legacy)))
                             e = nabo_sd::Error::Format;
                         if (e == nabo_sd::Error::Ok)
                             for (unsigned i = 0; i < pack_.Count(); ++i) {
                                 const auto f = pack_.At(i);
-                                if (f.x || f.y || f.width != 320 || f.height != 412 ||
-                                    f.bytes != kBytes || f.at_ms != i * 40) {
+                                if (f.x || f.y || f.width != 320 || f.height != height ||
+                                    (legacy && f.bytes != kBytes) || f.at_ms != i * 40) {
                                     e = nabo_sd::Error::Format;
                                     break;
                                 }
@@ -263,15 +277,28 @@ private:
                         open_us = esp_timer_get_time() - begin;
                         if (e == nabo_sd::Error::Ok) {
                             open_clip = clip;
+                            composer_.SetLegacy(legacy);
+                            if (clip < 4 && !legacy)
+                                lively_.store(true, std::memory_order_release);
                             ESP_LOGI("NaboSD", "opened clip=%u frames=%u duration_ms=%u", clip,
                                      unsigned(pack_.Count()), unsigned(pack_.Duration()));
                         }
                     }
                     if (e == nabo_sd::Error::Ok) {
                         e = mailbox.Pump(pack_, token, &trace);
+                        if (e == nabo_sd::Error::Crc && trace.attempted) {
+                            // A transient read or one bad payload must not
+                            // disable all 207 sleep frames. Re-read once; the
+                            // mailbox never publishes a frame with a bad CRC.
+                            ESP_LOGW("NaboSD",
+                                     "clip=%u frame=%u CRC expected=%08lx actual=%08lx; rereading",
+                                     clip, unsigned(token & 255),
+                                     static_cast<unsigned long>(trace.frame.crc_expected),
+                                     static_cast<unsigned long>(trace.frame.crc_actual));
+                            e = mailbox.Pump(pack_, token, &trace);
+                        }
                         if (trace.published) {
                             ++frames;
-                            timeouts = 0;
                         }
                         if (trace.busy)
                             ++busy;
@@ -281,10 +308,11 @@ private:
                     if (trace.attempted && (sampled++ < 3 || (e != nabo_sd::Error::Ok &&
                                                               e != nabo_sd::Error::Cancelled))) {
                         const auto& t = trace.frame;
-                        const char* phase = t.phase == nabo_sd::FrameTrace::ReadPhase  ? "read"
-                                            : t.phase == nabo_sd::FrameTrace::CrcPhase ? "crc"
-                                            : t.phase == nabo_sd::FrameTrace::Complete ? "done"
-                                                                                       : "none";
+                        const char* phase = t.phase == nabo_sd::FrameTrace::ReadPhase     ? "read"
+                                            : t.phase == nabo_sd::FrameTrace::CrcPhase    ? "crc"
+                                            : t.phase == nabo_sd::FrameTrace::DecodePhase ? "decode"
+                                            : t.phase == nabo_sd::FrameTrace::Complete    ? "done"
+                                                                                          : "none";
                         ESP_LOGI("NaboSDPerf",
                                  "clip=%u frame=%u result=%u phase=%s open_us=%u "
                                  "total_us=%u claim_us=%u compose_us=%u publish_us=%u "
@@ -296,25 +324,20 @@ private:
                         ESP_LOGI("NaboSDPerf",
                                  "read_bytes=%u read_chunks=%u read_us=%u "
                                  "read_max_us=%u crc_bytes=%u crc_chunks=%u "
-                                 "crc_us=%u crc_max_us=%u",
+                                 "crc_us=%u crc_max_us=%u decode_us=%u",
                                  unsigned(t.read_bytes), unsigned(t.read_chunks),
                                  unsigned(t.read_us), unsigned(t.read_max_us),
                                  unsigned(t.crc_bytes), unsigned(t.crc_chunks), unsigned(t.crc_us),
-                                 unsigned(t.crc_max_us));
+                                 unsigned(t.crc_max_us), unsigned(t.decode_us));
                     }
-                    if (e == nabo_sd::Error::Timeout && clip != timeout_clip) {
-                        timeout_clip = clip;
-                        timeouts = 0;
-                    }
-                    if (e == nabo_sd::Error::Timeout &&
-                        ++timeouts < kMaxConsecutiveTimeouts) {
-                        // Keep the clip open; the UI shows the static face until a
-                        // later frame arrives. Back off so a slow card cannot spin.
-                        ESP_LOGW("NaboSD", "clip=%u timeout %u/%u; skipping frame", clip,
-                                 unsigned(timeouts), kMaxConsecutiveTimeouts);
-                        vTaskDelay(pdMS_TO_TICKS(kTimeoutBackoffMs));
-                    } else if (e != nabo_sd::Error::Ok && e != nabo_sd::Error::Cancelled) {
-                        timeouts = 0;
+                    recovery[clip].Result(e, source_.NowMs(), trace.attempted);
+                    if (e == nabo_sd::Error::Timeout) {
+                        ESP_LOGW("NaboSD",
+                                 "clip=%u slow read; retrying without disabling animation", clip);
+                    } else if (e == nabo_sd::Error::Crc && trace.attempted) {
+                        ESP_LOGW("NaboSD", "clip=%u frame=%u CRC failed twice; skipping bad frame",
+                                 clip, unsigned(token & 255));
+                    } else if (recovery[clip].Failed()) {
                         failures_.fetch_or(1u << clip);
                         source_.Close();
                         open_clip = -1;
@@ -339,14 +362,18 @@ private:
     }
     SdSource source_;
     nabo_sd::Pack pack_;
-    nabo_sd::FrameComposer composer_;
+    nabo_sd::WideComposer composer_;
+    std::atomic<bool> lively_{false};
     std::atomic<const nabo_sky::SkyFx*> fx_{nullptr};
     uint32_t composed_ = 0, compose_us_ = 0, fx_us_ = 0;
     std::atomic<uint32_t> failures_{0};
 };
 
 Tab5SdScene::Tab5SdScene(lv_obj_t* parent) {
-    root_ = Box(parent, 0, 0, 512, 558, 0x0d1b2b);
+    // Extend only the sky around the existing 512-pixel animation region. Its
+    // screen position and the original portrait/gesture siblings stay fixed.
+    lv_obj_add_flag(parent, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    root_ = Box(parent, -kVideoX, 0, kSkyW, kSkyH, 0x0d1b2b);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_CLICKABLE);
     // Sky behind everything (time of day + weather); re-rendered only on change.
     sky_buf_ = static_cast<uint16_t*>(
@@ -366,36 +393,34 @@ Tab5SdScene::Tab5SdScene(lv_obj_t* parent) {
         lv_obj_remove_flag(sky_img_, LV_OBJ_FLAG_CLICKABLE);
         lv_image_set_src(sky_img_, &sky_dsc_);
     }
-    Box(root_, 94, 340, 352, 222, 0x193b56, 28);
-    Box(root_, 108, 354, 324, 185, 0x10273b, 16);
-    auto* shadow = Box(root_, 123, 347, 291, 36, 0x01070e, 18);
-    lv_obj_set_style_bg_opa(shadow, 155, 0);
-    lv_obj_set_style_shadow_color(shadow, lv_color_hex(0x01070e), 0);
-    lv_obj_set_style_shadow_opa(shadow, 155, 0);
-    lv_obj_set_style_shadow_width(shadow, 14, 0);
-    auto* body_clip = Box(root_, 108, 354, 324, 185, 0x183550, 0);
-    body_ = Art(body_clip, -69, -354);
-    Box(root_, 94, 340, 352, 24, 0x285272, 12);
-    Box(root_, 109, 341, 322, 2, 0x587f98);
-    auto* head_clip = Box(root_, 39, 0, 434, 423, 0, 0, false);
-    head_ = Art(head_clip, 0, 0);
+    Box(root_, kVideoX - 2, 340, 506, 222, 0x193b56, 28);
+    Box(root_, kVideoX + 12, 354, 478, 185, 0x183550, 16);
+    auto* body_clip = Box(root_, kVideoX + 12, 354, 478, 185, 0x183550, 0);
+    body_ = Art(body_clip, 52 - 12, 32 - 354);
+    lv_image_set_scale(body_, 326);
+    Box(root_, kVideoX - 2, 340, 506, 24, 0x285272, 12);
+    Box(root_, kVideoX + 13, 341, 476, 2, 0x587f98);
+    auto* head_clip = Box(root_, kVideoX, 0, 512, 423, 0, 0, false);
+    head_ = Art(head_clip, 52, 32);
+    lv_image_set_scale(head_, 326);
     eyes_ = lv_image_create(head_clip);
     mouth_ = lv_image_create(head_clip);
-    lv_obj_remove_flag(eyes_, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(mouth_, LV_OBJ_FLAG_CLICKABLE);
-    // Pre-composed video (head + windowed body over the static art). It sits
-    // where the head layer was, so the posts/sill below still draw in front.
+    for (auto* part : {eyes_, mouth_}) {
+        lv_obj_remove_flag(part, LV_OBJ_FLAG_CLICKABLE);
+        lv_image_set_pivot(part, 0, 0);
+        lv_image_set_scale(part, 241);
+    }
     video_ = lv_image_create(root_);
     lv_obj_set_pos(video_, kVideoX, 0);
     lv_obj_remove_flag(video_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(video_, LV_OBJ_FLAG_HIDDEN);
-    Box(root_, 94, 360, 15, 187, 0x234a64, 7);
-    Box(root_, 432, 360, 15, 187, 0x234a64, 7);
-    Box(root_, 107, 367, 1, 166, 0x436e88);
-    Box(root_, 432, 367, 1, 166, 0x436e88);
-    Box(root_, 94, 534, 352, 11, 0x38617a, 3);
-    Box(root_, 100, 534, 340, 2, 0x7796aa);
-    Box(root_, 103, 544, 334, 14, 0x193b56, 8);
+    Box(root_, kVideoX - 2, 360, 15, 187, 0x234a64, 7);
+    Box(root_, kVideoX + 490, 360, 15, 187, 0x234a64, 7);
+    Box(root_, kVideoX + 11, 367, 1, 166, 0x436e88);
+    Box(root_, kVideoX + 490, 367, 1, 166, 0x436e88);
+    Box(root_, kVideoX - 2, 534, 506, 11, 0x38617a, 3);
+    Box(root_, kVideoX + 4, 534, 494, 2, 0x7796aa);
+    Box(root_, kVideoX + 7, 544, 488, 14, 0x193b56, 8);
     live_.header.magic = LV_IMAGE_HEADER_MAGIC;
     live_.header.cf = LV_COLOR_FORMAT_RGB565;
     live_.header.w = Layout::kOutW;
@@ -436,7 +461,8 @@ bool Tab5SdScene::BuildSkyLayers() {
     const size_t n = size_t(kSkyW) * kSkyH;
     // Second sky buffer: keeps the rendered sky across the snapshots now, and later
     // receives each new sky rendered off the LVGL task.
-    sky_next_ = static_cast<uint16_t*>(heap_caps_malloc(n * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    sky_next_ =
+        static_cast<uint16_t*>(heap_caps_malloc(n * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!sky_next_)
         return false;
     std::memcpy(sky_next_, sky_buf_, n * 2);
@@ -457,7 +483,8 @@ bool Tab5SdScene::BuildSkyLayers() {
                 break;
             }
         const size_t rows = size_t(Layout::kOutH - sky_mask_top_), m = rows * Layout::kOutW;
-        sky_k_ = static_cast<uint16_t*>(heap_caps_malloc(std::max<size_t>(m, 1) * 2, MALLOC_CAP_SPIRAM));
+        sky_k_ =
+            static_cast<uint16_t*>(heap_caps_malloc(std::max<size_t>(m, 1) * 2, MALLOC_CAP_SPIRAM));
         sky_t_ = static_cast<uint8_t*>(heap_caps_malloc(std::max<size_t>(m, 1), MALLOC_CAP_SPIRAM));
         ok = sky_k_ && sky_t_;
         for (size_t i = 0; ok && i < m; ++i) {
@@ -497,7 +524,8 @@ void Tab5SdScene::ApplySkyToBackground(const uint16_t* panel) {
                 continue;
             }
             const int r = std::min(31, int(k[x] >> 11) + int(sky[x] >> 11) * t[x] / 255);
-            const int g = std::min(63, int((k[x] >> 5) & 63) + int((sky[x] >> 5) & 63) * t[x] / 255);
+            const int g =
+                std::min(63, int((k[x] >> 5) & 63) + int((sky[x] >> 5) & 63) * t[x] / 255);
             const int b = std::min(31, int(k[x] & 31) + int(sky[x] & 31) * t[x] / 255);
             bg[x] = uint16_t((r << 11) | (g << 5) | b);
         }
@@ -527,8 +555,8 @@ void Tab5SdScene::UpdateSky(uint64_t now) {
         reader_->SetSky(background_, &fx_[sky_slot_]);
         sky_ = sky_pending_;
         sky_job_.store(kSkyJobIdle, std::memory_order_relaxed);
-        ESP_LOGI("NaboSky", "sky period=%d weather=%d moon_day=%d (worker %u ms)",
-                 int(sky_.period), int(sky_.weather), int(sky_.moon_day), unsigned(sky_job_ms_));
+        ESP_LOGI("NaboSky", "sky period=%d weather=%d moon_day=%d (worker %u ms)", int(sky_.period),
+                 int(sky_.weather), int(sky_.moon_day), unsigned(sky_job_ms_));
         return;
     }
     if (sky_job_.load(std::memory_order_relaxed) != kSkyJobIdle || now - sky_checked_ms_ < 30000)
@@ -578,8 +606,8 @@ uint16_t* Tab5SdScene::CaptureBackground() {
         for (uint32_t i = first; i < count; ++i)
             lv_obj_remove_flag(lv_obj_get_child(root_, i), LV_OBJ_FLAG_HIDDEN);
         if (base && base->header.w == snap_w && base->header.h == snap_h)
-            overlay_ = static_cast<uint8_t*>(heap_caps_malloc(
-                size_t(Layout::kOutW) * Layout::kOutH, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            overlay_ = static_cast<uint8_t*>(heap_caps_malloc(size_t(Layout::kOutW) * Layout::kOutH,
+                                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         unsigned covered = 0;
         if (overlay_)
             for (int y = 0; y < Layout::kOutH; ++y) {
@@ -603,6 +631,8 @@ uint16_t* Tab5SdScene::CaptureBackground() {
 void Tab5SdScene::Source(const lv_image_dsc_t* dsc) {
     if (source_ == dsc)
         return;
+    if (source_ == &live_)
+        ESP_LOGI("NaboSD", "video -> static clip=%d", last_clip_);
     // Leaving video: the hidden layer is not drawn again, but release only after
     // the render that removes it, as the LVGL path may still reference it.
     if (live_slot_ >= 0)
@@ -623,6 +653,8 @@ void Tab5SdScene::Present(nabo_sd::SceneMailbox::Lease next, uint64_t now) {
     lv_image_cache_drop(&live_);
     live_slot_ = next.slot;
     if (source_ != &live_) {
+        ESP_LOGI("NaboSD", "static -> video clip=%u frame=%u",
+                 nabo_sd::SceneMailbox::Clip(next.token), unsigned(next.token & 255));
         // Entering video goes through LVGL once, replacing the static layers.
         if (previous >= 0)
             retired_ |= 1u << previous;
@@ -701,7 +733,7 @@ void Tab5SdScene::Face(unsigned eyes, unsigned mouth, uint8_t opacity) {
         const auto& p = patches[std::min(state, 2u) - 1];
         if (lv_image_get_src(o) != p.image)
             lv_image_set_src(o, p.image);
-        lv_obj_set_pos(o, p.x, p.y);
+        lv_obj_set_pos(o, 52 + (p.x * 94 + 50) / 100, 32 + (p.y * 94 + 50) / 100);
         lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
     };
     show(eyes_, eyes, nabo_sd_eyes);
@@ -747,25 +779,27 @@ bool Tab5SdScene::Tick(uint64_t now, Input input) {
         lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
     else
         lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
-    const auto selection = work_clock_.Apply(now, nabo_scene::Select(now, scene, input));
+    const auto base = nabo_scene::Select(now, scene, input);
+    const auto selection =
+        work_clock_.Apply(now, actions_.Apply(now, base, input, reader_ ? reader_->Failures() : 0,
+                                              reader_ && reader_->LivelyReady()));
     const int clip = selection.clip;
     const unsigned frame = selection.frame;
     if (scene.generation != last_generation_ || clip != last_clip_) {
+        ESP_LOGI("NaboSD", "scene clip=%d -> %d frame=%u", last_clip_, clip, frame);
         ++epoch_;
         last_generation_ = scene.generation;
         last_clip_ = clip;
-        request_since_ = now;
-        last_frame_ms_ = 0;
+        continuity_.Begin(now);
     }
     if (reader_ && clip >= 0 && !reader_->Failed(clip)) {
         reader_->mailbox.Request(clip, frame, epoch_);
         auto next = reader_->mailbox.TakeReady();
         if (next.slot >= 0) {
             Present(next, now);
-            last_frame_ms_ = now;
+            continuity_.Presented(now);
         }
-        if (now - (last_frame_ms_ ? last_frame_ms_ : request_since_) >
-            (last_frame_ms_ ? kHoldVideoMs : kFirstFrameMs))
+        if (continuity_.Expired(now))
             Source(&nabo_sd_neutral);
     } else {
         if (reader_) {

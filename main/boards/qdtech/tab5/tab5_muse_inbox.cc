@@ -1,18 +1,22 @@
 #include "tab5_muse_inbox.h"
-#include "tab5_podcast_transcript.h"
 #include "tab5_net_gate.h"
+#include "tab5_podcast_transcript.h"
 
-#include <cJSON.h>
+#include <esp_crt_bundle.h>
 #include <esp_heap_caps.h>
+#include <esp_http_client.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <cJSON.h>
 
-#include <memory>
 #include <algorithm>
+#include <array>
+#include <memory>
+#include <type_traits>
 
+#include "application.h"
 #include "board.h"
 #include "settings.h"
-#include "application.h"
 
 #include <cstdlib>
 
@@ -29,10 +33,9 @@ constexpr int kPollSeconds = 60;
 constexpr int kMusicPollMs = 4000;
 constexpr int kFirstPollDelayMs = 20000;  // let Wi-Fi and the XiaoZhi session settle first
 
-std::string HttpGet(const std::string& url, int* status_out, size_t max_bytes = kMaxJsonBytes,
-                    int timeout_ms = kTimeoutMs) {
+std::string HttpGetDirect(const std::string& url, int* status_out, size_t max_bytes,
+                          int timeout_ms) {
     *status_out = 0;
-    std::lock_guard<std::mutex> gate(tab5_net::TransferGate());
     auto network = Board::GetInstance().GetNetwork();
     if (!network)
         return {};
@@ -63,6 +66,186 @@ std::string HttpGet(const std::string& url, int* status_out, size_t max_bytes = 
     return body;
 }
 
+// Some access networks return an unrelated address for trycloudflare.com. Retry only
+// the configured relay through an HTTPS DNS answer; keep the original name for TLS
+// verification, SNI and HTTP routing. Never send the relay token to the DNS service.
+struct RelayAddress {
+    std::string ip;
+    int ttl_seconds = 60;
+};
+struct RelayDnsCache {
+    std::string host;
+    std::array<RelayAddress, 2> addresses;
+    size_t count = 0;
+    int64_t expires_us = 0;
+};
+RelayDnsCache relay_dns_cache;  // accessed only under TransferGate
+std::mutex relay_connection_mutex;
+std::string verified_relay_host;
+std::string verified_relay_ip;
+int64_t verified_relay_until_us = 0;
+
+std::string TunnelHost(const std::string& url) {
+    if (url.rfind("https://", 0) != 0)
+        return {};
+    const size_t end = url.find('/', 8);
+    const auto host = url.substr(8, end == std::string::npos ? end : end - 8);
+    constexpr std::string_view suffix = ".trycloudflare.com";
+    if (host.size() <= suffix.size() || host.size() > 120 ||
+        host.compare(host.size() - suffix.size(), suffix.size(), suffix) != 0 ||
+        !std::all_of(host.begin(), host.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.';
+        }))
+        return {};
+    return host;
+}
+
+bool PublicIpv4(const char* value) {
+    if (!value || !*value)
+        return false;
+    unsigned octets[4]{};
+    const char* p = value;
+    for (int i = 0; i < 4; ++i) {
+        int digits = 0;
+        while (*p >= '0' && *p <= '9') {
+            if (++digits > 3 || (octets[i] = octets[i] * 10 + unsigned(*p++ - '0')) > 255)
+                return false;
+        }
+        if (!digits || (i < 3 ? *p++ != '.' : *p != '\0'))
+            return false;
+    }
+    return octets[0] != 0 && octets[0] != 10 && octets[0] != 127 && octets[0] < 224 &&
+           !(octets[0] == 169 && octets[1] == 254) &&
+           !(octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) &&
+           !(octets[0] == 192 && octets[1] == 168) &&
+           !(octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127) &&
+           !(octets[0] == 198 && (octets[1] == 18 || octets[1] == 19));
+}
+
+RelayDnsCache ParseRelayDns(const std::string& host, const std::string& body, int64_t now_us) {
+    RelayDnsCache cache;
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
+        cJSON_ParseWithLength(body.data(), body.size()), cJSON_Delete);
+    const auto* status = cJSON_GetObjectItem(root.get(), "Status");
+    if (!cJSON_IsNumber(status) || status->valuedouble != 0)
+        return cache;
+    auto* questions = cJSON_GetObjectItem(root.get(), "Question");
+    // AliDNS uses an object; the other common JSON DNS format uses an array.
+    auto* question = cJSON_IsArray(questions) ? cJSON_GetArrayItem(questions, 0) : questions;
+    const auto* name = cJSON_GetObjectItem(question, "name");
+    const auto* type = cJSON_GetObjectItem(question, "type");
+    if (!cJSON_IsString(name) || !name->valuestring ||
+        (host != name->valuestring && host + "." != name->valuestring) || !cJSON_IsNumber(type) ||
+        type->valueint != 1)
+        return cache;
+    int ttl_seconds = 300;
+    auto* answers = cJSON_GetObjectItem(root.get(), "Answer");
+    cJSON* answer = nullptr;
+    cJSON_ArrayForEach (answer, answers) {
+        const auto* answer_type = cJSON_GetObjectItem(answer, "type");
+        const auto* data = cJSON_GetObjectItem(answer, "data");
+        if (!cJSON_IsNumber(answer_type) || answer_type->valueint != 1 || !cJSON_IsString(data) ||
+            !PublicIpv4(data->valuestring))
+            continue;
+        const auto* ttl = cJSON_GetObjectItem(answer, "TTL");
+        // A one-second DNS TTL would add two TLS handshakes to every four-second
+        // music poll. Keep a short retry lease; a failed connection drops it early.
+        const int bounded_ttl = cJSON_IsNumber(ttl) ? std::clamp(ttl->valueint, 30, 300) : 60;
+        ttl_seconds = std::min(ttl_seconds, bounded_ttl);
+        cache.addresses[cache.count++] = {data->valuestring, bounded_ttl};
+        if (cache.count == cache.addresses.size())
+            break;
+    }
+    if (!cache.count)
+        return {};
+    cache.host = host;
+    cache.expires_us = now_us + int64_t(ttl_seconds) * 1000000;
+    return cache;
+}
+
+std::string HttpGetByAddress(const std::string& url, const std::string& host, const std::string& ip,
+                             int* status_out, size_t max_bytes, int timeout_ms) {
+    *status_out = 0;
+    const std::string numeric_url = "https://" + ip + url.substr(8 + host.size());
+    esp_http_client_config_t config = {};
+    config.url = numeric_url.c_str();
+    config.common_name = host.c_str();  // certificate hostname check AND TLS SNI
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.timeout_ms = timeout_ms;
+    config.disable_auto_redirect = true;
+    auto cleanup = [](esp_http_client_handle_t client) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+    };
+    std::unique_ptr<std::remove_pointer_t<esp_http_client_handle_t>, decltype(cleanup)> client(
+        esp_http_client_init(&config), cleanup);
+    if (!client)
+        return {};
+    esp_http_client_set_header(client.get(), "Host", host.c_str());
+    esp_http_client_set_header(client.get(), "Accept", "application/json");
+    if (esp_http_client_open(client.get(), 0) != ESP_OK ||
+        esp_http_client_fetch_headers(client.get()) < 0)
+        return {};
+    *status_out = esp_http_client_get_status_code(client.get());
+    if (*status_out != 200 || esp_http_client_get_content_length(client.get()) > int64_t(max_bytes))
+        return {};
+    std::string body;
+    char buffer[1024];
+    for (;;) {
+        const int count = esp_http_client_read(client.get(), buffer, sizeof(buffer));
+        if (count < 0 || body.size() + size_t(count) > max_bytes)
+            return {};
+        if (!count)
+            return esp_http_client_is_complete_data_received(client.get()) ? body : std::string();
+        body.append(buffer, count);
+    }
+}
+
+std::string HttpGet(const std::string& url, int* status_out, size_t max_bytes = kMaxJsonBytes,
+                    int timeout_ms = kTimeoutMs) {
+    std::lock_guard<std::mutex> gate(tab5_net::TransferGate());
+    *status_out = 0;
+    const std::string host = TunnelHost(url);
+    const int64_t now = esp_timer_get_time();
+    auto try_addresses = [&]() -> std::string {
+        for (size_t i = 0; i < relay_dns_cache.count; ++i) {
+            auto body = HttpGetByAddress(url, host, relay_dns_cache.addresses[i].ip, status_out,
+                                         max_bytes, timeout_ms);
+            if (*status_out != 0) {
+                if (*status_out == 200) {
+                    std::lock_guard<std::mutex> lock(relay_connection_mutex);
+                    verified_relay_host = host;
+                    verified_relay_ip = relay_dns_cache.addresses[i].ip;
+                    verified_relay_until_us = esp_timer_get_time() + 300LL * 1000000;
+                }
+                if (i)
+                    std::swap(relay_dns_cache.addresses[0], relay_dns_cache.addresses[i]);
+                return body;
+            }
+        }
+        return {};
+    };
+    if (!host.empty() && relay_dns_cache.host == host && relay_dns_cache.expires_us > now) {
+        auto body = try_addresses();
+        if (*status_out != 0)
+            return body;
+        relay_dns_cache = {};
+    }
+    auto body = HttpGetDirect(url, status_out, max_bytes, timeout_ms);
+    if (*status_out != 0 || host.empty())
+        return body;
+    int dns_status = 0;
+    auto dns_body = HttpGetDirect("https://dns.alidns.com/resolve?name=" + host + "&type=A",
+                                  &dns_status, 4096, kTimeoutMs);
+    if (dns_status != 200)
+        return {};
+    relay_dns_cache = ParseRelayDns(host, dns_body, esp_timer_get_time());
+    body = try_addresses();
+    if (*status_out == 200)
+        ESP_LOGI(TAG, "relay recovered through HTTPS DNS (%u bytes)", unsigned(body.size()));
+    return body;
+}
+
 std::string JsonString(cJSON* object, const char* key) {
     auto* item = cJSON_GetObjectItem(object, key);
     return cJSON_IsString(item) && item->valuestring ? item->valuestring : "";
@@ -81,6 +264,19 @@ void SaveLater(const char* key, const std::string& value) {
 }
 
 }  // namespace
+
+RelayConnection CachedRelayConnection(const std::string& url) {
+    const auto host = TunnelHost(url);
+    std::string ip;
+    {
+        std::lock_guard<std::mutex> lock(relay_connection_mutex);
+        if (host.empty() || host != verified_relay_host ||
+            esp_timer_get_time() >= verified_relay_until_us)
+            return {url, {}};
+        ip = verified_relay_ip;
+    }
+    return {"https://" + ip + url.substr(8 + host.size()), host};
+}
 
 Inbox& Inbox::GetInstance() {
     static Inbox instance;
@@ -158,9 +354,9 @@ void Inbox::ServeTrackRequest() {
         endpoint += "/track";
     }
     int status = 0;
-    const std::string body =
-        HttpGet(endpoint + "?episode=" + std::to_string(episode) + "&index=" + std::to_string(index),
-                &status, 8 * 1024, 20000);
+    const std::string body = HttpGet(
+        endpoint + "?episode=" + std::to_string(episode) + "&index=" + std::to_string(index),
+        &status, 8 * 1024, 20000);
     std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
         body.empty() ? nullptr : cJSON_ParseWithLength(body.data(), body.size()), cJSON_Delete);
     ResolvedTrack track;
@@ -177,8 +373,8 @@ void Inbox::ServeTrackRequest() {
                    (track.url.rfind("https://", 0) == 0 || track.url.rfind("http://", 0) == 0) &&
                    track.url.size() <= 1200 && track.song_id.size() <= 20;
     }
-    ESP_LOGI(TAG, "podcast track %d/%d %s (http %d)", episode, index, track.ok ? "ok" : "unavailable",
-             status);
+    ESP_LOGI(TAG, "podcast track %d/%d %s (http %d)", episode, index,
+             track.ok ? "ok" : "unavailable", status);
     if (done)
         done(track);
 }
@@ -368,8 +564,8 @@ bool Inbox::PollMusic() {
 
 bool Inbox::FetchPodcasts(const std::string& endpoint, tab5_podcast::EpisodeList* out) {
     int status = 0;
-    const std::string body = HttpGet(endpoint + "?limit=" + std::to_string(kPodcastLimit), &status,
-                                     kMaxPodcastBytes);
+    const std::string body =
+        HttpGet(endpoint + "?limit=" + std::to_string(kPodcastLimit), &status, kMaxPodcastBytes);
     std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
         body.empty() ? nullptr : cJSON_ParseWithLength(body.data(), body.size()), cJSON_Delete);
     auto* list = root ? cJSON_GetObjectItem(root.get(), "episodes") : nullptr;
@@ -471,8 +667,8 @@ bool Inbox::Poll() {
             changed = snapshot_.ok;
             snapshot_.ok = false;
             ++failures_;
-            ESP_LOGW(TAG, "poll %s failed (http %d, %u bytes)", url.empty() ? host.c_str() : "tunnel",
-                     status, unsigned(body.size()));
+            ESP_LOGW(TAG, "poll %s failed (http %d, %u bytes)",
+                     url.empty() ? host.c_str() : "tunnel", status, unsigned(body.size()));
         } else {
             if (podcast_fetched) {
                 snapshot_.podcast_latest_id = podcast_id;

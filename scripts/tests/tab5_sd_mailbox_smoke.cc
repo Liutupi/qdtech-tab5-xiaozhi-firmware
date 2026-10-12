@@ -90,7 +90,11 @@ int main(int argc, char** argv) {
     box.Pump(pack, box.Requested());
     box.CancelAll();
     assert(box.TakeReady().slot < 0);
-    box.Request(4, 0, 1);
+    // Extended library: clip 17 and the full epoch survive token encoding.
+    box.Request(17, 255, 0x7ffff);
+    assert(SceneMailbox::Clip(box.Requested()) == 17);
+    assert((box.Requested() & 255) == 255);
+    box.Request(18, 0, 1);
     assert(box.Requested() == 0);
     box.Request(0, 256, 1);
     assert(box.Requested() == 0);

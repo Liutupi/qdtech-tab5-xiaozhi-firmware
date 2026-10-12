@@ -1431,6 +1431,14 @@ class QdtechTab5Display : public MipiLcdDisplay {
             return;
         }
         if (sleeping_) {
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+            // The window video owns sleep. Animating the legacy z labels under
+            // its opaque layer needlessly invalidates the scene every 100ms.
+            if (sd_scene_active) {
+                RecordTickTime(tick_started_us);
+                return;
+            }
+#endif
             const uint32_t sleep_tick = now / 100;
             if (sleep_tick != last_sleep_tick_) {
                 last_sleep_tick_ = sleep_tick;
@@ -2025,6 +2033,17 @@ public:
         lv_obj_add_flag(wave_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(blink_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(mouth_, LV_OBJ_FLAG_HIDDEN);
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+        if (sd_scene_) {
+            // Do not decode/show the old full-size sleeping portrait behind
+            // the SD window. It causes a large redraw at both clip handoffs.
+            if (prompt_label_)
+                lv_label_set_text(prompt_label_, sleeping ? "Nabo 正在休息" : "Nabo 醒来了");
+            UpdateAnimationTimerPeriod();
+            frame_cause_gate_.MarkOnce(tab5_frame::kSleepSwitch, lv_tick_get());
+            return;
+        }
+#endif
         for (auto* dot : ambient_)
             if (dot) {
                 if (sleeping)

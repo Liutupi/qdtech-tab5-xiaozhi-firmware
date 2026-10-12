@@ -116,10 +116,12 @@ struct Lcg {
 };
 
 constexpr uint32_t kPage = 0x0d1b2b;  // home page background around the panel
-constexpr int kPanelW = 512, kPanelH = 558;
+// The 512-pixel B window sits inside a wider sky, with a soft margin on each
+// side. Keep the full window over the sky instead of the old narrow dissolve.
+constexpr int kPanelW = 544, kPanelH = 558;
 constexpr int kHorizon = 345;  // skyline base, just under the window top (340)
 constexpr int kFxBottom = 338; // moving details stay above the window frame
-constexpr int kFadeSide = 90, kFadeTop = 90, kFadeBottom = 50;
+constexpr int kFadeSide = 16, kFadeTop = 64, kFadeBottom = 50;
 
 // 1 inside the panel, easing to 0 at its outer edges: the sky dissolves into the page.
 inline float EdgeFactor(int x, int y) {
@@ -130,9 +132,9 @@ inline float EdgeFactor(int x, int y) {
     return side * top * bottom;
 }
 
-// Composed video frames cover panel x 39..472; moving details fade out before that edge
+// Composed video frames cover panel x 16..527; moving details fade out before that edge
 // so nothing is cut off where the static sky image takes over.
-constexpr int kVideoLeft = 39, kVideoRight = 472;
+constexpr int kVideoLeft = 16, kVideoRight = 527;
 inline float VideoEdgeFactor(int x) {
     float v = std::clamp(float(std::min(x - kVideoLeft, kVideoRight - x)) / 60.0f, 0.0f, 1.0f);
     return v * v * (3 - 2 * v);
@@ -141,7 +143,7 @@ inline float VideoEdgeFactor(int x) {
 // The sun and moon sit far in the upper-right corner, well clear of Nabo's cap, and are
 // drawn after the dissolve with only a narrow fade of their own: a bright distant body
 // with a soft halo, while the sky around it melts into the page.
-constexpr int kOrbX = 462, kOrbY = 50;
+constexpr int kOrbX = 478, kOrbY = 50;
 inline float OrbFade(int x, int y) {
     auto ease = [](float v) { v = std::clamp(v, 0.0f, 1.0f); return v * v * (3 - 2 * v); };
     return ease(float(std::min(x, kPanelW - 1 - x)) / 24.0f) * ease(float(y) / 24.0f);

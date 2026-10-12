@@ -1,12 +1,18 @@
 # 小智桌面固件：QDTech S3 → M5Stack Tab5 移植
 
-这是面向 M5Stack Tab5 的开发中固件。`qdtech-tab5-native` 变体直接按 1280 × 720 绘制 Nabo 主界面、时分秒翻页时钟与应用页；支持配网、亮度、音量、网络电台、音乐歌词、ICU 计算器和人体感应。原 `qdtech-tab5` 变体保留旧桌面。当前公开版本为 [v1.0.10](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.10)；各功能的实机验证程度见 [移植状态](PORTING_STATUS.md) 和 [交接本](HANDOFF.md)。
+这是面向 M5Stack Tab5 的开发中固件。`qdtech-tab5-native` 变体直接按 1280 × 720 绘制 Nabo 主界面、时分秒翻页时钟与应用页；支持配网、亮度、音量、网络电台、音乐歌词、ICU 计算器和人体感应。原 `qdtech-tab5` 变体保留旧桌面。当前公开版本为 [v1.0.11](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.11)；各功能的实机验证程度见 [移植状态](PORTING_STATUS.md) 和 [交接本](HANDOFF.md)。
 
 ## 固件与在线升级
 
 设置页的 **固件升级** 会检查 GitHub 最新 Release，把主固件下载到 SD 卡并校验 SHA-256，然后由 `ota_0` 里的升级程序改写主固件；Wi‑Fi 等 NVS 设置不会被在线升级覆盖。原理与限制见 [HANDOFF.md](HANDOFF.md#v1002026-09-30与在线升级-ota)。
 
 首次从旧分区布局升级需要一次 USB 刷写（分区表、主固件和升级程序）；已有兼容分区布局的设备可在设置页升级。NAS 网易云点歌路径还要求 NAS 上的 Muse relay 和网易云 MCP 容器按 [板级说明](main/boards/qdtech/tab5/README.md) 配置；单独刷固件不会建立 NAS 服务。
+
+## NABO 动作库
+
+v1.0.11 加入 14 个半身动作，与原待机、工作、入睡和睡眠片段使用统一宽框。空闲时按间隔、权重和冷却时间编排，音频和交互优先；同时适配天空背景并修复电台补充音频数据时的不必要等待。用户已在同功能固件上确认背景协调、声音连续。
+
+配套动画资源在 [v1.0.11 发布页](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.11)，将 SD ZIP 中的 `tab5/` 合并复制到卡根目录。新目录为 `tab5/nabo/lively-v1/`，包含 18 个片段，需至少 200 MiB 可用空间。在线固件升级不会复制 SD 动画；已安装该目录的设备无需重复复制。动作列表、格式和编排见[动作库说明](docs/nabo-action-library.md)。
 
 ## MD 世嘉与 NES 游戏
 
