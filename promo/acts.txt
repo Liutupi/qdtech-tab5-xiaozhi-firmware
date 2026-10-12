@@ -1,0 +1,11 @@
+-4000 preroll
+-3900 settime 08:16:40
+-3900 weather 0 362 1095
+-3890 skyrefresh
+-3800 dailypage 3
+500 action !A06
+6000 action !A09
+11500 action !P01
+17000 action !P02
+22500 action !A03R1
+28000 action !E03R2

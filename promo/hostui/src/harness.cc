@@ -20,6 +20,7 @@ namespace host { extern tab5_home::Status home_status; extern std::function<void
 #include "freertos/queue.h"
 
 static int64_t g_us = 0;
+static int g_action = -1; static bool g_action_now = false;
 static time_t g_epoch_base = 0;
 extern "C" int64_t host_time_us(void) { return g_us; }
 extern "C" time_t time(time_t* t) {
@@ -322,6 +323,14 @@ int main(int argc, char** argv) {
             else if (e.cmd == "dailypage") display->ShowDailyPage(atoi(e.arg.c_str()));
             else if (e.cmd == "stopmusic") display->StopMusicTrack();
             else if (e.cmd == "touchnabo") display->TouchNabo();
+            else if (e.cmd == "action") {
+                // "action A06": start at the next neutral idle boundary, like the firmware
+                // scheduler does; "action !A06" starts immediately (for a hidden cut).
+                std::string id = e.arg; g_action_now = !id.empty() && id[0] == '!'; if (g_action_now) id = id.substr(1);
+                g_action = -1;
+                for (unsigned i = 0; i < nabo_scene::kActions.size(); ++i) if (id == nabo_scene::kActions[i].id) g_action = int(i);
+                if (g_action < 0) fprintf(stderr, "unknown action %s\n", id.c_str());
+            }
             else if (e.cmd == "page") {
                 auto* ap = display->apps_.get();
                 if (e.arg == "apps") ap->OpenApps();
@@ -341,6 +350,19 @@ int main(int argc, char** argv) {
             if (!t.second && g_us >= t.first) { g_pressed = false; t.second = true; }
         while (!HostQueue().empty()) { auto* job = static_cast<Tab5IrRemotePage::Job*>(HostQueue().front()); HostQueue().pop_front(); job->run(); delete job; }
         while (!g_tasks.empty()) { auto f = std::move(g_tasks.front()); g_tasks.pop_front(); f(); }
+        if (display->sd_scene_ && g_us >= 0) {
+            // Only scripted actions in the film: keep the random idle scheduler parked.
+            auto& A = display->sd_scene_->actions_;
+            const uint64_t now = uint64_t(g_us / 1000);
+            if (A.active_ < 0) A.next_ = UINT64_MAX;
+            if (g_action >= 0 && A.active_ < 0 && A.idle_ &&
+                (g_action_now || ((now - A.idle_since_) / 40) % 113 == 0)) {
+                A.used_[g_action] = 0; A.last_ = -1;
+                A.Start(unsigned(g_action), now, 0, 0);
+                fprintf(stderr, "ACTION %s start %.3f s\n", nabo_scene::kActions[g_action].id, g_us / 1e6);
+                g_action = -1;
+            }
+        }
         lv_timer_handler();
         usleep(3500);  // let the SD reader thread keep pace with virtual time
         if (g_us >= 0 && g_us >= next_frame) {

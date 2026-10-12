@@ -13,7 +13,7 @@ SR = 48000
 BPM = 120.0
 BEAT = 60.0 / BPM
 BAR = 4 * BEAT
-BARS = 48
+BARS = 54
 DUR = BARS * BAR + 3.0
 N = int(DUR * SR)
 rng = np.random.default_rng(11)
@@ -72,15 +72,17 @@ def sec(bar):
     if bar < 5: return 'intro1'      # 4-10 s  wake + greeting
     if bar < 9: return 'home'        # 10-18 s
     if bar < 14: return 'sky'        # 18-28 s the sky montage
-    if bar < 18: return 'talk'       # 28-36 s dialogue
-    if bar < 19: return 'build'      # 36-38 s
-    if bar < 20: return 'drop1'      # 38-40 s NABO 电台 title hit
-    if bar < 27: return 'bed'        # 40-54 s podcast plays
-    if bar < 31: return 'drop1'      # 54-62 s the song
-    if bar < 34: return 'radio'      # 62-68 s live radio
-    if bar < 42: return 'drop2'      # 68-84 s tools
-    if bar < 45: return 'pre'        # 84-90 s settings + hardware
-    if bar < 48: return 'outro'      # 90-96 s
+    if bar < 20: return 'drop1'      # 28-40 s v1.0.11 actions, one per bar
+    bar -= 6                         # the v1.0.10 arrangement continues 12 s later
+    if bar < 18: return 'talk'       # 40-48 s dialogue
+    if bar < 19: return 'build'      # 48-50 s
+    if bar < 20: return 'drop1'      # 50-52 s NABO 电台 title hit
+    if bar < 27: return 'bed'        # 52-66 s podcast plays
+    if bar < 31: return 'drop1'      # 66-74 s the song
+    if bar < 34: return 'radio'      # 74-80 s live radio
+    if bar < 42: return 'drop2'      # 80-96 s tools
+    if bar < 45: return 'pre'        # 96-102 s settings + hardware
+    if bar < 48: return 'outro'      # 102-108 s
     return 'end'
 DROP = {'drop1', 'drop2'}
 
@@ -130,7 +132,7 @@ for bar in range(BARS):
         if True:
             for b in (1, 3): clap.append((t0 + b * BEAT, 39, 100, .2))
         for k in range(16): hats.append((t0 + k * BEAT / 4, 42, 50 + filt * 10 + (16 if k % 2 == 0 else 0), .05))
-        if bar in (18,):  # snare roll accelerating
+        if bar in (24,):  # snare roll accelerating
             for k in range(16):
                 snare.append((t0 + k * BEAT / 4, 38, 50 + k * 4, .1))
     if s in DROP or s == 'pre':
@@ -141,13 +143,13 @@ for bar in range(BARS):
         for k in range(16):
             if s == 'drop2' or k % 2 == 1:
                 hats.append((t0 + k * BEAT / 4, 42, 62 + (22 if k % 4 == 2 else 0), .05))
-        if bar in (30, 37, 41):
+        if bar in (19, 36, 43, 47):
             for k in range(8): snare.append((t0 + 2 * BEAT + k * BEAT / 4, 38, 70 + k * 6, .1))
     if False:
         for k in range(16): snare.append((t0 + k * BEAT / 4, 38, 46 + k * 5, .1))
-    if bar in (5, 9, 19, 27, 34, 38, 42, 45):
+    if bar in (5, 9, 14, 25, 33, 40, 44, 48, 51):
         crash.append((t0, 49, 104, 2.0))
-    if s == 'outro' and bar == 45:
+    if s == 'outro' and bar == 51:
         kick_sf.append((t0, 36, 110, .3))
 # final hit
 END = BARS * BAR
@@ -169,7 +171,7 @@ DR_H = render_sf(hats, 128, 26, gain_db=-4)
 DR_O = render_sf(ohat, 128, 26, gain_db=-6)
 DR_X = render_sf(crash, 128, 16, gain_db=-6)
 DR_SH = render_sf(shaker, 128, 0, gain_db=-4)
-REV = render_sf([(19 * BAR - 2.0, 60, 90, 2.0), (34 * BAR - 2.0, 60, 90, 2.0), (27 * BAR - 2.0, 60, 70, 2.0), (9 * BAR - 2.0, 60, 55, 2.0)], 0, 119, gain_db=-6)
+REV = render_sf([(25 * BAR - 2.0, 60, 90, 2.0), (40 * BAR - 2.0, 60, 90, 2.0), (33 * BAR - 2.0, 60, 70, 2.0), (9 * BAR - 2.0, 60, 55, 2.0), (14 * BAR - 2.0, 60, 80, 2.0)], 0, 119, gain_db=-6)
 
 # ---------------------------------------------------------------- synth layers
 tt = np.arange(N) / SR
@@ -256,12 +258,12 @@ def impact(t, g=0.9):
     i0 = t2s(t); L = t2s(2.5); x = np.arange(L) / SR
     boom = np.sin(2 * np.pi * np.cumsum(30 + 70 * np.exp(-x * 5)) / SR) * np.exp(-x * 1.8)
     j = min(N, i0 + L); FXL[i0:j] += (boom * g)[: j - i0, None]
-riser(18 * BAR, 19 * BAR - BEAT * 0.5, 0.16); riser(33 * BAR, 34 * BAR - BEAT * 0.5, 0.14); riser(26 * BAR, 27 * BAR - BEAT * 0.5, 0.10); riser(8 * BAR, 9 * BAR - BEAT * 0.5, 0.06)
-for b in (19, 27, 34): impact(b * BAR, 0.55)
+riser(24 * BAR, 25 * BAR - BEAT * 0.5, 0.16); riser(39 * BAR, 40 * BAR - BEAT * 0.5, 0.14); riser(32 * BAR, 33 * BAR - BEAT * 0.5, 0.10); riser(8 * BAR, 9 * BAR - BEAT * 0.5, 0.06); riser(13 * BAR, 14 * BAR - BEAT * 0.5, 0.14)
+for b in (14, 25, 33, 40): impact(b * BAR, 0.55)
 impact(END, 0.7)
 # drop gap: silence the last half beat before drops
 GAP = np.ones(N, np.float32)
-for b in (19, 34):
+for b in (14, 25, 40):
     i0, i1 = t2s(b * BAR - BEAT * 0.5), t2s(b * BAR)
     GAP[i0:i1] = 0.0
 
@@ -325,7 +327,7 @@ for t, y, g, dk in tracks:
     vmask[a:b] = np.minimum(vmask[a:b], ramp)
 # the podcast and radio play on the device: music sits underneath, darker and softer
 dev = np.zeros(N, np.float32)
-for a_, b_ in ((40.0, 54.0), (62.0, 68.0)):
+for a_, b_ in ((52.0, 66.0), (74.0, 80.0)):
     dev[t2s(a_):t2s(b_)] = 1.0
 dev = np.convolve(dev, np.ones(t2s(0.3)) / t2s(0.3), 'same')
 dark = fx(mix, Pedalboard([LowpassFilter(1800), Gain(-4)]))

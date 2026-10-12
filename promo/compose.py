@@ -11,7 +11,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 W, H, FPS = 1920, 1080, 30
 UIW, UIH = 1280, 720
 BEAT = 0.5
-TOTAL = 98.5
+TOTAL = 110.5
+# v1.0.11: a 12 s action segment is inserted at 28 s; the v1.0.10 cut continues 12 s later.
+ACT0, ACT1, SHIFT, OLD_TOTAL = 28.0, 40.0, 12.0, 98.5
 NF = int(TOTAL * FPS)
 FONTS = '/home/user/fonts_src/noto-cjk/Sans/OTF/SimplifiedChinese'
 INTER = '/usr/share/fonts/opentype/inter'
@@ -119,6 +121,18 @@ SHOTS = [  # (t0, t1, pose_from, pose_to, ease)
     (86.0, 90.0, P(640, 360, 520, 600, 0.44, -24, 10, -2), P(640, 360, 480, 600, 0.40, -34, 12, -3), 'io'),
     (90.0, 98.5, P(640, 360, 960, 690, 0.58, -6, 6, 0), P(640, 360, 960, 690, 0.62, 0, 3, 0), 'out'),
 ]
+SHOTS_OLD = SHOTS
+def _side(i, a, b):
+    yaw = (-16, -8, -20, -6, -14, -10)[i]
+    v = 350 if i % 2 == 0 else 340
+    return (ACT0 + 2 * i, ACT0 + 2 * i + 2, P(290, v, 1330 + (20 if i == 0 else 0), 560, a, yaw, 5, 0),
+            P(290, v, 1310, 560, b, yaw * 0.5, 3, 0), 'expo')
+ACT_SHOTS = [_side(i, (1.40, 1.50, 1.46, 1.52, 1.48, 1.54)[i], (1.50, 1.60, 1.56, 1.62, 1.58, 1.64)[i]) for i in range(6)]
+SHOTS = ([s for s in SHOTS_OLD if s[0] < ACT0] + ACT_SHOTS +
+         [(s[0] + SHIFT, s[1] + SHIFT) + tuple(s[2:]) for s in SHOTS_OLD if s[0] >= ACT0])
+# (name, frame window start in acts.rgb, seconds) -- one bar per action
+ACTS = [('举指 · 想到了', 1.7), ('开心合掌', 6.8), ('捧杯喝水', 12.2), ('翻开小书', 17.8),
+        ('竖起拇指', 23.3), ('好奇 · 歪头', 28.6)]
 def shot_at(t):
     for i, s in enumerate(SHOTS):
         if s[0] <= t < s[1]: return i, s
@@ -186,8 +200,9 @@ def vignette():
         VIG = np.clip(1.08 - 0.42 * d ** 2.2, 0.35, 1)[..., None]
     return VIG
 
-ACCENT = [CYAN, CYAN, AMBER, AMBER, AMBER, CYAN, VIOLET, CYAN, CYAN, PINK, PINK, VIOLET, VIOLET, PINK, VIOLET, AMBER, MINT, MINT,
+ACCENT_OLD = [CYAN, CYAN, AMBER, AMBER, AMBER, CYAN, VIOLET, CYAN, CYAN, PINK, PINK, VIOLET, VIOLET, PINK, VIOLET, AMBER, MINT, MINT,
           PERI, PERI, PINK, VIOLET, CYAN, CYAN, CYAN]
+ACCENT = ACCENT_OLD[:7] + [PINK, MINT, AMBER, VIOLET, CYAN, PINK] + ACCENT_OLD[7:]
 
 # ------------------------------------------------------------------ typography
 _tc = {}
@@ -351,6 +366,7 @@ def warp(tex_rgba, quad, mip=True):
 
 def render(fi, ui, taps):
     t = fi / FPS
+    to = t - SHIFT if t >= ACT1 else t  # v1.0.10 timing for the shifted cut
     p, si, tl = pose_at(t)
     accent = ACCENT[si]
     img = bg_base().copy()
@@ -359,14 +375,19 @@ def render(fi, ui, taps):
     add_glow(img, 1500, 950, 700, VIOLET, 0.05)
     quad = project(p)
     c = quad.mean(0)
-    add_glow(img, c[0], c[1], 520 * p[4] + 300, accent, 0.20 + 0.06 * math.exp(-((t % BEAT) / BEAT) * 5) * (1 if 38 <= t < 40 or 54 <= t < 62 or 68 <= t < 84 else 0))
+    add_glow(img, c[0], c[1], 520 * p[4] + 300, accent, 0.20 + 0.06 * math.exp(-((t % BEAT) / BEAT) * 5) * (1 if ACT0 <= t < ACT1 or 38 <= to < 40 or 54 <= to < 62 or 68 <= to < 84 else 0))
     # dust
     for i, (x, y, z, s) in enumerate(DUST):
         xx = (x * W + t * (8 + 20 * z)) % W; yy = (y * H - t * (6 + 14 * z)) % H
         r = 1 + 2.5 * z; a = 0.12 + 0.25 * z * (0.5 + 0.5 * math.sin(t * 1.3 + i))
         cv2.circle(img, (int(xx), int(yy)), int(r), tuple(float(v) for v in (accent * 0.4 + 90) * a), -1, cv2.LINE_AA)
     # device (+ thickness slices + shadow)
-    tex = device_layer(ui.frame(t), t, p, taps, accent)
+    if ACT0 <= t < ACT1:
+        k = min(5, int((t - ACT0) // 2))
+        frame = G['acts'].frame(ACTS[k][1] + (t - ACT0 - 2 * k))
+    else:
+        frame = ui.frame(t)
+    tex = device_layer(frame, t, p, taps, accent)
     # shadow
     sh_quad = quad + np.array([0, 60 * p[4] + 40], np.float32)
     sh_quad = (sh_quad - c) * np.array([1.02, 0.96]) + c
@@ -388,7 +409,8 @@ def render(fi, ui, taps):
     front = warp(tex, quad)
     a = front[..., 3:4] / 255.0
     img = img * (1 - a) + front[..., :3] * a
-    overlays(img, t)
+    if ACT0 <= t < ACT1: act_overlays(img, t)
+    else: overlays(img, to)
     # bloom
     small = cv2.resize(img, (W // 4, H // 4), interpolation=cv2.INTER_AREA)
     bright = np.clip(small - 170, 0, None)
@@ -396,7 +418,7 @@ def render(fi, ui, taps):
     img += cv2.resize(bloom, (W, H)) * 0.45
     # beat punch on drops + cut flash
     cut = min(abs(t - s[0]) for s in SHOTS)
-    if t > 0.1 and cut < 0.12 and any(abs(t - x) < 0.12 for x in (38.0, 68.0, 96.0)):
+    if t > 0.1 and cut < 0.12 and any(abs(t - x) < 0.12 for x in (ACT0, 50.0, 80.0, 108.0)):
         img += 60 * (1 - cut / 0.12)
     img *= vignette()
     g = cv2.resize(GRAIN[fi % len(GRAIN)], (W, H), interpolation=cv2.INTER_NEAREST)[..., None]
@@ -429,11 +451,11 @@ def overlays(img, t):
     scrim(img, t, 24.5, 27.95)
     kinetic_block(img, t, 24.5, 27.95, 140, 760, None, '月亮阴晴圆缺，一天一个样', None, VIOLET, head_size=56)
     sky_tag(img, t)
-    kinetic_block(img, t, 28.15, 31.6, 140, 360, 'VOICE', ['说一声', '“你好 Nabo”'], '离线唤醒 · 实时语音 · 表情随声而动', CYAN, head_size=80)
+    kinetic_block(img, t, 28.15, 31.6, 140, 360, 'VOICE', ['说一声', '“你好 Nabo”'], '离线唤醒 · 实时语音 · 侧耳倾听', CYAN, head_size=80)
     subtitle(img, t, 28.8, 31.5, '你：“你好 Nabo，今天有什么新歌？”')
-    kinetic_block(img, t, 31.85, 32.95, 140, 840, None, '等回复时，看一眼手机', None, CYAN, head_size=52)
-    scrim(img, t, 31.85, 32.95)
-    subtitle(img, t, 33.05, 37.6, 'Nabo：“早上好！今天的 NABO 电台上线啦，现在听吗？”')
+    kinetic_block(img, t, 31.85, 34.7, 140, 840, None, '等回复时，托腮想一想', None, CYAN, head_size=52)
+    scrim(img, t, 31.85, 34.7)
+    subtitle(img, t, 34.9, 37.6, 'Nabo：“早上好！今天的 NABO 电台上线啦，现在听吗？”')
     kinetic_block(img, t, 38.05, 39.95, 140, 360, 'NABO RADIO', ['NABO', '每日音乐电台'], '主播阿南 · 每天 07:30 准时开播', PINK, head_size=86)
     scrim(img, t, 40.2, 51.0); scrim(img, t, 54.2, 57.9); scrim(img, t, 68.1, 71.95)
     kinetic_block(img, t, 40.3, 46.8, 140, 880, None, '原声播客，字幕逐句同步', None, PINK, head_size=60)
@@ -462,18 +484,30 @@ def overlays(img, t):
             blit_text(img, it, 1520 + 163 + (1 - u) * 120, 340 + card.shape[0] + 16, a, 'c')
     if t >= 90.0:
         u = t - 90.0
-        a = clamp(u / 0.6) * clamp((TOTAL - 0.3 - t) / 1.2)
+        a = clamp(u / 0.6) * clamp((OLD_TOTAL - 0.3 - t) / 1.2)
         it = text_img('NABO', 'interb', 150, track=0.18)
         blit_text(img, it, 960, 70, a, 'c', grad=(WHITE, CYAN * 0.6 + WHITE * 0.4), reveal=clamp(u / 0.8))
         it2 = text_img('土皮助手 · 你的桌面 AI 伙伴', 'medium', 40, color=(220, 232, 244))
         blit_text(img, it2, 960, 268, a * ease_out(clamp((u - 0.5) / 0.6)), 'c')
         if u > 4.0:
-            it3 = text_img('M5Stack Tab5  ·  固件 v1.0.10  ·  画面为实机固件界面渲染', 'regular', 24, color=(130, 150, 175))
-            blit_text(img, it3, 960, 1012, clamp((u - 4.0) / 0.5) * clamp((TOTAL - t) / 1.0), 'c')
+            it3 = text_img('M5Stack Tab5  ·  固件 v1.0.11  ·  画面为实机固件界面渲染', 'regular', 24, color=(130, 150, 175))
+            blit_text(img, it3, 960, 1012, clamp((u - 4.0) / 0.5) * clamp((OLD_TOTAL - t) / 1.0), 'c')
+
+def act_overlays(img, t):
+    k = min(5, int((t - ACT0) // 2)); t0 = ACT0 + 2 * k
+    if k == 0:
+        kinetic_block(img, t, ACT0 + 0.05, ACT0 + 1.95, 140, 250, 'NEW IN v1.0.11', ['NABO', '动起来了'], None, PINK, head_size=96)
+    kinetic_block(img, t, t0 + 0.08, t0 + 1.95, 140, 640 if k == 0 else 380, f'ACTION {k + 1:02d} / 14', ACTS[k][0], None,
+                  ACCENT[7 + k], head_size=64 if k == 0 else 84)
+    kinetic_block(img, t, ACT0 + 2.15, ACT1 - 0.05, 140, 700, None, '14 个新动作', ['空闲时自然出现', '说话、放音乐时立刻让位'][0], PINK, head_size=44)
+    if t >= ACT0 + 2.6:
+        it = text_img('说话、放音乐时立刻让位', 'regular', 32, color=tuple(MUTED))
+        blit_text(img, it, 142, 830, clamp((t - ACT0 - 2.6) / 0.5) * clamp((ACT1 - 0.05 - t) / 0.35))
 
 G = {}
 def init(ui_path, film_path):
     G['ui'] = UI(ui_path); G['taps'] = load_taps(film_path)
+    G['acts'] = UI(os.environ.get('ACTS_RGB', '/home/user/hostui/out/acts.rgb'))
 def work(fi):
     return render(fi, G['ui'], G['taps']).tobytes()
 

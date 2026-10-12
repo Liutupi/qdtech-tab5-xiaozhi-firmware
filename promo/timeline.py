@@ -1,11 +1,15 @@
-"""Tab5 UI event script for the v1.0.10 promo (film seconds; 120 BPM, bar = 2 s).
+"""Tab5 UI event script for the v1.0.11 promo (film seconds; 120 BPM, bar = 2 s).
 Writes film.txt (host harness), taps.txt (click sounds) and vo/placements.json (real audio)."""
 import os, sys, json
 OUT, D = sys.argv[1], sys.argv[2]
 ev, taps, vo = [], [], []
-def at(t, c, a=''): ev.append((t, c, a))
-def tap(t, x, y, hold=90): at(t, 'touch', f'{x} {y} {hold}'); taps.append(t)
-def play(t, src, a, b, kind): vo.append((round(t, 3), src, a, b, kind)); return t + (b - a)
+# The v1.0.11 action segment (28-40 s) is rendered separately (acts.txt); everything
+# scripted from 28 s on plays 12 s later in the film.
+ACTS = 12.0
+def S(t): return t + ACTS if t >= 27.99 else t
+def at(t, c, a=''): ev.append((S(t), c, a))
+def tap(t, x, y, hold=90): at(t, 'touch', f'{x} {y} {hold}'); taps.append(S(t))
+def play(t, src, a, b, kind): vo.append((round(S(t), 3), src, a, b, kind)); return t + (b - a)
 def sky(t, time=None, date=None, weather=None):
     if date: at(t, 'setdate', date)
     if time: at(t, 'settime', time)
@@ -15,7 +19,7 @@ def sky(t, time=None, date=None, weather=None):
 at(-6.0, 'preroll'); at(-6.0, 'episodes', f'{D}/episodes.txt'); at(-6.0, 'messages', f'{D}/messages.txt')
 at(-6.0, 'levelfile', f'{OUT}/level.txt'); at(-6.0, 'mdcatalog', f'{D}/md.tsv')
 at(-5.95, 'homecatalog', f'{D}/home.tsv'); at(-5.9, 'inbox', '0')
-at(-5.8, 'fw', '当前版本 v1.0.10 · 已是最新|检查更新|0|0')
+at(-5.8, 'fw', '当前版本 v1.0.11 · 已是最新|检查更新|0|0')
 sky(-5.8, time='06:02:00', weather=0)
 at(-5.8, 'sleep', '1'); at(-5.5, 'dailypage', '3')
 # 0-10 s: dawn; someone walks up -> wake (transition clip) -> greeting (real device voice)
@@ -32,13 +36,13 @@ sky(24.4, time='21:30:00', weather=0)
 for i, d in enumerate(('2026-10-14', '2026-10-18', '2026-10-22', '2026-10-26', '2026-10-30')):
     sky(25.6 + 0.48 * i, date=d)
 sky(28.0, date='2026-10-06', time='08:16:30', weather=0)
-# 28-38 s: voice turn (listening -> phone while waiting -> answer)
+# 28-38 s: voice turn (listening: A16 cups an ear; waiting: A05R1 chin on hand; answer)
 tap(28.0, 904, 590)
 at(28.2, 'status', '连接中...'); at(28.6, 'status', '聆听中...')
 at(31.5, 'chat', 'user|你好 Nabo，今天有什么新歌？')
 at(31.75, 'status', '待命'); at(31.8, 'waiting', '1')
-at(32.95, 'waiting', '0'); at(33.0, 'status', '说话中...'); at(33.0, 'playback', '1')
-at(33.05, 'chat', 'assistant|早上好！今天的 NABO 电台上线啦，现在听吗？')
+at(34.75, 'waiting', '0'); at(34.8, 'status', '说话中...'); at(34.8, 'playback', '1')
+at(34.85, 'chat', 'assistant|早上好！今天的 NABO 电台上线啦，现在听吗？')
 at(37.6, 'playback', '0'); at(37.6, 'status', '待命')
 tap(37.55, 1055, 305); tap(37.85, 331, 227)
 # 40-54 s: NABO 电台, real podcast audio; transcript follows the audio clock
