@@ -1,0 +1,57 @@
+{
+  "release": "v1.0.14",
+  "compiled_source_commit": "f1ef67888ae63c8838e8462fe726de832c7f8879",
+  "variant": "qdtech-tab5-native",
+  "target": "esp32p4",
+  "chip_revision": "1.x (100-199)",
+  "SDK": "ESP-IDF v6.1-dirty",
+  "project_version": "1.0.14",
+  "sdkconfig_sha256": "83df3515c1d20a484fb6b0ac8c8456ac8ce4a7d42e1d6d31953d8ae332e14b55",
+  "main_app": {
+    "file": "qdtech-tab5-v1.0.14-app.bin",
+    "bytes": 12239776,
+    "sha256": "1d80b233bb3841e26e57fd72439e5f0829c94be44d1e1f42cf7070430d3d599e",
+    "partition": "factory",
+    "offset": "0x20000",
+    "capacity_bytes": 12582912,
+    "free_bytes": 343136
+  },
+  "updater": {
+    "version": "1.2.2",
+    "offset": "0xc20000",
+    "unchanged_from": "v1.0.11"
+  },
+  "animations": {
+    "file": "qdtech-tab5-v1.0.14-SD-animations.zip",
+    "device_directory": "/sdcard/tab5/nabo/lively-v1",
+    "unchanged_from": "v1.0.11"
+  },
+  "changes": [
+    "page changes fade through dark using the backlight PWM (no LVGL redraw cost)",
+    "cards and buttons sink on touch and spring back (translate/transform width, no layers)",
+    "home weather strip: CMA condition, temperature, humidity, wind; tap for details",
+    "CMA warnings: strip tinted by grade, 1 Hz icon blink, announced once in the conversation panel",
+    "SD fallback font also backs the CJK 28 px font; first SNTP sync logged"
+  ],
+  "validation": {
+    "canonical_native_build": "passed",
+    "host_tests": 176,
+    "host_tests_result": "passed (1 skipped)",
+    "release_image_checksum_and_digest": "passed",
+    "release_image_chip_revision": "v1.0-v1.99",
+    "release_version_image_flashed_on_device": true,
+    "runtime_observation_seconds": 110,
+    "fresh_panic_assert_count": 0,
+    "device_internal_min_bytes": 14304,
+    "sd_pump_per_10s": "89-106",
+    "sntp_synced_after_s": 40,
+    "device_weather_reading": "CMA 17:35 晴 29.0C 65% 东南风 微风",
+    "warning_path_device_test": "CMA station CSTxF (森林火险橙色预警) rendered as level 3 with no fault, then reverted to YIWau",
+    "pending": [
+      "user feel of page fade and press feel",
+      "weather warning on a real Zhongshan alert",
+      "extended idle soak (one PANIC at 758 s seen on v1.0.13, backtrace not captured)",
+      "extended sleep/wake"
+    ]
+  }
+}
