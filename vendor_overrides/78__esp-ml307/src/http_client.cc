@@ -12,6 +12,9 @@ static const char *TAG = "HttpClient";
 
 HttpClient::HttpClient(NetworkInterface* network, int connect_id) : network_(network), connect_id_(connect_id) {
     event_group_handle_ = xEventGroupCreate();
+    if (!event_group_handle_) {
+        ESP_LOGE(TAG, "Cannot allocate HTTP event group");
+    }
 }
 
 HttpClient::~HttpClient() {
@@ -21,7 +24,9 @@ HttpClient::~HttpClient() {
     if (tcp_) {
         tcp_.reset();
     }
-    vEventGroupDelete(event_group_handle_);
+    if (event_group_handle_) {
+        vEventGroupDelete(event_group_handle_);
+    }
 }
 
 void HttpClient::SetTimeout(int timeout_ms) { timeout_ms_ = timeout_ms; }
@@ -171,6 +176,11 @@ std::string HttpClient::BuildHttpRequest() {
 }
 
 NetworkResult<> HttpClient::Open(const std::string& method, const std::string& url) {
+    // FreeRTOS event groups can fail under internal-memory pressure. Do not
+    // reset, connect or register callbacks with a missing synchronization object.
+    if (!event_group_handle_ || !network_) {
+        return Fail(NetworkError::NotInitialized());
+    }
     const std::string previous_protocol = protocol_;
     const std::string previous_host = host_;
     const int previous_port = port_;
@@ -209,6 +219,10 @@ NetworkResult<> HttpClient::Open(const std::string& method, const std::string& u
             tcp_ = network_->CreateSsl(connect_id_);
         } else {
             tcp_ = network_->CreateTcp(connect_id_);
+        }
+
+        if (!tcp_) {
+            return Fail(NetworkError::NotInitialized());
         }
 
         // 设置 TCP 数据接收回调
@@ -617,6 +631,9 @@ void HttpClient::SetError() {
 }
 
 NetworkResult<int> HttpClient::Read(char* buffer, size_t buffer_size) {
+    if (!event_group_handle_) {
+        return FailValue<int>(NetworkError::NotInitialized());
+    }
     std::unique_lock<std::mutex> read_lock(read_mutex_);
 
     // 如果连接异常断开，返回错误
@@ -728,6 +745,9 @@ NetworkResult<int> HttpClient::Write(const char* buffer, size_t buffer_size) {
 }
 
 NetworkResult<int> HttpClient::GetStatusCode() {
+    if (!event_group_handle_) {
+        return FailValue<int>(NetworkError::NotInitialized());
+    }
     if (!headers_received_) {
         auto bits = xEventGroupWaitBits(event_group_handle_,
                                         EC801E_HTTP_EVENT_HEADERS_RECEIVED | EC801E_HTTP_EVENT_ERROR,

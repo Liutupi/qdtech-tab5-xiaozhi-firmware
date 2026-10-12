@@ -31,6 +31,9 @@ The local change is confined to `include/tcp.h`, `include/web_socket.h`,
   readers and header waiters promptly on disconnect, avoid lost wakeups under
   body backpressure, preserve endpoint checks for keep-alive reuse, and finish
   explicit zero-length responses without waiting for a connection close.
+- Reject HTTP operations when event-group allocation fails, and delete only
+  successfully allocated groups. This prevents a failed request under internal
+  RAM pressure from becoming a FreeRTOS assertion and reboot.
 - Add `WebSocket::Abort()` so the protocol worker can shut down a blocked send
   before waiting for sender tasks to drain.
 

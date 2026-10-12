@@ -2,19 +2,19 @@
 #define CUSTOM_WAKE_WORD_H
 
 #include <esp_attr.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #include <esp_mn_iface.h>
 #include <esp_mn_models.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <model_path.h>
 
+#include <atomic>
+#include <condition_variable>
 #include <deque>
-#include <string>
-#include <vector>
 #include <functional>
 #include <mutex>
-#include <condition_variable>
-#include <atomic>
+#include <string>
+#include <vector>
 
 #include "audio_codec.h"
 #include "wake_word.h"
@@ -27,7 +27,7 @@ public:
 
     bool Initialize(AudioCodec* codec, srmodel_list_t* models_list);
     void Feed(const std::vector<int16_t>& data);
-    void FeedMono(const int16_t* data, size_t samples);
+    void FeedMono(const int16_t* data, size_t samples, bool speech);
     void OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback);
     void Start();
     void Stop();
@@ -46,20 +46,38 @@ private:
     // multinet 相关成员变量
     esp_mn_iface_t* multinet_ = nullptr;
     model_iface_data_t* multinet_model_data_ = nullptr;
-    srmodel_list_t *models_ = nullptr;
+    srmodel_list_t* models_ = nullptr;
     bool owns_models_ = false;
     char* mn_name_ = nullptr;
     std::string language_ = "cn";
     int duration_ = 3000;
     float threshold_ = 0.2;
     std::deque<Command> commands_;
- 
+
     std::function<void(const std::string& wake_word)> wake_word_detected_callback_;
     AudioCodec* codec_ = nullptr;
     std::string last_detected_wake_word_;
     std::atomic<bool> running_ = false;
     std::vector<int16_t> input_buffer_;
     std::mutex input_buffer_mutex_;
+    // Only FeedSamples touches the decoder. Stop requests a reset for that owner.
+    bool reset_pending_ = true;
+    bool session_active_ = false;
+    size_t session_samples_ = 0;
+    size_t silence_samples_ = 0;
+    size_t chunk_samples_ = 0;
+    WakeWordAudioCache recognition_history_;
+    std::vector<int16_t> history_chunk_;
+    uint64_t input_samples_total_ = 0;
+    uint64_t decoded_samples_total_ = 0;
+    uint32_t windows_total_ = 0;
+    int64_t diagnostics_at_us_ = 0;
+
+    static constexpr size_t kSampleRate = 16000;
+    static constexpr size_t kHistorySamples = kSampleRate * 2;
+    static constexpr size_t kVadHistorySamples = kSampleRate / 2;
+    static constexpr size_t kSilenceSamples = kSampleRate * 3 / 4;
+    static constexpr size_t kWindowSamples = kSampleRate * 8;
 
     TaskHandle_t wake_word_encode_task_ = nullptr;
     StaticTask_t* wake_word_encode_task_buffer_ = nullptr;
@@ -69,7 +87,10 @@ private:
     std::mutex wake_word_mutex_;
     std::condition_variable wake_word_cv_;
 
-    void FeedSamples(const int16_t* data, size_t samples, bool mono);
+    void FeedSamples(const int16_t* data, size_t samples, bool mono, bool speech);
+    void ResetDetection();
+    bool BeginDetection();
+    bool DetectBufferedChunk();
     void ParseWakenetModelConfig();
 };
 

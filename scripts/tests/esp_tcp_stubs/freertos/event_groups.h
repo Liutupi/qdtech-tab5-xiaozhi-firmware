@@ -18,8 +18,11 @@ struct FakeEventGroup {
 using EventGroupHandle_t = FakeEventGroup*;
 inline std::atomic_int fake_wait_calls{0};
 inline std::atomic_int fake_deleted_groups{0};
+inline std::atomic_bool fake_fail_event_group_create{false};
 
-inline EventGroupHandle_t xEventGroupCreate() { return new FakeEventGroup; }
+inline EventGroupHandle_t xEventGroupCreate() {
+    return fake_fail_event_group_create ? nullptr : new FakeEventGroup;
+}
 
 inline void vEventGroupDelete(EventGroupHandle_t group) {
     fake_deleted_groups.fetch_add(1);

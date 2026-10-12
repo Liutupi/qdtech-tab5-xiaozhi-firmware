@@ -43,6 +43,9 @@
             "sdkconfig_append": [
                 "CONFIG_BOARD_TYPE_QDTECH_TAB5=y",
                 "CONFIG_QDTECH_TAB5_NATIVE_UI=y",
+                "CONFIG_LV_USE_CLIB_MALLOC=n",
+                "CONFIG_LV_USE_BUILTIN_MALLOC=n",
+                "CONFIG_LV_USE_CUSTOM_MALLOC=y",
                 "CONFIG_ESP_ML307_SSL_RX_STACK_IN_PSRAM=y",
                 "CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY=n",
                 "CONFIG_FATFS_API_ENCODING_UTF_8=y",

@@ -41,6 +41,7 @@ class EspTcpOverrideTest(unittest.TestCase):
             self.assertIn("24 TCP joins, 2 WebSocket, 1 HTTP and 2 TLS lifecycle cases passed", result.stdout)
             self.assertIn("TCP/TLS Interrupt and WANT_WRITE deadline passed", result.stdout)
             self.assertIn("TLS stack allocation failure, retry and cleanup passed", result.stdout)
+            self.assertIn("HTTP allocation failure and missing transport passed", result.stdout)
 
 
 if __name__ == "__main__":

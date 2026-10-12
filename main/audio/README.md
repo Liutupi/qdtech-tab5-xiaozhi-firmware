@@ -19,6 +19,25 @@ that instance, so enabling both no longer creates two AFE pipelines. For custom
 MultiNet wake words, AFE fetch output is passed to `CustomWakeWord`; MultiNet is
 not created on the smaller targets.
 
+Custom MultiNet wake-word recognition is gated by AFE VAD, including builds
+without voice uplink processing. Silence is retained in a fixed 64 KB PSRAM
+history rather than continuously sent through the command decoder. A speech
+segment starts with 500 ms of look-back and ends after 750 ms of VAD silence.
+Long segments are limited to eight seconds of decoder input, with two seconds
+replayed across a forced boundary so a wake phrase can straddle that boundary.
+The input staging buffer stays at one model chunk. Decoder cleanup and audio
+history reset after a stop are performed by the feed owner; application callbacks
+run after releasing its lock. Once per minute, `MultiNet activity` reports actual
+input/decoded durations, window count, internal free heap and task stack margin.
+
+This bounds the use of MultiNet as a custom always-on wake detector. It is a
+mitigation for the Tab5 idle panic decoded in `rnnt_beam_search_with_fst` with
+ESP-SR 2.4.7, not a correction to the closed-source decoder. Long device soaks
+and wake tests under real ambient noise are required; host tests do not exercise
+that library. Related upstream reports describe different decoder crash/leak
+sites: [ESP-SR #225](https://github.com/espressif/esp-sr/issues/225) and
+[#226](https://github.com/espressif/esp-sr/issues/226).
+
 The AFE configuration currently uses `FD_LOW_COST` AEC with
 `AEC_NLP_LEVEL_VERYAGGR`. WebRTC/NSNet noise suppression is intentionally
 disabled because the project does not ship an NSNet model.

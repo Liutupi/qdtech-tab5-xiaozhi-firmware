@@ -36,6 +36,12 @@ v1.0.7 增加 Muse relay 音乐命令通道：NAS 上的网易云 MCP 容器将 
 
 ### HTTPS 接收线程的内存
 
+原生变体使用 `CONFIG_LV_USE_CUSTOM_MALLOC` 和 `tab5_lvgl_memory.cc`，将 LVGL
+对象、样式、文字和图像统一分配到 PSRAM，包括小于 1KB 的分配与缩小后的
+`realloc`。默认 C 库分配策略会把这类小对象放入内部 SRAM；首次打开电台和
+米家中控时会挤占网络同步对象与任务的内存。此分配器不改变其他组件的全局
+`malloc` 策略，不使用内部 RAM 兜底。仍需实机验证页面切换、刷新、音频和动画。
+
 原生变体启用 `CONFIG_ESP_ML307_SSL_RX_STACK_IN_PSRAM`，将每个 TLS 接收线程的 4KB 栈分配到 PSRAM，避免界面运行后内部 SRAM 碎片化导致 Muse 音乐命令轮询无法建立连接。线程控制块仍在内部 RAM。该选项默认关闭，旧桌面和 P4 rev 3+ 变体沿用内部栈。
 
 接收线程结束后由连接管理者使用 `vTaskDeleteWithCaps` 回收，避免线程自行删除时额外申请内部清理栈。HTTP 接收回调只交付数据，协议/MCP 副作用调度到主任务；新增回调不得直接在外部栈上写 Flash。构建成功后仍须实机检查语音点歌、停止/续播、重连、唤醒和长时间运行。

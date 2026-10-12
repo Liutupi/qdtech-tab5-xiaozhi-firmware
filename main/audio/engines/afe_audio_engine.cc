@@ -160,7 +160,7 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
     afe_config->aec_mode = AEC_MODE_FD_LOW_COST;
     afe_config->aec_nlp_level = AEC_NLP_LEVEL_VERYAGGR;
     afe_config->ns_init = false;
-    afe_config->vad_init = kUseAfeForVoiceProcessing;
+    afe_config->vad_init = kUseAfeForVoiceProcessing || wake_detector_ == WakeDetector::kMultiNet;
     afe_config->vad_mode = VAD_MODE_0;
     afe_config->vad_min_noise_ms = 100;
     if (vad_model_name != nullptr) {
@@ -452,7 +452,10 @@ void AfeAudioEngine::ProcessingTask() {
 
 void AfeAudioEngine::HandleWakeWordResult(const afe_fetch_result_t* result) {
     if (wake_detector_ == WakeDetector::kMultiNet) {
-        custom_wake_word_->FeedMono(result->data, result->data_size / sizeof(int16_t));
+        if (result->data_size > 0) {
+            custom_wake_word_->FeedMono(result->data, result->data_size / sizeof(int16_t),
+                                        result->vad_state == VAD_SPEECH);
+        }
         return;
     }
 

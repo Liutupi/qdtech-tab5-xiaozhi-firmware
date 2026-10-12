@@ -132,6 +132,36 @@ static int StartListener(uint16_t& port) {
 
 int main() {
     std::signal(SIGPIPE, SIG_IGN);
+    {
+        TestNetwork network;
+        const int deleted = fake_deleted_groups.load();
+        fake_fail_event_group_create = true;
+        {
+            HttpClient http(&network);
+            http.SetTimeout(1);
+            Check(!http.Open("GET", "http://127.0.0.1/test"), "HTTP opened without event group");
+            const auto status = http.GetStatusCode();
+            Check(!status && status.error().code == NetworkErrc::NotInitialized,
+                  "missing HTTP event group must fail header wait");
+            char byte;
+            Check(!http.Read(&byte, 1), "missing HTTP event group must fail reads");
+            Check(http.GetBodyLength() == 0 && http.ReadAll().empty(),
+                  "failed HTTP initialization must not block body helpers");
+            http.Close();
+        }
+        Check(fake_deleted_groups == deleted, "HTTP deleted a null event group");
+        fake_fail_event_group_create = false;
+        HttpClient no_network(nullptr);
+        Check(!no_network.Open("GET", "http://127.0.0.1/test"), "HTTP opened without network");
+        class MissingTransport : public TestNetwork {
+            std::unique_ptr<Tcp> CreateTcp(int) override { return nullptr; }
+            std::unique_ptr<Tcp> CreateSsl(int) override { return nullptr; }
+        } missing;
+        HttpClient no_transport(&missing);
+        Check(!no_transport.Open("GET", "http://127.0.0.1/test"), "HTTP opened without TCP");
+        Check(!no_transport.Open("GET", "https://127.0.0.1/test"), "HTTP opened without TLS");
+        std::cout << "HTTP allocation failure and missing transport passed" << std::endl;
+    }
     for (int round = 0; round < 24; ++round) {
         uint16_t port;
         const int listener = StartListener(port);
