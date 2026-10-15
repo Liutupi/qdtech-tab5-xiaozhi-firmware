@@ -1,0 +1,75 @@
+{
+  "release": "v1.0.15",
+  "compiled_source_commit": "6ceb8e4dc9d826cbb212571aeaf5f6d8d3f175f8",
+  "variant": "qdtech-tab5-native",
+  "target": "esp32p4",
+  "chip_revision": "1.x (100-199)",
+  "SDK": "ESP-IDF v6.1-dirty",
+  "project_version": "1.0.15",
+  "sdkconfig_sha256": "83df3515c1d20a484fb6b0ac8c8456ac8ce4a7d42e1d6d31953d8ae332e14b55",
+  "main_app": {
+    "file": "qdtech-tab5-v1.0.15-app.bin",
+    "bytes": 12241072,
+    "sha256": "e572259b2381c0c31f38e5a7e337f61b9779bd694c97c8689a1480cd19a9e3c0",
+    "partition": "factory",
+    "offset": "0x20000",
+    "capacity_bytes": 12582912,
+    "free_bytes": 341840
+  },
+  "updater": {
+    "version": "1.2.2",
+    "offset": "0xc20000",
+    "unchanged_from": "v1.0.14"
+  },
+  "animations": {
+    "file": "qdtech-tab5-v1.0.15-SD-animations.zip",
+    "device_directory": "/sdcard/tab5/nabo/lively-v1",
+    "unchanged_from": "v1.0.14"
+  },
+  "unchanged_release_components": [
+    "updater",
+    "SD animations and previews",
+    "bootloader",
+    "partition table",
+    "assets"
+  ],
+  "changes": [
+    "Feed identical mono samples to both ES8388 I2S slots for both-ear output",
+    "Debounce PI4IOE1 headphone detect, disable speaker while a jack is inserted and restore on removal",
+    "Preserve output register bits and retry failed I2C routing updates"
+  ],
+  "validation": {
+    "canonical_native_build": "passed",
+    "host_tests": 178,
+    "host_tests_result": "passed; no skipped tests",
+    "touched_cpp_formatting": "passed",
+    "release_image_checksum_and_digest": "passed",
+    "release_image_chip_revision": "v1.0-v1.99",
+    "release_version_image_flashed_on_device": false,
+    "functional_trial": {
+      "project_version": "1.0.14",
+      "app_sha256": "16089863a2d922e20aab9e6950a2c8215dc6f93346eb724350fe0b4d0c7a8726",
+      "chip_revision": "v1.3",
+      "transmitter": "UGREEN CM403",
+      "user_confirmed_on": "2026-10-15",
+      "user_result": "双耳都有声音，插拔外放正常",
+      "flash_digest_verified": true,
+      "tx_slots": "STEREO, mask 0x3",
+      "headphone_inserted_speaker_off_log": true
+    },
+    "release_payload_matches_functional_trial_outside_app_descriptor_and_footer": true,
+    "known_observations": [
+      "Serial reconnection recorded a USB reset, followed by two SDIO init timeout software restarts; recovered",
+      "No fresh panic signature in the subsequent approximately two-minute observation; this is not a long-term stability claim"
+    ],
+    "other_variants": {
+      "qdtech-tab5": "existing baseline link error: tab5_muse::CachedRelayConnection",
+      "qdtech-tab5-p4x": "same existing baseline link error"
+    },
+    "pending": [
+      "Exact v1.0.15 version image on-device/OTA acceptance",
+      "Extended idle and sleep/wake soak",
+      "Wake/VAD/AEC, speech interruption and reconnect"
+    ]
+  }
+}
