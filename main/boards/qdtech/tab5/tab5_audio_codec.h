@@ -1,12 +1,12 @@
 #ifndef _TAB5_AUDIO_CODEC_H
 #define _TAB5_AUDIO_CODEC_H
 
-#include "audio_codec.h"
-#include <atomic>
 #include <esp_codec_dev.h>
 #include <esp_codec_dev_defaults.h>
+#include <array>
+#include <atomic>
 #include <mutex>
-
+#include "audio_codec.h"
 
 class Tab5AudioCodec : public AudioCodec {
 private:
@@ -22,6 +22,8 @@ private:
     unsigned write_failures_ = 0;
     std::mutex codec_mutex_;
     std::atomic<bool> external_playback_{false};
+    // Callers supply mono PCM; the ES8388 must receive both I2S slots.
+    std::array<int16_t, 512> stereo_output_{};
 
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din);
     void ReopenOutputLocked();

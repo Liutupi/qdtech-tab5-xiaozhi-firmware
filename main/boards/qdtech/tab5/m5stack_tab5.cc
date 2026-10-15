@@ -111,6 +111,27 @@ enum class St712xPanel {
 #define clrbit(x, bit)  ((x) &= ~(1U << (bit)))
 
 class Pi4ioe1 : public I2cDevice {
+private:
+    std::mutex output_mutex_;
+    bool headphone_candidate_ = false;
+    unsigned headphone_samples_ = 0;
+    int headphone_state_ = -1;
+
+    esp_err_t UpdateOutputBitLocked(uint8_t bit, bool enabled) {
+        const uint8_t reg = PI4IO_REG_OUT_SET;
+        uint8_t value = 0;
+        esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, &value, 1, 20);
+        if (err != ESP_OK) {
+            return err;
+        }
+        const uint8_t next = enabled ? value | (1U << bit) : value & ~(1U << bit);
+        if (next == value) {
+            return ESP_OK;
+        }
+        const uint8_t buffer[] = {reg, next};
+        return i2c_master_transmit(i2c_device_, buffer, sizeof(buffer), 20);
+    }
+
 public:
     Pi4ioe1(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {
         WriteReg(PI4IO_REG_CHIP_RESET, 0xFF);
@@ -122,13 +143,45 @@ public:
         WriteReg(PI4IO_REG_PULL_EN, 0b01111111);     // pull up/down enable, 0 disable, 1 enable
         WriteReg(PI4IO_REG_IN_DEF_STA, 0b10000000);  // P1, P7 默认高电平
         WriteReg(PI4IO_REG_INT_MASK, 0b01111111);    // P7 中断使能 0 enable, 1 disable
-        WriteReg(PI4IO_REG_OUT_SET, 0b01110110);     // Output Port Register P1(SPK_EN), P2(EXT5V_EN), P4(LCD_RST), P5(TP_RST), P6(CAM)RST 输出高电平
+        // Leave SPK_EN low until the initial headphone state has been sampled.
+        WriteReg(PI4IO_REG_OUT_SET, 0b01110100);
     }
 
-    uint8_t ReadOutSet() { return ReadReg(PI4IO_REG_OUT_SET); }
-    void WriteOutSet(uint8_t value) { WriteReg(PI4IO_REG_OUT_SET, value); }
+    esp_err_t UpdateOutputBit(uint8_t bit, bool enabled) {
+        std::lock_guard<std::mutex> lock(output_mutex_);
+        return UpdateOutputBitLocked(bit, enabled);
+    }
+
+    esp_err_t PollHeadphone() {
+        std::lock_guard<std::mutex> lock(output_mutex_);
+        const uint8_t reg = PI4IO_REG_IN_STA;
+        uint8_t value = 0;
+        esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, &value, 1, 20);
+        if (err != ESP_OK) {
+            headphone_samples_ = 0;
+            return err;
+        }
+        const bool inserted = (value & (1U << 7)) != 0;
+        if (headphone_samples_ == 0 || inserted != headphone_candidate_) {
+            headphone_candidate_ = inserted;
+            headphone_samples_ = 1;
+        } else if (headphone_samples_ < 3) {
+            ++headphone_samples_;
+        }
+        if (headphone_samples_ < 3 || headphone_state_ == static_cast<int>(inserted)) {
+            return ESP_OK;
+        }
+        err = UpdateOutputBitLocked(1, !inserted);
+        if (err == ESP_OK) {
+            headphone_state_ = inserted;
+            ESP_LOGI(TAG, "Headphone %s; speaker %s (HP_DET=%d)", inserted ? "inserted" : "removed",
+                     inserted ? "off" : "on", inserted);
+        }
+        return err;
+    }
 
     void SetLcdResetAsserted(bool asserted) {
+        std::lock_guard<std::mutex> lock(output_mutex_);
         uint8_t direction = ReadReg(PI4IO_REG_IO_DIR);
         if (asserted) {
             uint8_t output = ReadReg(PI4IO_REG_OUT_SET);
@@ -1724,18 +1777,37 @@ private:
         pi4ioe2_ = new Pi4ioe2(i2c_bus_, 0x44);
     }
 
+    void StartHeadphoneMonitor() {
+        // I2C runs on its own low-priority task, never on the main/audio/timer task.
+        const BaseType_t result = xTaskCreate(
+            [](void* arg) {
+                auto* expander = static_cast<Pi4ioe1*>(arg);
+                unsigned failures = 0;
+                for (;;) {
+                    const esp_err_t err = expander->PollHeadphone();
+                    if (err == ESP_OK) {
+                        failures = 0;
+                    } else if (++failures == 1 || failures % 50 == 0) {
+                        ESP_LOGW(TAG, "Headphone polling failed: %s", esp_err_to_name(err));
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
+            },
+            "tab5_headphone", 2048, pi4ioe1_, 1, nullptr);
+        if (result != pdPASS) {
+            ESP_LOGE(TAG, "Could not start headphone monitor; speaker remains muted");
+        }
+    }
+
     void ResetLcdAndTouch() {
         ESP_LOGI(TAG, "Reset LCD and touch via PI4IOE");
         gpio_reset_pin(TOUCH_INT_GPIO);
 
-        uint8_t value = pi4ioe1_->ReadOutSet();
-        clrbit(value, 5);  // P5 = TP_RST
-        pi4ioe1_->WriteOutSet(value);
+        ESP_ERROR_CHECK(pi4ioe1_->UpdateOutputBit(5, false));  // P5 = TP_RST
         pi4ioe1_->SetLcdResetAsserted(true);
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        setbit(value, 5);
-        pi4ioe1_->WriteOutSet(value);
+        ESP_ERROR_CHECK(pi4ioe1_->UpdateOutputBit(5, true));
         pi4ioe1_->SetLcdResetAsserted(false);
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -2177,6 +2249,7 @@ public:
         SetChargeEn(true);
         SetUsb5vEn(true);
         SetExt5vEn(true);
+        StartHeadphoneMonitor();
         GetBacklight()->RestoreBrightness();
         // USB gamepad starts after Wi-Fi/MQTT: starting it at boot leaves too
         // little internal SRAM for `mqtt_client` task creation.
@@ -2696,13 +2769,7 @@ public:
 
     void SetExt5vEn(bool en) {
         if (pi4ioe1_) {
-            uint8_t value = pi4ioe1_->ReadOutSet();
-            if (en) {
-                setbit(value, 2);  // P2 = EXT5V_EN
-            } else {
-                clrbit(value, 2);
-            }
-            pi4ioe1_->WriteOutSet(value);
+            ESP_ERROR_CHECK_WITHOUT_ABORT(pi4ioe1_->UpdateOutputBit(2, en));  // P2 = EXT5V_EN
         }
     }
 };

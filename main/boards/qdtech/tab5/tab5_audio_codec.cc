@@ -1,8 +1,9 @@
 #include "tab5_audio_codec.h"
 
-#include <esp_log.h>
 #include <driver/i2c.h>
 #include <driver/i2s_tdm.h>
+#include <esp_log.h>
+#include <algorithm>
 
 #define TAG "Tab5AudioCodec"
 
@@ -231,7 +232,7 @@ void Tab5AudioCodec::EnableInput(bool enable) {
 void Tab5AudioCodec::ReopenOutputLocked() {
     esp_codec_dev_sample_info_t fs = {
         .bits_per_sample = 16,
-        .channel = 1,
+        .channel = 2,
         .channel_mask = 0,
         .sample_rate = (uint32_t)output_sample_rate_,
         .mclk_multiple = 0,
@@ -311,9 +312,28 @@ int Tab5AudioCodec::Read(int16_t* dest, int samples) {
 }
 
 int Tab5AudioCodec::Write(const int16_t* data, int samples) {
+    if (!data || samples <= 0) {
+        return 0;
+    }
     std::lock_guard<std::mutex> lock(codec_mutex_);
     if (output_enabled_) {
-        int err = esp_codec_dev_write(output_dev_, (void*)data, samples * sizeof(int16_t));
+        // esp_codec_dev maps mono output to the left slot only on P4. Keep the
+        // application PCM contract mono, but explicitly feed L/R at the boundary.
+        int err = 0;
+        for (int offset = 0; offset < samples;) {
+            const int frames =
+                std::min(samples - offset, static_cast<int>(stereo_output_.size() / 2));
+            for (int i = 0; i < frames; ++i) {
+                stereo_output_[2 * i] = data[offset + i];
+                stereo_output_[2 * i + 1] = data[offset + i];
+            }
+            err = esp_codec_dev_write(output_dev_, stereo_output_.data(),
+                                      frames * 2 * sizeof(int16_t));
+            if (err != 0) {
+                break;
+            }
+            offset += frames;
+        }
         if (err != 0) {
             ++write_failures_;
             if (write_failures_ == 1 || (write_failures_ % 32) == 0) {
