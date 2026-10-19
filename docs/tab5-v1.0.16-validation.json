@@ -1,0 +1,153 @@
+{
+  "release": "v1.0.16",
+  "compiled_source_commit": "3d8a7345fe2ee8c693e6e8520a00f8229d508041",
+  "variant": "qdtech-tab5-native",
+  "target": "esp32p4",
+  "chip_revision": "1.x (100-199)",
+  "SDK": "ESP-IDF v6.1-dirty",
+  "project_version": "1.0.16",
+  "sdkconfig_sha256": "bb677c97ddd72c52e56e5f8ba71cb3dbb8d076d4c1b50425d947c4b6e17fdb38",
+  "main_app": {
+    "file": "qdtech-tab5-v1.0.16-app.bin",
+    "bytes": 12550400,
+    "sha256": "2be76b9b4c2bf6b6d512085f28633cd7f72a25b75892ab150ebef4540ee795aa",
+    "partition": "factory",
+    "offset": "0x20000",
+    "capacity_bytes": 12582912,
+    "free_bytes": 32512
+  },
+  "updater": {
+    "version": "1.2.2",
+    "offset": "0xc20000",
+    "unchanged_from": "v1.0.15"
+  },
+  "animations": {
+    "file": "qdtech-tab5-v1.0.16-SD-animations.zip",
+    "home_directory": "/sdcard/tab5/nabo/lively-v1",
+    "radio_directory": "/sdcard/tab5/nabo/radio-v1",
+    "home_unchanged_from": "v1.0.15",
+    "zip_files": 38,
+    "catalog_stations": 1079,
+    "catalog_sha256": "6aea672aedd345685b695806deabcf9fdd0e7c727a7e9e271c0dc2ca1bfb7b6e",
+    "private_favorites_included": false
+  },
+  "unchanged_release_components": [
+    "updater",
+    "bootloader",
+    "partition table",
+    "assets",
+    "lively-v1 home animations"
+  ],
+  "changes": [
+    "Shared NABO FM/podcast studio, one bar draw object and cooperative screen/sky work",
+    "1079-station on-demand SD catalog and stable station favorites",
+    "Persistent song favorites, three single-line tabs and 48px timed lyrics",
+    "All native radio/podcast/song sources use NAS CBR 96kbps / 44100Hz / stereo MP3",
+    "Independent L/R samples through resampling, linked gain and stereo I2S writes",
+    "Pause/resume retains original source URL, decoded frame boundaries and output clock; Stop invalidates position",
+    "Lyrics/transcript freeze with actual output, including buffering and Range resumes"
+  ],
+  "audio_contract": {
+    "codec": "mp3",
+    "bitrate_total_bps": 96000,
+    "source_sample_rate_hz": 44100,
+    "channels": 2,
+    "codec_output_rate_hz": 24000,
+    "requires_nas_stream96": true,
+    "external_two_speaker_pairing_and_sync": false,
+    "live_resume": "current live stream"
+  },
+  "validation": {
+    "native_build": "passed; canonical qdtech-tab5-native SDK 6.1 configuration plus incremental rebuild of final source",
+    "board_build_source_files_compared": 196,
+    "host_tests": 200,
+    "host_tests_result": "passed; no skipped tests",
+    "relay_local_integration_tests": 4,
+    "relay_local_integration_result": "passed; ffmpeg, per-frame CBR, asymmetric L/R, cache, HEAD/Range, preparing, disconnect and installer backup",
+    "nas_deployment_handoff": "2026-10-20; Grok reported 3 deployed tests passed and online two-minute live, Range, asymmetric L/R and boundary tests",
+    "independent_online_probe": {
+      "podcast": {
+        "head": 200,
+        "range": 206,
+        "range_bytes_equal": true,
+        "range_invalid": 416,
+        "bytes": 8240797,
+        "sample_frames": 836,
+        "rate": 44100,
+        "channels": 2,
+        "bitrate": 96000,
+        "elapsed": 6.96
+      },
+      "music": {
+        "head": 200,
+        "range": 206,
+        "range_bytes_equal": true,
+        "range_invalid": 416,
+        "bytes": 3967269,
+        "sample_frames": 836,
+        "rate": 44100,
+        "channels": 2,
+        "bitrate": 96000,
+        "elapsed": 18.26
+      },
+      "live": {
+        "status": 200,
+        "sample_bytes": 131072,
+        "frames": 418,
+        "elapsed": 4.73,
+        "source_name": "两广之声音乐台"
+      }
+    },
+    "other_variant_builds": {
+      "qdtech-tab5": "passed, ESP-IDF 6.0.2"
+    },
+    "format_and_diff_checks": "passed",
+    "release_image_checksum_and_digest": "passed",
+    "release_image_chip_revision": "v1.0-v1.99",
+    "release_version_image_flashed_on_device": true,
+    "flash_offset": "0x20000",
+    "flash_digest_verified": true,
+    "on_device": {
+      "board_revision": "P4 v1.3",
+      "version": "1.0.16",
+      "SDK": "v6.1-dirty",
+      "observation_seconds_approx": 476.1,
+      "new_panic_assert_watchdog_brownout_signatures": 0,
+      "stream_opens": 7,
+      "range_resumes_observed": [
+        {
+          "station": "10月19日·Nabo早间电台 - NABO 电台",
+          "range_start_bytes": 244193
+        },
+        {
+          "station": "如果云知道 - 许茹芸",
+          "range_start_bytes": 234475
+        },
+        {
+          "station": "月亮 - 陈慧娴",
+          "range_start_bytes": 105326
+        }
+      ],
+      "decoded_channel_values": [
+        2
+      ],
+      "saved_songs_loaded": 5,
+      "radio_catalog_stations_loaded": 1079,
+      "shared_pool_returns": 1,
+      "user_confirmed": "可以，都正常 — podcast/song pause and resume, Stop, switching, lyrics and animation",
+      "external_stereo_listening_tested": false,
+      "voice_interruption_retested": false,
+      "user_authorized_release_with_these_pending": true
+    },
+    "known_observations": [
+      "Steady radio studio windows mostly 75-83 direct frames per roughly 10 seconds; entering/leaving pages can produce shorter windows",
+      "Five 64-frame progress intervals exceeded 1.8 seconds, maximum 2.741 seconds; user reported normal playback. This is not a long-term or weak-network smoothness guarantee",
+      "Custom wake-word mode is configured; AFE wake-model warning and deferred person detector were also present in the previous accepted firmware"
+    ],
+    "pending": [
+      "External headphones/stereo-speaker listening verification: user currently has only built-in speaker",
+      "Physical voice capture/wake/VAD, speech interruption and applicable AEC retest deferred at user request",
+      "Controlled weak-network/reconnect test, extended playback, idle and sleep/wake soak"
+    ]
+  }
+}
