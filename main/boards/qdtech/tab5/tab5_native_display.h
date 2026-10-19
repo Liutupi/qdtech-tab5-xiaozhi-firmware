@@ -2062,6 +2062,10 @@ public:
         lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
 
         apps_ = std::make_unique<Tab5NativeApps>(screen);
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+        // The radio studio presents NABO's frames the same way as the home scene.
+        apps_->SetDirectBlit(&QdtechTab5Display::SdDirectBlit, this);
+#endif
 
         animation_started_ms_ = lv_tick_get();
         next_idle_reaction_ms_ = AnimationTimeMs() + 18000;

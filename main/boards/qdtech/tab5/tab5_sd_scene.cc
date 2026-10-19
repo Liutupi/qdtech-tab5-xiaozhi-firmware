@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <mutex>
 #include <new>
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -118,6 +119,11 @@ lv_obj_t* Art(lv_obj_t* parent, int x, int y) {
 // Singleton reader and PSRAM pool live until reboot. No LVGL object or audio API
 // is accessed here. Disabling/destroying the view only cancels requests; a blocked
 // filesystem call may finish later without touching freed UI memory.
+class Tab5SdSceneReader;
+namespace {
+Tab5SdSceneReader* g_reader = nullptr;  // set once; singleton lifetime
+}  // namespace
+
 class Tab5SdSceneReader {
 public:
     static Tab5SdSceneReader* Create(const uint16_t* background, const uint8_t* overlay) {
@@ -162,6 +168,7 @@ public:
             return nullptr;
         }
         instance = self;
+        g_reader = self;
         ESP_LOGI("NaboSD", "pool=%u align=%u index=%u psram_free=%u internal_free=%u",
                  unsigned((c ? 3 : 2) * kOutBytes + 2 * kSlotBytes), unsigned(kDmaAlign),
                  unsigned(sizeof(nabo_sd::Pack)),
@@ -186,11 +193,38 @@ private:
     Tab5SdSceneReader(uint8_t* a, uint8_t* b, uint8_t* c, uint8_t* staging, uint8_t* encoded,
                       const uint16_t* background, const uint8_t* overlay)
         : mailbox(a, b, kOutBytes, kDmaAlign, c), composer_(background, overlay) {
+        pool_[0] = a;
+        pool_[1] = b;
+        pool_[2] = c;
+        pool_encoded_ = encoded;
+        pool_staging_ = staging;
         mailbox.SetComposer(staging, kSlotBytes, &ComposeThunk, this);
         pack_.SetDecodeBuffer(encoded, kSlotBytes);
     }
 
 public:
+    // While the home scene is hidden its pool is idle; another reader may use it.
+    // Never succeeds while a home frame is being read, waiting or shown.
+    bool Lend(Tab5SdPoolLease* lease, bool log_refusal) {
+        std::lock_guard<std::mutex> lock(lend_mutex_);
+        if (lent_ || mailbox.Requested() || !mailbox.ReclaimIdle()) {
+            if (log_refusal)
+                ESP_LOGW("NaboSD", "pool not lent: lent=%d requested=%u slots=%03u", int(lent_),
+                         unsigned(mailbox.Requested()), mailbox.StateDigits());
+            return false;
+        }
+        lent_ = true;
+        *lease = {
+            {pool_[0], pool_[1], pool_[2]}, kOutBytes, pool_encoded_, kSlotBytes, pool_staging_};
+        ESP_LOGI("NaboSD", "pool lent");
+        return true;
+    }
+    void Return() {
+        std::lock_guard<std::mutex> lock(lend_mutex_);
+        if (lent_)
+            ESP_LOGI("NaboSD", "pool returned");
+        lent_ = false;
+    }
     // New sky: the background now contains it, fx animates it on every composed frame.
     void SetSky(const uint16_t* background, const nabo_sky::SkyFx* fx) {
         composer_.SetBackground(background);
@@ -225,9 +259,11 @@ private:
         uint32_t frames = 0, max_us = 0, busy = 0, sampled = 0;
         nabo_sd::StreamRecovery recovery[nabo_scene::kClipCount];
         for (;;) {
+            // Held across a pump so the pool cannot be lent out mid-frame.
+            std::unique_lock<std::mutex> lend_lock(lend_mutex_);
             // Mounting runs asynchronously after Wi-Fi claims the SDMMC host.
             // Before it completes, keep the static face without poisoning a clip.
-            const uint32_t token = Tab5SdReady() ? mailbox.Requested() : 0;
+            const uint32_t token = Tab5SdReady() && !lent_ ? mailbox.Requested() : 0;
             if (token) {
                 unsigned clip = nabo_sd::SceneMailbox::Clip(token);
                 if (clip < nabo_scene::kClipCount && recovery[clip].Ready(source_.NowMs())) {
@@ -357,9 +393,15 @@ private:
                          unsigned(uxTaskGetStackHighWaterMark(nullptr)), busy);
                 frames = max_us = busy = 0;
             }
+            lend_lock.unlock();
             vTaskDelay(pdMS_TO_TICKS(4));
         }
     }
+    uint8_t* pool_[3] = {};
+    uint8_t* pool_encoded_ = nullptr;
+    uint8_t* pool_staging_ = nullptr;
+    std::mutex lend_mutex_;
+    bool lent_ = false;
     SdSource source_;
     nabo_sd::Pack pack_;
     nabo_sd::WideComposer composer_;
@@ -368,6 +410,17 @@ private:
     uint32_t composed_ = 0, compose_us_ = 0, fx_us_ = 0;
     std::atomic<uint32_t> failures_{0};
 };
+
+bool Tab5SdSceneBorrowPool(Tab5SdPoolLease* lease, bool log_refusal) {
+    if (!g_reader && log_refusal)
+        ESP_LOGW("NaboSD", "pool not lent: home scene reader was never created");
+    return g_reader && lease && g_reader->Lend(lease, log_refusal);
+}
+
+void Tab5SdSceneReturnPool() {
+    if (g_reader)
+        g_reader->Return();
+}
 
 Tab5SdScene::Tab5SdScene(lv_obj_t* parent) {
     // Extend only the sky around the existing 512-pixel animation region. Its

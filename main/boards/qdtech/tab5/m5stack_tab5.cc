@@ -2465,6 +2465,15 @@ public:
                 const char* name = radio_service_.GetStationName(index);
                 return std::string(name ? name : "");
             };
+            actions.station_band = [this](int index) {
+                const char* band = radio_service_.GetStationCategory(index);
+                return std::string(band ? band : "");
+            };
+            actions.current_station = [this] { return radio_service_.GetCurrentIndex(); };
+            actions.station_favorite = [this](int index) {
+                return radio_service_.IsFavorite(index);
+            };
+            actions.toggle_favorite = [this](int index) { radio_service_.ToggleFavorite(index); };
             actions.radio_level = [this] {
                 return native_radio_ready_.load() ? radio_service_.GetAudioLevel() : 0;
             };

@@ -66,6 +66,27 @@ public:
         compose_context_ = context;
     }
     uint32_t Requested() const { return request_.load(std::memory_order_acquire); }
+    // No slot is being read or shown: the buffers may be lent out. A frame that
+    // finished after its request was cancelled is never taken, so drop it here.
+    bool ReclaimIdle() {
+        bool idle = true;
+        for (auto& s : slots_) {
+            if (!s.base)
+                continue;
+            int expected = Ready;
+            if ((s.token >> 8) != epoch_.load())
+                s.state.compare_exchange_strong(expected, Free);
+            idle &= s.state.load(std::memory_order_acquire) == Free;
+        }
+        return idle;
+    }
+    // Slot states as digits (0 free, 1 reading, 2 ready, 3 shown), for logs.
+    unsigned StateDigits() const {
+        unsigned digits = 0;
+        for (const auto& s : slots_)
+            digits = digits * 10 + unsigned(s.base ? s.state.load() : 9);
+        return digits;
+    }
     static unsigned Clip(uint32_t token) { return ((token >> 8) & 31) - 1; }
     Error Pump(Pack& pack, uint32_t token, PumpTrace* trace = nullptr) {
         if (trace)

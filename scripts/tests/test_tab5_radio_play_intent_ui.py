@@ -14,7 +14,7 @@ BOARD = ROOT / "main/boards/qdtech/tab5"
 class RadioPlayIntentUiTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("c++"), "C++ compiler required")
     def test_button_follows_intent_while_wave_follows_playing(self):
-        ui_source = (BOARD / "tab5_native_apps.cc").read_text()
+        ui_source = (BOARD / "tab5_radio_page.cc").read_text()
         renderer = ui_source[
             ui_source.index("void Tab5NativeApps::SetRadioState(") :
             ui_source.index("\n}", ui_source.index("void Tab5NativeApps::SetRadioState(")) + 2
@@ -36,6 +36,12 @@ class RadioPlayIntentUiTests(unittest.TestCase):
 #include <string>
 
 struct lv_obj_t { std::string text; };
+struct lv_color_t { unsigned value; };
+lv_color_t lv_color_hex(unsigned value) { return {value}; }
+void lv_obj_set_style_text_color(lv_obj_t*, lv_color_t, int) {}
+#define LV_SYMBOL_PLAY "播放"
+#define LV_SYMBOL_PAUSE "暂停"
+constexpr unsigned kMuted = 1, kLevel = 2, kAmber = 3, kRed = 4;
 
 class RadioService {
 public:
@@ -45,7 +51,10 @@ public:
 
 class Tab5NativeApps {
 public:
-    struct Actions { std::function<bool()> radio_play_requested; } actions_;
+    struct Actions {
+        std::function<bool()> radio_play_requested;
+        std::function<int()> current_station;
+    } actions_;
     lv_obj_t station_label, state_label, meta_label, play_label;
     lv_obj_t* radio_station_ = &station_label;
     lv_obj_t* radio_state_ = &state_label;
@@ -58,6 +67,13 @@ public:
         template <typename T> void SetEpisodes(const T&) {}
     };
     PodcastStub* podcast_page_ = nullptr;
+    bool dial_dragging_ = false;
+    unsigned tune_due_ms_ = 0;
+    bool radio_song_ = false;
+    uint32_t radio_state_color_ = 0;
+    int radio_current_ = -1;
+    std::string radio_link_state_;
+    void SetMusicLyricLine(const char*) {}
     std::string current_station_name_;
     std::string radio_station_name_;
     bool radio_playing_ = false;
@@ -65,7 +81,7 @@ public:
     static void SetLabelTextIfChanged(lv_obj_t* label, const char* text) {
         if (label && label->text != text) label->text = text;
     }
-    void RefreshStations() { ++station_refreshes; }
+    void FollowCurrentStation() { ++station_refreshes; }
     void SetRadioState(const char* station, const char* state, const char* meta);
 };
 

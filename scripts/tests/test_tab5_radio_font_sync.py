@@ -9,26 +9,28 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "main/boards/qdtech/tab5/tab5_native_apps.cc"
+RADIO = ROOT / "main/boards/qdtech/tab5/tab5_radio_page.cc"
 
 
 class RadioFontSyncTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("c++"), "C++ compiler required")
     def test_radio_and_muse_keep_fonts_alive_through_theme_replacement(self):
         source = SOURCE.read_text()
-        build_radio = source[source.index("void Tab5NativeApps::BuildRadio()"):
-                             source.index("void Tab5NativeApps::DrawWave(")]
+        radio = RADIO.read_text()
+        build_radio = radio[radio.index("void Tab5NativeApps::BuildRadio()"):
+                            radio.index("void Tab5NativeApps::OpenRadio(")]
         self.assertNotIn("SyncRadioTextFont()", build_radio)
         font_selector = source[source.index("std::shared_ptr<LvglFont> MusicTextFontOwner()"):
                                source.index("}  // namespace")]
-        open_radio = source[source.index("void Tab5NativeApps::OpenRadio("):
-                            source.index("void Tab5NativeApps::OpenNes()")]
+        open_radio = radio[radio.index("void Tab5NativeApps::OpenRadio("):
+                           radio.index("void Tab5NativeApps::LoadStationFont()")]
         open_muse = source[source.index("void Tab5NativeApps::OpenMuse()"):
                            source.index("void Tab5NativeApps::OpenSettings()")]
         tick = source[source.index("void Tab5NativeApps::Tick() {"):
                       source.index("    if (IsVisible() && muse_page_", source.index(
                           "void Tab5NativeApps::Tick() {"))] + "}\n"
-        sync = source[source.index("void Tab5NativeApps::SyncRadioTextFont()"):
-                      source.index("void Tab5NativeApps::SetMusicLyricsWindow(")]
+        sync = radio[radio.index("void Tab5NativeApps::SyncRadioTextFont()"):
+                     radio.index("void Tab5NativeApps::SetMusicLyric(")]
         muse_begin = source.index("void Tab5NativeApps::RenderMuseList(")
         muse_prefix = source[muse_begin:source.index(
             "    if (snapshot.messages.empty())", muse_begin)]
@@ -39,7 +41,8 @@ class RadioFontSyncTests(unittest.TestCase):
 #include <initializer_list>
 #include <memory>
 
-struct lv_font_t { int line_height; };
+struct lv_font_t { int line_height; const lv_font_t* fallback = nullptr; };
+unsigned lv_tick_get() { return 0; }
 struct lv_obj_t {
     const lv_font_t* font = nullptr;
     const char* text = "";
@@ -85,8 +88,14 @@ struct LvglThemeManager {
 ''' + font_selector + r'''
 class Tab5NativeApps {
 public:
-    static constexpr int kRows = 6;
     const lv_font_t* music_font_ = nullptr;
+    lv_font_t* station_font_ = nullptr;
+    bool radio_song_ = true;
+    const lv_font_t* lyric_font_ = nullptr;
+    struct StageStub { int opened = 0; void Open(unsigned) { ++opened; } };
+    std::unique_ptr<StageStub> radio_stage_ = std::make_unique<StageStub>();
+    int station_font_loads = 0;
+    void LoadStationFont() { ++station_font_loads; }
     std::shared_ptr<LvglFont> music_font_owner_;
     const lv_font_t* muse_rendered_font_ = nullptr;
     std::shared_ptr<LvglFont> muse_font_owner_;
@@ -97,15 +106,15 @@ public:
     lv_obj_t* muse_entry_label_ = nullptr;
     tab5_muse::Snapshot muse_snapshot_;
     bool muse_list_dirty_ = false;
-    lv_obj_t title, lyric, rows[kRows];
+    lv_obj_t title, lyric;
+    lv_obj_t* radio_prev_name_ = nullptr;
+    lv_obj_t* radio_next_name_ = nullptr;
     lv_obj_t page;
     lv_obj_t* radio_page_ = &page;
     lv_obj_t* radio_station_ = &title;
     lv_obj_t* radio_lyric_previous_ = nullptr;
     lv_obj_t* radio_lyric_ = &lyric;
     lv_obj_t* radio_lyric_next_ = nullptr;
-    lv_obj_t* station_names_[kRows] = {&rows[0], &rows[1], &rows[2],
-                                      &rows[3], &rows[4], &rows[5]};
     int lyric_layouts = 0;
     int wave_updates = 0;
     int shown = 0;
@@ -134,15 +143,13 @@ public:
         }
         if (music_font_ != expected_font || title.font != expected_font ||
             lyric.font != expected_font) __builtin_trap();
-        for (auto& row : rows)
-            if (row.font != expected_font) __builtin_trap();
         radio_visible = true;
         ++shown;
     }
     void RefreshStations() { ++refreshed; }
     static void SetLabelTextIfChanged(lv_obj_t*, const char*) {}
     static void Schedule(std::function<void()> action) { if (action) action(); }
-    void UpdateWave() { ++wave_updates; }
+    void TickRadio() { ++wave_updates; }
     void SetMusicLyricLine(const char* text) {
         if (std::strcmp(text, radio_lyric_->text) != 0) __builtin_trap();
         ++lyric_layouts;
@@ -159,7 +166,6 @@ int main() {
     ui.lyric.text = "醒来看看";
     ui.title.font = &qd_font_cjk_28;
     ui.lyric.font = &qd_font_cjk_28;
-    for (auto& row : ui.rows) row.font = &qd_font_cjk_28;
 
     FakeTheme theme;
     theme.selected = std::make_shared<FakeFont>();
@@ -171,9 +177,7 @@ int main() {
     ui.OpenRadio(false);
     if (ui.shown != 1 || ui.refreshed != 1 || ui.music_font_ != &full_font ||
         ui.title.style_updates != 1 || ui.lyric.style_updates != 1 ||
-        ui.lyric_layouts != 1) return 2;
-    for (auto& row : ui.rows)
-        if (row.font != &full_font || row.style_updates != 1) return 3;
+        ui.radio_stage_->opened != 1 || ui.station_font_loads != 1) return 2;
     std::weak_ptr<FakeFont> old_radio_font = theme.selected;
     theme.selected = std::make_shared<FakeFont>();
     theme.selected->selected = &second_font;
@@ -192,8 +196,17 @@ int main() {
     ui.Tick();
     if (!old_radio_font.expired() || ui.music_font_ != &third_font ||
         ui.title.font != &third_font || ui.title.style_updates != 3 ||
-        ui.lyric.font != &third_font || ui.lyric_layouts != 3 ||
-        ui.wave_updates != 3) return 7;
+        ui.lyric.font != &third_font || ui.wave_updates != 3) return 7;
+    // With the SD station font the title keeps it; only its fallback follows the theme.
+    lv_font_t station{75};
+    ui.station_font_ = &station;
+    ui.title.font = &station;
+    old_radio_font = theme.selected;
+    theme.selected = std::make_shared<FakeFont>();
+    theme.selected->selected = &second_font;
+    ui.SyncRadioTextFont();
+    if (!old_radio_font.expired() || ui.title.font != &station ||
+        station.fallback != &second_font || ui.title.style_updates != 3) return 11;
 
     theme.selected = std::make_shared<FakeFont>();
     theme.selected->selected = &muse_font;

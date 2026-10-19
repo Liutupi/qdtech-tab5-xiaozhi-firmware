@@ -16,6 +16,19 @@ Nabo 原画及生成说明见 [assets/nabo/README.md](../../../../assets/nabo/RE
 
 原生变体将空闲 Wi-Fi 策略设为 BALANCED（MIN_MODEM），以缩短家庭网络向设备推送指令时的唤醒等待；旧桌面变体维持原策略。P4 rev 1.x 实机安静待机各测 100 次、间隔 0.5 秒的局域网 ping：原 MAX_MODEM 中位数 482 ms、P95 919 ms，BALANCED 中位数 144 ms、P95 254 ms，两次均未丢包。该测量只代表该网络中的往返延迟，不等于语音、人物检测或 NAS 点歌的端到端时延；USB 电流与长期稳定性仍需实测。可在 `config.json` 中关闭 `CONFIG_QDTECH_TAB5_IDLE_BALANCED_WIFI_EXPERIMENT` 复原。
 
+## NABO FM 电台页
+
+原生电台页沿用 AI Passport 版 NABO FM 的“午夜琥珀”设计，按 1280 × 720 横屏重新排版：左侧是 Nabo 的直播间（ON AIR 灯、话筒、电平灯、旋钮），右侧是台名、提示或歌词条、波段标签、刻度盘和播放按钮。拖动刻度盘换台，松手吸附到最近的台，停手 0.5 秒才连接；刻度下方的左右邻台、上一台和下一台按钮都在当前波段内移动，到头后进入相邻波段。波段由“收藏”、电台分类和“全部”组成。页面代码在 `tab5_radio_page.cc`，直播间在 `tab5_radio_stage.cc`，Nabo 动作和电台状态的对应关系在 `nabo_radio_mood.h`（打开页面招手，开始播放戴耳机，连接中调台，音乐台点头和跟唱交替，谈话台听，停止摘耳机，连不上说哎呀，没网找信号，播放中每 60–120 秒喝一次咖啡，收藏比心）。
+
+Nabo 的 13 个电台动作、话筒和杯子道具以及 56 px 霞鹜文楷台名字库放在 SD 卡 `/tab5/nabo/radio-v1/`，不占用 flash。动作为 451 × 395 的 NABOSD1 v3 包（LZ4 压缩的 RGB565A8，每帧裁到人物范围），循环动作按 8 fps 播放，一次性手势按约 16 fps 播放。独立任务借用隐藏首页的三个帧缓冲读帧，将人物、墙面和道具预合成为 RGB565 后直接写屏，离开电台页时归还缓冲。26 根音柱由一个控件统一绘制，避免大量脏区触发整屏重画。用 `scripts/prepare_nabo_radio_actions.py` 从 ai-passport-nabo-xiaozhi-radio 仓库 `design/nabo-radio/art/video/batch1/source` 的绿幕视频生成：
+
+```sh
+python3 scripts/prepare_nabo_radio_actions.py --clips <batch1/source> --props <art/props/source> \
+    --font <fonts/LXGWWenKai-Regular.ttf> --catalog <catalog/stations.json> --output <新目录>/tab5/nabo/radio-v1
+```
+
+把输出的 `tab5` 文件夹合并复制到 SD 卡根目录。卡里没有这些文件时，直播间显示说明文字，电台照常可用；没有字库时台名改用普通文字字体。在线固件升级不会安装这些文件。2026-10-19 的实机日志已确认播放时 Nabo 稳定 8 fps、LVGL 平均刷新 7–10 ms；刻度拖动、反复收藏、点歌歌词及返回首页的动画恢复仍需在清理调试日志后的固件上验收。
+
 原生应用页的 ICU 数值工具及 Nabo 语音计算入口见 [ICU_CALCULATORS.md](ICU_CALCULATORS.md)。静脉泵输入中的 50 mL 指配好后的最终总液量；公式、单位与临床使用边界在该文档中列明。
 
 ## 耳机口与外放

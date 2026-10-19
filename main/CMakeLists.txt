@@ -1014,7 +1014,7 @@ if(CONFIG_QDTECH_TAB5_NATIVE_UI)
             ${TAB5_THINK_TORSO_RAW_ASM})
     endif()
 else()
-    list(FILTER BOARD_SOURCES EXCLUDE REGEX "/(tab5_vision_service|tab5_native_apps|tab5_icu_page|tab5_music_lyrics|tab5_muse_inbox|tab5_sd_assets|icu_calculators)\\.cc$")
+    list(FILTER BOARD_SOURCES EXCLUDE REGEX "/(tab5_vision_service|tab5_native_apps|tab5_radio_page|tab5_radio_stage|tab5_icu_page|tab5_music_lyrics|tab5_muse_inbox|tab5_sd_assets|icu_calculators)\\.cc$")
 endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 

@@ -13,6 +13,21 @@
 #include "nabo_wake_matches.h"
 
 class Tab5SdSceneReader;
+
+// The home scene's frame buffers, lent to another SD reader (the radio studio)
+// while the home scene is hidden. Slots may be null; sizes are per buffer.
+struct Tab5SdPoolLease {
+    uint8_t* slots[3];
+    size_t slot_bytes;
+    uint8_t* encoded;
+    size_t encoded_bytes;
+    uint8_t* staging;  // same size as encoded
+};
+// Any task except the home reader. Fails while the home scene uses its pool;
+// the home scene shows its static portrait until the pool is returned.
+bool Tab5SdSceneBorrowPool(Tab5SdPoolLease* lease, bool log_refusal = false);
+void Tab5SdSceneReturnPool();
+
 // All methods are called while the existing display/LVGL lock is held.
 class Tab5SdScene {
 public:

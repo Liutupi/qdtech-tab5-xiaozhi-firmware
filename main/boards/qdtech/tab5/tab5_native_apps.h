@@ -1,10 +1,11 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <functional>
-#include <array>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "lvgl.h"
 #include "tab5_home_page.h"
@@ -13,6 +14,7 @@
 #include "tab5_md_launcher.h"
 #include "tab5_muse_inbox.h"
 #include "tab5_podcast_page.h"
+#include "tab5_radio_stage.h"
 
 class LvglFont;
 
@@ -38,6 +40,11 @@ public:
         std::function<void(int)> radio_select;
         std::function<int()> station_count;
         std::function<std::string(int)> station_name;
+        // Band name of a station (全国, 北京, 音乐, ...); empty when unknown.
+        std::function<std::string(int)> station_band;
+        std::function<int()> current_station;
+        std::function<bool(int)> station_favorite;
+        std::function<void(int)> toggle_favorite;
         std::function<int()> radio_level;
         std::function<tab5_playback::Position(std::string_view)> podcast_position;
         // NES / USB gamepad
@@ -64,6 +71,11 @@ public:
 
     explicit Tab5NativeApps(lv_obj_t* screen);
     void SetActions(Actions actions);
+    // Lets the radio studio write NABO's opaque frames straight to the panel.
+    void SetDirectBlit(Tab5RadioStage::DirectBlit blit, void* context) {
+        if (radio_stage_)
+            radio_stage_->SetDirectBlit(blit, context);
+    }
     void OpenApps();
     void OpenSettings();
     void OpenRadio(bool start_playback = true);
@@ -106,8 +118,6 @@ public:
     void SetPodcastNowPlaying(const char* title, const char* artist, const char* line);
 
 private:
-    static constexpr int kRows = 6;
-    static constexpr int kWaveBars = 40;
     lv_obj_t* root_ = nullptr;
     lv_obj_t* home_page_ = nullptr;
     lv_obj_t* settings_page_ = nullptr;
@@ -183,15 +193,44 @@ private:
     const lv_font_t* music_font_ = nullptr;
     std::shared_ptr<LvglFont> music_font_owner_;
     lv_obj_t* radio_play_label_ = nullptr;
-    lv_obj_t* station_rows_[kRows] = {};
-    lv_obj_t* station_names_[kRows] = {};
-    lv_obj_t* station_page_label_ = nullptr;
-    lv_obj_t* radio_wave_ = nullptr;
-    std::array<uint8_t, kWaveBars> wave_heights_{};
-    std::array<lv_color_t, kWaveBars> wave_colors_{};
+    // NABO FM page: studio on the left, tuner on the right.
+    struct RadioBand {
+        std::string name;
+        std::vector<int> stations;
+    };
+    std::unique_ptr<Tab5RadioStage> radio_stage_;
+    lv_obj_t* radio_eyebrow_ = nullptr;
+    lv_obj_t* radio_fav_ = nullptr;
+    lv_obj_t* radio_strip_tag_ = nullptr;
+    lv_obj_t* radio_bands_ = nullptr;
+    lv_obj_t* radio_dial_ = nullptr;
+    lv_obj_t* radio_prev_name_ = nullptr;
+    lv_obj_t* radio_next_name_ = nullptr;
+    lv_obj_t* radio_count_ = nullptr;
+    lv_font_t* station_font_ = nullptr;  // 56 px WenKai from the SD card, if present
+    std::vector<RadioBand> radio_band_list_;
+    std::vector<uint8_t> radio_favorites_;
+    int radio_band_ = -1;
+    float dial_pos_ = 0;  // station position within the band, fractional while moving
+    float dial_drag_from_ = 0;
+    int dial_drag_dx_ = 0;
+    bool dial_dragging_ = false;
+    bool dial_gliding_ = false;
+    int tune_index_ = -1;  // station to connect once the dial has rested
+    uint32_t tune_due_ms_ = 0;
+    // The service publishes a new station only once it starts; until then it still
+    // reports the old one, which must not pull the dial back.
+    int tune_sent_index_ = -1;
+    uint32_t tune_sent_ms_ = 0;
+    int radio_current_ = -1;
+    bool radio_song_ = false;
+    // Last styles applied, so repeated status updates do not repaint labels.
+    const lv_font_t* lyric_font_ = nullptr;
+    bool lyric_song_style_ = false;
+    uint32_t radio_state_color_ = 0;
+    bool radio_stage_active_ = false;
+    std::string radio_link_state_;
     std::string current_station_name_;
-    unsigned wave_phase_ = 0;
-    int station_page_ = 0;
     bool radio_playing_ = false;
     Actions actions_;
 
@@ -223,7 +262,20 @@ private:
     std::string GameListName(int index) const;
     void SelectGame(int index, bool start);
     void LaunchMdGame();
-    void UpdateWave();
-    static void DrawWave(lv_event_t* event);
+    void TickRadio();
+    void LoadStationFont();
+    void RebuildRadioBands(bool reload_favorites = true);
+    void SelectRadioBand(int band, bool tune);
+    int BandPosition(int station) const;
+    void SetDialPosition(float position);
+    void GlideDial(int target);
+    void StepStation(int delta);
+    void ScheduleTune();
+    void FollowCurrentStation();
+    void RefreshTuner();
+    nabo_radio::Mood RadioMood() const;
+    static void DrawDial(lv_event_t* event);
+    static void DrawHeart(lv_event_t* event);
+    static void OnDial(lv_event_t* event);
     static void DrawNes(lv_event_t* event);
 };
