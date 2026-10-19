@@ -20,10 +20,11 @@ class MuseDnsTests(unittest.TestCase):
         connection = source[source.index('RelayConnection CachedRelayConnection('):
                             source.index('Inbox& Inbox::GetInstance()')]
         radio = (BOARD / 'radio_service.cc').read_text()
-        radio = radio[radio.index('    const auto relay_connection ='):
+        radio = radio[radio.index('#if CONFIG_QDTECH_TAB5_NATIVE_UI\n    const auto relay_connection ='):
                       radio.index('    esp_err_t err = esp_http_client_open(client, 0);')]
         radio = radio.replace('return false;', 'return nullptr;')  # setup harness returns its handle
         harness = r'''
+#define CONFIG_QDTECH_TAB5_NATIVE_UI 1
 #include <algorithm>
 #include <array>
 #include <cassert>

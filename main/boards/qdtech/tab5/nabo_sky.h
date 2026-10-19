@@ -222,7 +222,10 @@ inline void DrawMoon(uint16_t* out, int w, int h, int cx, int cy, int r, int day
 
 // Static layer for the whole panel (kPanelW x kPanelH, RGB565). Clouds are not part of
 // it: they move, so SkyFx draws them into the composed frames.
-inline void RenderSkyBase(Sky sky, uint16_t* out, int w = kPanelW, int h = kPanelH) {
+using Yield = void (*)();
+
+inline void RenderSkyBase(Sky sky, uint16_t* out, int w = kPanelW, int h = kPanelH,
+                          Yield yield = nullptr) {
     const Palette p = PaletteFor(sky);
     const Rgb top = Hex(p.top), bottom = Hex(p.bottom), glow = Hex(p.glow);
     for (int y = 0; y < h; ++y) {
@@ -236,6 +239,8 @@ inline void RenderSkyBase(Sky sky, uint16_t* out, int w = kPanelW, int h = kPane
             }
             out[y * w + x] = To565Dither(c, x, y);
         }
+        if (yield && (y & 7) == 7)
+            yield();
     }
     // Distant skyline.
     Lcg rng{11};
@@ -249,17 +254,22 @@ inline void RenderSkyBase(Sky sky, uint16_t* out, int w = kPanelW, int h = kPane
             for (int xx = std::max(0, x); xx <= std::min(w - 1, x + bw); ++xx)
                 out[y * w + xx] = building;
         x += bw + rng.Range(0, 3);
+        if (yield)
+            yield();
     }
     // Dissolve into the page colour: no visible panel edge. Mixed in full precision and
     // ordered-dithered to RGB565 so the long dark ramp shows no rings.
     const Rgb page = Hex(kPage);
-    for (int y = 0; y < h; ++y)
+    for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             const float f = EdgeFactor(x, y);
             if (f >= 1.0f)
                 continue;
             out[y * w + x] = f <= 0 ? To565(page) : To565Dither(Mix(page, From565(out[y * w + x]), f), x, y);
         }
+        if (yield && (y & 7) == 7)
+            yield();
+    }
     // Sun or moon last, over the dissolve: far away in the corner, clear of the cap.
     if (p.sun) {
         DrawHalo(out, w, h, kOrbX, kOrbY, 70, 0xffe7b0, .45f);
@@ -294,7 +304,7 @@ public:
     // Empty until Reset(); draws nothing. Rebuild in place with Reset(): clouds are
     // ~78 KB, so never construct temporaries on a task stack.
     SkyFx() = default;
-    void Reset(Sky sky) {
+    void Reset(Sky sky, Yield yield = nullptr) {
         sky_ = sky;
         for (int x = 0; x < kPanelW; ++x)
             col_fade_[x] = uint8_t(255 * EdgeFactor(x, kPanelH / 2) * VideoEdgeFactor(x));
@@ -321,7 +331,7 @@ public:
         for (auto& f : flakes_)
             f = {int16_t(rng.Range(0, 512)), int16_t(rng.Range(0, 340)), uint8_t(rng.Range(50, 100)),
                  uint8_t(rng.Range(1, 3))};
-        BuildClouds();
+        BuildClouds(yield);
     }
     Sky sky() const { return sky_; }
 
@@ -450,7 +460,7 @@ private:
     };
 
     // Soft cloud masks: five overlapping feathered ellipses, rendered once per sky.
-    void BuildClouds() {
+    void BuildClouds(Yield yield) {
         // {x, y, size}: two far clouds (small, high, slow) then the three near ones.
         static constexpr float kStart[kClouds][3] = {
             {260, 62, 20}, {470, 98, 25}, {120, 120, 46}, {330, 200, 34}, {40, 250, 30}};
@@ -486,7 +496,7 @@ private:
                 c.row_color[y] = To565(Mix(base, shade, std::max(0.0f, v - 0.45f) * (far ? 0.25f : 0.45f)));
             }
             const float cx = c.w / 2.0f, cy = c.h / 2.0f;
-            for (int y = 0; y < c.h; ++y)
+            for (int y = 0; y < c.h; ++y) {
                 for (int x = 0; x < c.w; ++x) {
                     float cover = 0;
                     for (const auto& p : kParts) {
@@ -496,6 +506,9 @@ private:
                     }
                     masks_[i][y * kCloudW + x] = uint8_t(cover * 255);
                 }
+                if (yield && (y & 7) == 7)
+                    yield();
+            }
         }
     }
 

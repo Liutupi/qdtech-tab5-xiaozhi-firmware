@@ -20,7 +20,6 @@
 #include "board.h"
 #include "cJSON.h"
 #include "desktop_ui.h"
-#include "tab5_sd.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -33,9 +32,13 @@
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "mp3dec.h"
+#include "nabo_radio_catalog.h"
+#include "nvs.h"
+#include "radio_catalog.h"
 #include "settings.h"
 #include "tab5_audio_codec.h"
 #include "tab5_muse_inbox.h"
+#include "tab5_sd.h"
 #include "wifi_manager.h"
 
 #include <esp_timer.h>
@@ -311,19 +314,21 @@ enum class RadioCategory {
     OTHER,       // 其他
 };
 
-struct RadioStation {
-    std::string name;
-    std::string urls[3];
-    std::string codec;
-    int bitrate_kbps;
-    RadioCategory category;
-    bool favorite;
-};
-
-static std::vector<RadioStation> kStations;
-static std::mutex g_catalog_mutex;
 static std::mutex g_favorites_mutex;
 static std::mutex g_favorites_save_mutex;
+// Stable station ids (nabo_radio_catalog.h), sorted, so favorites survive a
+// new catalog on the card. Guarded by g_favorites_mutex.
+static std::vector<uint32_t> g_favorite_ids;
+// Newest first. Guarded by g_favorites_mutex.
+static std::vector<uint32_t> g_recent_ids;
+static constexpr size_t kMaxFavorites = 200;
+static constexpr size_t kMaxRecent = 10;
+// NVS: radio_fav/ids and radio_st/recent are u32 id blobs, radio_st/last_id the
+// last station. They replace the per-index radio_fav/fav_<n> and radio_st/last.
+static constexpr const char* kFavoritesNamespace = "radio_fav";
+static constexpr const char* kStationNamespace = "radio_st";
+// Dial band of the user's own province.
+static constexpr const char* kDefaultHomeRegion = "广东";
 
 static std::string Lower(std::string text) {
     std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
@@ -355,9 +360,66 @@ static RadioCategory ParseCategory(const char* cat) {
     return RadioCategory::OTHER;
 }
 
-static void LoadBuiltinStations() {
-    if (!kStations.empty()) return;
+// Region and program types for a station of the small lists.
+static RadioListEntry MakeListEntry(RadioStationInfo info, RadioCategory category) {
+    RadioListEntry entry;
+    const bool qingting = info.urls[0].find("qtfm.cn/") != std::string::npos ||
+                          info.urls[0].find("qingting.fm/") != std::string::npos;
+    switch (category) {
+        case RadioCategory::NATIONAL:
+            entry.region = qingting ? "全国" : "海外";
+            break;
+        case RadioCategory::BEIJING:
+            entry.region = "北京";
+            break;
+        case RadioCategory::SHANGHAI:
+            entry.region = "上海";
+            break;
+        case RadioCategory::GUANGDONG:
+            entry.region = "广东";
+            break;
+        case RadioCategory::ZHEJIANG:
+            entry.region = "浙江";
+            break;
+        case RadioCategory::JIANGSU:
+            entry.region = "江苏";
+            break;
+        case RadioCategory::SICHUAN:
+            entry.region = "四川";
+            break;
+        case RadioCategory::HUNAN:
+            entry.region = "湖南";
+            break;
+        case RadioCategory::HUBEI:
+            entry.region = "湖北";
+            break;
+        case RadioCategory::SHANDONG:
+            entry.region = "山东";
+            break;
+        default:
+            entry.region = qingting ? "网络台" : "海外";
+            break;
+    }
+    const std::string& name = info.name;
+    auto has = [&name](const char* word) { return name.find(word) != std::string::npos; };
+    uint16_t types = 0;
+    if (category == RadioCategory::MUSIC || has("音乐") || has("Music") || has("Jazz") ||
+        has("Classic") || has("Pop"))
+        types |= RadioCatalog::ListTypeBit("音乐");
+    if (category == RadioCategory::TRAFFIC || has("交通"))
+        types |= RadioCatalog::ListTypeBit("交通");
+    if (has("财经"))
+        types |= RadioCatalog::ListTypeBit("财经");
+    if (has("文体") || has("文艺"))
+        types |= RadioCatalog::ListTypeBit("文艺");
+    if (has("新闻") || has("News") || has("Info") || (has("之声") && !types))
+        types |= RadioCatalog::ListTypeBit("新闻");
+    entry.types = types ? types : RadioCatalog::ListTypeBit("综合");
+    entry.info = std::move(info);
+    return entry;
+}
 
+static std::vector<RadioListEntry> LoadBuiltinStations() {
     struct BuiltinStation {
         const char* name;
         const char* urls[3];
@@ -415,26 +477,27 @@ static void LoadBuiltinStations() {
         {"DLF Nova", {"https://st03.sslstream.dlf.de/dlf/03/128/mp3/stream.mp3", nullptr, nullptr}, "MP3", 128, RadioCategory::MUSIC},
     };
 
+    std::vector<RadioListEntry> stations;
+    stations.reserve(std::size(builtin));
     for (const auto& s : builtin) {
-        RadioStation station;
-        station.name = s.name;
-        station.urls[0] = s.urls[0] ? s.urls[0] : "";
-        station.urls[1] = s.urls[1] ? s.urls[1] : "";
-        station.urls[2] = s.urls[2] ? s.urls[2] : "";
-        station.codec = s.codec;
-        station.bitrate_kbps = s.bitrate_kbps;
-        station.category = s.category;
-        station.favorite = false;
-        kStations.push_back(station);
+        RadioStationInfo info;
+        info.name = s.name;
+        info.urls[0] = s.urls[0] ? s.urls[0] : "";
+        info.urls[1] = s.urls[1] ? s.urls[1] : "";
+        info.urls[2] = s.urls[2] ? s.urls[2] : "";
+        info.codec = s.codec;
+        info.bitrate_kbps = s.bitrate_kbps;
+        stations.push_back(MakeListEntry(std::move(info), s.category));
     }
-    ESP_LOGI(TAG, "Loaded %d builtin stations", static_cast<int>(kStations.size()));
+    ESP_LOGI(TAG, "Loaded %d builtin stations", static_cast<int>(stations.size()));
+    return stations;
 }
 
 static bool EnsureSdCardMounted() {
     return Tab5SdReady();
 }
 
-static bool LoadStationsFromSdCard() {
+static bool LoadStationsFromSdCard(std::vector<RadioListEntry>* out) {
     if (!EnsureSdCardMounted()) {
         ESP_LOGI(TAG, "SD card not available, using built-in stations");
         return false;
@@ -482,8 +545,8 @@ static bool LoadStationsFromSdCard() {
         ESP_LOGW(TAG, "radio.json missing stations array");
         return false;
     }
-    
-    kStations.clear();
+
+    out->clear();
     int count = cJSON_GetArraySize(stations);
     for (int i = 0; i < count && i < 128; ++i) {
         cJSON* item = cJSON_GetArrayItem(stations, i);
@@ -498,78 +561,96 @@ static bool LoadStationsFromSdCard() {
         cJSON* category = cJSON_GetObjectItem(item, "category");
         
         if (!cJSON_IsString(name) || !cJSON_IsString(url)) continue;
-        
-        RadioStation station;
-        station.name = name->valuestring;
-        station.urls[0] = url->valuestring;
-        station.urls[1] = cJSON_IsString(url2) ? url2->valuestring : "";
-        station.urls[2] = cJSON_IsString(url3) ? url3->valuestring : "";
-        station.codec = cJSON_IsString(codec) ? codec->valuestring : "MP3";
-        station.bitrate_kbps = cJSON_IsNumber(bitrate) ? bitrate->valueint : 64;
-        station.category = ParseCategory(cJSON_IsString(category) ? category->valuestring : nullptr);
-        station.favorite = false;
-        kStations.push_back(station);
+
+        RadioStationInfo info;
+        info.name = name->valuestring;
+        info.urls[0] = url->valuestring;
+        info.urls[1] = cJSON_IsString(url2) ? url2->valuestring : "";
+        info.urls[2] = cJSON_IsString(url3) ? url3->valuestring : "";
+        info.codec = cJSON_IsString(codec) ? codec->valuestring : "MP3";
+        info.bitrate_kbps = cJSON_IsNumber(bitrate) ? bitrate->valueint : 64;
+        out->push_back(MakeListEntry(
+            std::move(info),
+            ParseCategory(cJSON_IsString(category) ? category->valuestring : nullptr)));
     }
     
     cJSON_Delete(root);
-    ESP_LOGI(TAG, "Loaded %d stations from radio.json", (int)kStations.size());
-    return !kStations.empty();
+    ESP_LOGI(TAG, "Loaded %d stations from radio.json", (int)out->size());
+    return !out->empty();
 }
 
-static void EnsureStationsLoaded() {
-    static std::once_flag loaded;
-    std::call_once(loaded, [] {
-        if (!LoadStationsFromSdCard())
-            LoadBuiltinStations();
-        // Keep catalog name c_str() pointers stable when Start appends its
-        // reserved music slot.
-        kStations.reserve(kStations.size() + 1);
-    });
+// The pre-catalog station list: /sdcard/radio.json, else the built-in table.
+// Also what old favorites and the old last-station index refer to.
+static std::vector<RadioListEntry> LoadListStations() {
+    std::vector<RadioListEntry> stations;
+    if (!LoadStationsFromSdCard(&stations))
+        stations = LoadBuiltinStations();
+    return stations;
 }
 
-static int StationCount() {
-    EnsureStationsLoaded();
-    return static_cast<int>(kStations.size());
+static RadioCatalog& Catalog() {
+    auto& catalog = RadioCatalog::Instance();
+    catalog.EnsureLoaded(LoadListStations);
+    return catalog;
 }
 
-static const char* CategoryName(RadioCategory category) {
-    switch (category) {
-        case RadioCategory::NATIONAL: return "全国";
-        case RadioCategory::BEIJING: return "北京";
-        case RadioCategory::SHANGHAI: return "上海";
-        case RadioCategory::GUANGDONG: return "广东";
-        case RadioCategory::ZHEJIANG: return "浙江";
-        case RadioCategory::JIANGSU: return "江苏";
-        case RadioCategory::SICHUAN: return "四川";
-        case RadioCategory::HUNAN: return "湖南";
-        case RadioCategory::HUBEI: return "湖北";
-        case RadioCategory::SHANDONG: return "山东";
-        case RadioCategory::MUSIC: return "音乐";
-        case RadioCategory::TRAFFIC: return "交通";
-        case RadioCategory::OTHER: return "其他";
-        default: return "未知";
+static int StationCount() { return Catalog().Count(); }
+
+// Id blobs start with kIdBlobVersion so an empty list is still a stored value.
+static constexpr uint32_t kIdBlobVersion = 1;
+
+static std::vector<uint32_t> ReadIdBlob(const char* ns, const char* key, size_t max_ids) {
+    std::vector<uint32_t> ids;
+    nvs_handle_t handle;
+    if (nvs_open(ns, NVS_READONLY, &handle) != ESP_OK)
+        return ids;
+    size_t bytes = 0;
+    if (nvs_get_blob(handle, key, nullptr, &bytes) == ESP_OK && bytes % sizeof(uint32_t) == 0 &&
+        bytes >= sizeof(uint32_t) && bytes <= (max_ids + 1) * sizeof(uint32_t)) {
+        ids.resize(bytes / sizeof(uint32_t));
+        if (nvs_get_blob(handle, key, ids.data(), &bytes) != ESP_OK || ids[0] != kIdBlobVersion)
+            ids.clear();
+        else
+            ids.erase(ids.begin());
     }
+    nvs_close(handle);
+    return ids;
 }
 
-static std::vector<int> GetStationsByCategory(RadioCategory category, int catalog_count) {
-    std::vector<int> result;
-    for (int i = 0; i < catalog_count; ++i) {
-        if (kStations[i].category == category) {
-            result.push_back(i);
-        }
-    }
-    return result;
+static bool HasNvsKey(const char* ns, const char* key) {
+    nvs_handle_t handle;
+    if (nvs_open(ns, NVS_READONLY, &handle) != ESP_OK)
+        return false;
+    size_t bytes = 0;
+    const bool found = nvs_get_blob(handle, key, nullptr, &bytes) == ESP_OK;
+    nvs_close(handle);
+    return found;
 }
 
-static std::vector<int> GetFavoriteStations(int catalog_count) {
-    std::vector<int> result;
-    std::lock_guard<std::mutex> lock(g_favorites_mutex);
-    for (int i = 0; i < catalog_count; ++i) {
-        if (kStations[i].favorite) {
-            result.push_back(i);
-        }
-    }
-    return result;
+static bool WriteIdBlob(const char* ns, const char* key, const std::vector<uint32_t>& ids) {
+    nvs_handle_t handle;
+    if (nvs_open(ns, NVS_READWRITE, &handle) != ESP_OK)
+        return false;
+    std::vector<uint32_t> blob;
+    blob.reserve(ids.size() + 1);
+    blob.push_back(kIdBlobVersion);
+    blob.insert(blob.end(), ids.begin(), ids.end());
+    esp_err_t err = nvs_set_blob(handle, key, blob.data(), blob.size() * sizeof(uint32_t));
+    if (err == ESP_OK)
+        err = nvs_commit(handle);
+    if (err != ESP_OK)
+        ESP_LOGW(TAG, "NVS %s/%s write failed: %s", ns, key, esp_err_to_name(err));
+    nvs_close(handle);
+    return err == ESP_OK;
+}
+
+// Must run on a task with an internal-RAM stack (NVS writes flash).
+static void SaveLastStation(uint32_t id, const std::vector<uint32_t>& recent) {
+    if (!id)
+        return;
+    Settings settings(kStationNamespace, true);
+    settings.SetInt("last_id", static_cast<int32_t>(id));
+    WriteIdBlob(kStationNamespace, "recent", recent);
 }
 
 static int16_t Clamp16(int value) {
@@ -587,25 +668,17 @@ void RadioService::Start(DesktopUI* desktop_ui, StateCallback callback) {
     if (started_) return;
     desktop_ui_ = desktop_ui;
     state_callback_ = std::move(callback);
-    
-    {
-        std::lock_guard<std::mutex> lock(g_catalog_mutex);
-        catalog_station_count_ = StationCount();
-        // The catalog never reallocates or changes its strings once the task
-        // is running. Only the radio task writes this reserved music slot.
-        custom_station_index_ = catalog_station_count_;
-        RadioStation custom_station;
-        custom_station.name = "Music URL";
-        custom_station.codec = "MP3";
-        custom_station.bitrate_kbps = 0;
-        custom_station.category = RadioCategory::MUSIC;
-        custom_station.favorite = false;
-        kStations.push_back(std::move(custom_station));
-    }
-    const int count = StationCount();
-    ESP_LOGI(TAG, "RadioService::Start: %d catalog stations loaded", catalog_station_count_);
-    
-    last_success_url_.resize(count, -1);
+
+    catalog_station_count_ = StationCount();
+    // The music URL slot sits just past the catalog. Only the radio task
+    // writes its fields (custom_station_).
+    custom_station_index_ = catalog_station_count_;
+    custom_station_.name = "Music URL";
+    ESP_LOGI(TAG, "RadioService::Start: %d catalog stations (%s), index %u B psram",
+             catalog_station_count_, Catalog().FromCard() ? "card" : "built-in",
+             static_cast<unsigned>(Catalog().ResidentBytes()));
+
+    last_success_url_.assign(catalog_station_count_, -1);
     audio_focus_blocked_.store(IsXiaozhiAudioState(), std::memory_order_relaxed);
     queue_ = xQueueCreate(16, sizeof(CommandMessage));
     if (!queue_) {
@@ -613,10 +686,6 @@ void RadioService::Start(DesktopUI* desktop_ui, StateCallback callback) {
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
         started_ = false;
-        {
-            std::lock_guard<std::mutex> lock(g_catalog_mutex);
-            kStations.pop_back();
-        }
         custom_station_index_ = -1;
         catalog_station_count_ = 0;
         SetUi("Unavailable", "No memory");
@@ -657,10 +726,6 @@ void RadioService::Start(DesktopUI* desktop_ui, StateCallback callback) {
         queue_ = nullptr;
         task_handle_ = nullptr;
         started_ = false;
-        {
-            std::lock_guard<std::mutex> lock(g_catalog_mutex);
-            kStations.pop_back();
-        }
         custom_station_index_ = -1;
         catalog_station_count_ = 0;
         ESP_LOGE(TAG, "radio task create failed ret=%ld free_internal=%u largest_internal=%u",
@@ -681,130 +746,232 @@ void RadioService::Start(DesktopUI* desktop_ui, StateCallback callback) {
     SetUi("Ready", "Tap Play");
 }
 
-void RadioService::LoadFavorites() {
-    Settings settings("radio_fav", false);
-    std::lock_guard<std::mutex> lock(g_favorites_mutex);
-    for (int i = 0; i < catalog_station_count_; ++i) {
-        char key[16];
-        snprintf(key, sizeof(key), "fav_%d", i);
-        kStations[i].favorite = settings.GetInt(key, 0) == 1;
+// Ids of the pre-catalog list that old index-based NVS keys refer to.
+static std::vector<uint32_t> LegacyStationIds() {
+    if (!Catalog().FromCard()) {
+        std::vector<uint32_t> ids;
+        for (int i = 0; i < StationCount(); ++i)
+            ids.push_back(Catalog().StableId(i));
+        return ids;
     }
+    std::vector<uint32_t> ids;
+    for (const auto& entry : LoadListStations())
+        ids.push_back(nabo_radio_catalog::StableIdForUrl(entry.info.urls[0].c_str()));
+    return ids;
+}
+
+void RadioService::LoadFavorites() {
+    std::vector<uint32_t> ids = ReadIdBlob(kFavoritesNamespace, "ids", kMaxFavorites);
+    if (!HasNvsKey(kFavoritesNamespace, "ids")) {
+        // One-time migration from radio_fav/fav_<index> (one NVS entry per
+        // station) to a single blob of stable ids.
+        const std::vector<uint32_t> legacy = LegacyStationIds();
+        int old_keys = 0;
+        {
+            Settings settings(kFavoritesNamespace, false);
+            for (int i = 0; i < static_cast<int>(legacy.size()); ++i) {
+                char key[16];
+                snprintf(key, sizeof(key), "fav_%d", i);
+                const int value = settings.GetInt(key, -1);
+                if (value < 0)
+                    continue;
+                ++old_keys;
+                if (value == 1 && legacy[i] && ids.size() < kMaxFavorites)
+                    ids.push_back(legacy[i]);
+            }
+        }
+        std::sort(ids.begin(), ids.end());
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        const bool saved = WriteIdBlob(kFavoritesNamespace, "ids", ids);
+        if (saved && old_keys > 0) {
+            Settings settings(kFavoritesNamespace, true);
+            for (int i = 0; i < static_cast<int>(legacy.size()); ++i) {
+                char key[16];
+                snprintf(key, sizeof(key), "fav_%d", i);
+                settings.EraseKey(key);
+            }
+        }
+        if (saved)
+            ESP_LOGI(TAG, "favorites migrated: %d old keys -> %d ids", old_keys,
+                     static_cast<int>(ids.size()));
+        else
+            ESP_LOGW(TAG, "favorites migration not saved; keeping legacy keys for retry");
+    }
+    std::sort(ids.begin(), ids.end());
+    std::vector<uint32_t> recent = ReadIdBlob(kStationNamespace, "recent", kMaxRecent);
+    std::lock_guard<std::mutex> lock(g_favorites_mutex);
+    g_favorite_ids = std::move(ids);
+    g_recent_ids = std::move(recent);
 }
 
 void RadioService::SaveFavorites() {
     std::lock_guard<std::mutex> save_lock(g_favorites_save_mutex);
-    std::vector<bool> favorites;
+    std::vector<uint32_t> ids;
     {
-        std::lock_guard<std::mutex> catalog_lock(g_catalog_mutex);
         std::lock_guard<std::mutex> lock(g_favorites_mutex);
-        const int count = catalog_station_count_ > 0 ? catalog_station_count_ : StationCount();
-        favorites.reserve(count);
-        for (int i = 0; i < count; ++i)
-            favorites.push_back(kStations[i].favorite);
+        ids = g_favorite_ids;
     }
-    Settings settings("radio_fav", true);
-    for (int i = 0; i < static_cast<int>(favorites.size()); ++i) {
-        char key[16];
-        snprintf(key, sizeof(key), "fav_%d", i);
-        settings.SetInt(key, favorites[i] ? 1 : 0);
-    }
+    WriteIdBlob(kFavoritesNamespace, "ids", ids);
 }
 
 void RadioService::LoadStationIndex() {
-    Settings settings("radio_st", false);
-    int index = settings.GetInt("last", 0);
-    int count = catalog_station_count_;
+    const int count = catalog_station_count_;
+    int index = -1;
+    Settings settings(kStationNamespace, false);
+    const int32_t last_id = settings.GetInt("last_id", 0);
+    if (last_id != 0) {
+        index = Catalog().IndexOfId(static_cast<uint32_t>(last_id));
+    } else {
+        // Older firmware saved an index into the pre-catalog list.
+        const int legacy_index = settings.GetInt("last", -1);
+        const std::vector<uint32_t> legacy = LegacyStationIds();
+        if (legacy_index >= 0 && legacy_index < static_cast<int>(legacy.size()))
+            index = Catalog().IndexOfId(legacy[legacy_index]);
+    }
     if (count > 0 && index >= 0 && index < count) {
         station_index_ = index;
-        ESP_LOGI(TAG, "Loaded last station index=%d name=%s", station_index_, kStations[station_index_].name.c_str());
+        ESP_LOGI(TAG, "Loaded last station index=%d name=%s", station_index_,
+                 CurrentStation().name.c_str());
     } else {
         station_index_ = 0;
-        ESP_LOGW(TAG, "Invalid station index %d, reset to 0 (count=%d)", index, count);
+        ESP_LOGW(TAG, "No saved station in the catalog, starting at 0 (count=%d)", count);
     }
 }
 
 void RadioService::SaveStationIndex() {
+    if (station_index_ < 0 || station_index_ >= catalog_station_count_)
+        return;
+    const uint32_t id = Catalog().StableId(station_index_);
+    if (!id)
+        return;
+    std::vector<uint32_t> recent;
+    {
+        std::lock_guard<std::mutex> lock(g_favorites_mutex);
+        g_recent_ids.erase(std::remove(g_recent_ids.begin(), g_recent_ids.end(), id),
+                           g_recent_ids.end());
+        g_recent_ids.insert(g_recent_ids.begin(), id);
+        if (g_recent_ids.size() > kMaxRecent)
+            g_recent_ids.resize(kMaxRecent);
+        recent = g_recent_ids;
+    }
     if (!task_stack_internal_ && xTaskGetCurrentTaskHandle() == task_handle_) {
-        const int index = station_index_;
-        Application::GetInstance().Schedule([index] {
-            Settings settings("radio_st", true);
-            settings.SetInt("last", index);
-        });
+        Application::GetInstance().Schedule(
+            [id, recent = std::move(recent)] { SaveLastStation(id, recent); });
         return;
     }
-    Settings settings("radio_st", true);
-    settings.SetInt("last", station_index_);
-    ESP_LOGI(TAG, "Saved station index=%d", station_index_);
+    SaveLastStation(id, recent);
+    ESP_LOGI(TAG, "Saved station index=%d id=%u", station_index_, static_cast<unsigned>(id));
 }
 
 void RadioService::ToggleFavorite(int index) {
+    if (index < 0 || index >= GetStationCount())
+        return;
+    const uint32_t id = Catalog().StableId(index);
+    if (!id)
+        return;
     {
-        std::lock_guard<std::mutex> catalog_lock(g_catalog_mutex);
-        const int count = catalog_station_count_ > 0 ? catalog_station_count_ : StationCount();
-        if (index < 0 || index >= count) return;
         std::lock_guard<std::mutex> lock(g_favorites_mutex);
-        kStations[index].favorite = !kStations[index].favorite;
+        auto it = std::lower_bound(g_favorite_ids.begin(), g_favorite_ids.end(), id);
+        if (it != g_favorite_ids.end() && *it == id) {
+            g_favorite_ids.erase(it);
+        } else if (g_favorite_ids.size() < kMaxFavorites) {
+            g_favorite_ids.insert(it, id);
+        } else {
+            ESP_LOGW(TAG, "favorites full (%u)", static_cast<unsigned>(kMaxFavorites));
+            return;
+        }
     }
     SaveFavorites();
 }
 
 bool RadioService::IsFavorite(int index) const {
-    std::lock_guard<std::mutex> catalog_lock(g_catalog_mutex);
-    const int count = catalog_station_count_ > 0 ? catalog_station_count_ : StationCount();
-    if (index >= 0 && index < count) {
-        std::lock_guard<std::mutex> lock(g_favorites_mutex);
-        return kStations[index].favorite;
-    }
-    return false;
+    if (index < 0 || index >= GetStationCount())
+        return false;
+    const uint32_t id = Catalog().StableId(index);
+    std::lock_guard<std::mutex> lock(g_favorites_mutex);
+    return std::binary_search(g_favorite_ids.begin(), g_favorite_ids.end(), id);
 }
 
 std::vector<int> RadioService::GetFavorites() const {
-    std::lock_guard<std::mutex> lock(g_catalog_mutex);
-    const int count = catalog_station_count_ > 0 ? catalog_station_count_ : StationCount();
-    return GetFavoriteStations(count);
+    std::vector<uint32_t> ids;
+    {
+        std::lock_guard<std::mutex> lock(g_favorites_mutex);
+        ids = g_favorite_ids;
+    }
+    std::vector<int> result;
+    const int count = GetStationCount();
+    for (int i = 0; i < count; ++i)
+        if (std::binary_search(ids.begin(), ids.end(), Catalog().StableId(i)))
+            result.push_back(i);
+    return result;
 }
 
 std::vector<int> RadioService::GetByCategory(int category) const {
-    std::lock_guard<std::mutex> lock(g_catalog_mutex);
-    const int count = catalog_station_count_ > 0 ? catalog_station_count_ : StationCount();
-    return GetStationsByCategory(static_cast<RadioCategory>(category), count);
+    std::vector<int> result;
+    const int count = GetStationCount();
+    for (int i = 0; i < count; ++i)
+        if (Catalog().RegionId(i) == category)
+            result.push_back(i);
+    return result;
+}
+
+std::vector<RadioBandStations> RadioService::GetBands() const {
+    std::vector<uint32_t> recent;
+    {
+        std::lock_guard<std::mutex> lock(g_favorites_mutex);
+        recent = g_recent_ids;
+    }
+    Settings settings(kStationNamespace, false);
+    return Catalog().Bands(recent, settings.GetString("home", kDefaultHomeRegion));
 }
 
 int RadioService::GetStationCount() const {
-    std::lock_guard<std::mutex> lock(g_catalog_mutex);
     return catalog_station_count_ > 0 ? catalog_station_count_ : StationCount();
 }
 
-const char* RadioService::GetStationName(int index) const {
-    std::lock_guard<std::mutex> lock(g_catalog_mutex);
-    const int count = catalog_station_count_ > 0 ? catalog_station_count_ : StationCount();
-    if (index >= 0 && index < count) {
-        return kStations[index].name.c_str();
-    }
+std::string RadioService::GetStationName(int index) const {
+    if (index >= 0 && index < GetStationCount())
+        return Catalog().Name(index);
     if (custom_station_index_ >= 0 && index == custom_station_index_) return "Music URL";
     return "";
 }
 
 const char* RadioService::GetStationCategory(int index) const {
-    std::lock_guard<std::mutex> lock(g_catalog_mutex);
-    const int count = catalog_station_count_ > 0 ? catalog_station_count_ : StationCount();
-    if (index >= 0 && index < count) {
-        return CategoryName(kStations[index].category);
-    }
+    if (index >= 0 && index < GetStationCount())
+        return Catalog().HomeBand(index);
     if (custom_station_index_ >= 0 && index == custom_station_index_)
-        return CategoryName(RadioCategory::MUSIC);
+        return "音乐";
+    return "";
+}
+
+std::string RadioService::GetStationLabel(int index) const {
+    if (index >= 0 && index < GetStationCount())
+        return Catalog().Label(index);
     return "";
 }
 
 int RadioService::GetStationCategoryId(int index) const {
-    std::lock_guard<std::mutex> lock(g_catalog_mutex);
-    const int count = catalog_station_count_ > 0 ? catalog_station_count_ : StationCount();
-    if (index >= 0 && index < count) {
-        return static_cast<int>(kStations[index].category);
-    }
-    if (custom_station_index_ >= 0 && index == custom_station_index_)
-        return static_cast<int>(RadioCategory::MUSIC);
+    if (index >= 0 && index < GetStationCount())
+        return Catalog().RegionId(index);
     return -1;
+}
+
+int RadioService::SlotCount() const {
+    return custom_station_index_ >= 0 ? custom_station_index_ + 1 : StationCount();
+}
+
+const RadioStationInfo& RadioService::CurrentStation() {
+    if (custom_station_index_ >= 0 && station_index_ == custom_station_index_)
+        return custom_station_;
+    if (current_index_ != station_index_) {
+        current_index_ = station_index_;
+        if (!Catalog().Load(station_index_, &current_)) {
+            // Card gone or unreadable: retry when asked again.
+            current_ = RadioStationInfo{};
+            current_index_ = -1;
+        }
+    }
+    return current_;
 }
 
 void RadioService::SelectStationIndex(int index, int category_filter) {
@@ -1021,21 +1188,11 @@ std::string RadioService::GetMusicStatusJson() const {
 }
 
 std::string RadioService::SelectStation(const std::string& station) {
-    std::string needle = Lower(station);
-    int selected_index = -1;
+    // Name or pinyin initials; on the card this reads the string pool once.
     std::string selected;
-    {
-        std::lock_guard<std::mutex> lock(g_catalog_mutex);
-        const int count = catalog_station_count_ > 0 ? catalog_station_count_ : StationCount();
-        for (int i = 0; i < count; ++i) {
-            if (Lower(kStations[i].name).find(needle) != std::string::npos) {
-                selected_index = i;
-                selected = kStations[i].name;
-                break;
-            }
-        }
-    }
-    if (selected_index < 0) return "Radio station not found.";
+    const int selected_index = Catalog().Find(station, &selected);
+    if (selected_index < 0 || selected_index >= GetStationCount())
+        return "Radio station not found.";
     // MCP selection historically cycled the full catalog afterwards.
     SelectStationIndex(selected_index, -1);
     return std::string("Radio station selected: ") + selected;
@@ -1147,8 +1304,9 @@ void RadioService::SetExternalAudioActiveSerialized(bool active) {
 }
 
 void RadioService::PublishCurrentStation() {
-    if (station_index_ < 0 || station_index_ >= StationCount()) return;
-    const auto& station = kStations[station_index_];
+    if (station_index_ < 0 || station_index_ >= SlotCount())
+        return;
+    const auto& station = CurrentStation();
     {
         std::lock_guard<std::mutex> lock(status_mutex_);
         published_station_name_ = station.name;
@@ -1276,7 +1434,7 @@ void RadioService::Task() {
                 ++reconnect_attempt_;
                 int delay_ms = std::min(4000, 800 + reconnect_attempt_ * 800);
                 ESP_LOGW(TAG, "music url reconnect scheduled title=%s attempt=%d delay=%dms",
-                         kStations[station_index_].name.c_str(), reconnect_attempt_, delay_ms);
+                         CurrentStation().name.c_str(), reconnect_attempt_, delay_ms);
                 SetUi("Reconnecting", "Music network retry");
                 WaitForRetry(delay_ms, generation);
                 continue;
@@ -1291,7 +1449,7 @@ void RadioService::Task() {
             reconnect_attempt_++;
             int delay_ms = std::min(5000, 500 + reconnect_attempt_ * 500);
             ESP_LOGW(TAG, "radio reconnect scheduled station=%s attempt=%d delay=%dms",
-                     kStations[station_index_].name.c_str(), reconnect_attempt_, delay_ms);
+                     CurrentStation().name.c_str(), reconnect_attempt_, delay_ms);
             if (reconnect_attempt_ >= 5) {
                 SetUi("Error", "Multiple failures");
             } else {
@@ -1321,7 +1479,7 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
                  static_cast<int>(command));
         return;
     }
-    const int count = StationCount();
+    const int count = SlotCount();
     if (count <= 0) {
         ESP_LOGW(TAG, "radio no stations available");
         return;
@@ -1354,14 +1512,16 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
                 release_external = true;
                 if (playing_custom_url_) {
                     playing_custom_url_ = false;
-                    if (last_radio_station_index_ >= 0 && last_radio_station_index_ < StationCount()) {
+                    if (last_radio_station_index_ >= 0 &&
+                        last_radio_station_index_ < catalog_station_count_) {
                         station_index_ = last_radio_station_index_;
                     }
                 }
             }
             ui_state = playing ? "Connecting" : "Paused";
             ui_detail = playing ? "Opening stream" : "Stopped";
-            ESP_LOGI(TAG, "radio %s station=%s", playing ? "play requested" : "paused", kStations[station_index_].name.c_str());
+            ESP_LOGI(TAG, "radio %s station=%s", playing ? "play requested" : "paused",
+                     CurrentStation().name.c_str());
             break;
         }
         case Command::PAUSE:
@@ -1380,7 +1540,8 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
             reconnect_attempt_ = 0;
             if (playing_custom_url_) {
                 playing_custom_url_ = false;
-                if (last_radio_station_index_ >= 0 && last_radio_station_index_ < StationCount()) {
+                if (last_radio_station_index_ >= 0 &&
+                    last_radio_station_index_ < catalog_station_count_) {
                     station_index_ = last_radio_station_index_;
                 }
             }
@@ -1415,7 +1576,7 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
             reconnect_attempt_ = 0;
             ui_state = "Connecting";
             ui_detail = "Next station";
-            ESP_LOGI(TAG, "radio next station=%s", kStations[station_index_].name.c_str());
+            ESP_LOGI(TAG, "radio next station=%s", CurrentStation().name.c_str());
             break;
         }
         case Command::PREV: {
@@ -1429,7 +1590,8 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
             music_playback_state_.store(0, std::memory_order_relaxed);
             if (playing_custom_url_) {
                 playing_custom_url_ = false;
-                if (last_radio_station_index_ >= 0 && last_radio_station_index_ < StationCount()) {
+                if (last_radio_station_index_ >= 0 &&
+                    last_radio_station_index_ < catalog_station_count_) {
                     station_index_ = last_radio_station_index_;
                 }
             }
@@ -1440,7 +1602,7 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
             reconnect_attempt_ = 0;
             ui_state = "Connecting";
             ui_detail = "Previous station";
-            ESP_LOGI(TAG, "radio previous station=%s", kStations[station_index_].name.c_str());
+            ESP_LOGI(TAG, "radio previous station=%s", CurrentStation().name.c_str());
             break;
         }
         case Command::SELECT_STATION: {
@@ -1471,7 +1633,7 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
             ui_state = "Connecting";
             ui_detail = "Selected from directory";
             ESP_LOGI(TAG, "radio directory selected station=%s category=%d",
-                     kStations[station_index_].name.c_str(), active_category_filter_);
+                     CurrentStation().name.c_str(), active_category_filter_);
             break;
         }
         case Command::FOCUS_CHANGED:
@@ -1482,7 +1644,8 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
             } else if (play_requested_) {
                 ui_state = "Connecting";
                 ui_detail = "Audio focus restored";
-                ESP_LOGI(TAG, "radio audio focus restored, resume station=%s", kStations[station_index_].name.c_str());
+                ESP_LOGI(TAG, "radio audio focus restored, resume station=%s",
+                         CurrentStation().name.c_str());
             }
             break;
         case Command::PLAY_CUSTOM_URL: {
@@ -1498,7 +1661,7 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
             if (!playing_custom_url_ && station_index_ >= 0 &&
                 station_index_ < catalog_station_count_)
                 last_radio_station_index_ = station_index_;
-            auto& station = kStations[custom_station_index_];
+            auto& station = custom_station_;
             station.name = std::move(name);
             station.urls[0] = std::move(url);
             station.urls[1].clear();
@@ -1516,7 +1679,7 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
             replacement_pending_.store(false, std::memory_order_release);
             ui_state = "Connecting";
             ui_detail = "Opening music URL";
-            ESP_LOGI(TAG, "music url play requested title=%s", kStations[station_index_].name.c_str());
+            ESP_LOGI(TAG, "music url play requested title=%s", CurrentStation().name.c_str());
             break;
         }
     }
@@ -1533,7 +1696,7 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
 }
 
 void RadioService::PlayCurrentStation(uint32_t stream_generation) {
-    const int count = StationCount();
+    const int count = SlotCount();
     if (count <= 0 || station_index_ < 0 || station_index_ >= count) {
         SetUi("Error", "No station");
         return;
@@ -1543,7 +1706,7 @@ void RadioService::PlayCurrentStation(uint32_t stream_generation) {
     // reconfigured (mic on/TX off) between attempts.
     SetExternalAudioActiveSerialized(true);
 
-    const auto station_urls = kStations[station_index_].urls;
+    const auto station_urls = CurrentStation().urls;
     bool tried_any = false;
     int attempted_sources = 0;
     int permanent_failures = 0;
@@ -1588,14 +1751,15 @@ void RadioService::PlayCurrentStation(uint32_t stream_generation) {
     if (stream_generation != stream_generation_.load(std::memory_order_relaxed)) return;
     if (!playing_custom_url_ && play_requested_ && attempted_sources > 0 &&
         permanent_failures == attempted_sources) {
-        const std::string failed_station = kStations[station_index_].name;
+        const std::string failed_station = CurrentStation().name;
         NextStation(1);
         PublishCurrentStation();
         SaveStationIndex();
         skip_reconnect_once_ = true;
         SetUi("Connecting", "Skipped unavailable station");
-        ESP_LOGW(TAG, "radio station permanently unavailable; skipped station=%s next=%s sources=%d",
-                 failed_station.c_str(), kStations[station_index_].name.c_str(), attempted_sources);
+        ESP_LOGW(TAG,
+                 "radio station permanently unavailable; skipped station=%s next=%s sources=%d",
+                 failed_station.c_str(), CurrentStation().name.c_str(), attempted_sources);
         return;
     }
     if (play_requested_ && !stop_requested_) {
@@ -1613,7 +1777,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         SetUi("Reconnecting", "Network cleanup pending");
         return false;
     }
-    const std::string station_name = kStations[station_index_].name;
+    const std::string station_name = CurrentStation().name;
     const int64_t t_start_us = esp_timer_get_time();
     SetUi("Connecting", url_index == 0 ? "Opening stream" : "Fallback source");
     ResetAudioLeveler();
@@ -1623,7 +1787,11 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         custom_url_fatal_error_ = false;
     }
 
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
     const auto relay_connection = tab5_muse::CachedRelayConnection(url);
+#else
+    const tab5_muse::RelayConnection relay_connection{url, {}};
+#endif
     esp_http_client_config_t config = {};
     config.url = relay_connection.url.c_str();
     if (!relay_connection.server_name.empty()) {
@@ -2048,7 +2216,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
                  stream_generation);
         if (decoded_frames == 0) {
             if (station_index_ >= 0 && station_index_ < static_cast<int>(last_success_url_.size())) {
-                last_success_url_[station_index_] = url_index;
+                last_success_url_[station_index_] = static_cast<int8_t>(url_index);
             }
             if (!playing_custom_url_) {
                 reconnect_attempt_ = 0;
@@ -2168,8 +2336,7 @@ int RadioService::AdjacentCatalogIndex(int from, int delta, int category_filter)
     int candidate = from;
     for (int attempt = 0; attempt < count; ++attempt) {
         candidate = (candidate + delta + count) % count;
-        if (category_filter < 0 ||
-            static_cast<int>(kStations[candidate].category) == category_filter)
+        if (category_filter < 0 || Catalog().RegionId(candidate) == category_filter)
             return candidate;
     }
     return from;
@@ -2190,7 +2357,7 @@ void RadioService::NextStation(int delta) {
         bool found = false;
         for (int attempt = 0; attempt < count; ++attempt) {
             candidate = (candidate + delta + count) % count;
-            if (static_cast<int>(kStations[candidate].category) == active_category_filter_) {
+            if (Catalog().RegionId(candidate) == active_category_filter_) {
                 station_index_ = candidate;
                 found = true;
                 break;
@@ -2203,7 +2370,7 @@ void RadioService::NextStation(int delta) {
     } else {
         station_index_ = (station_index_ + delta + count) % count;
     }
-    ESP_LOGI(TAG, "NextStation: new index=%d count=%d name=%s", station_index_, count, kStations[station_index_].name.c_str());
+    ESP_LOGI(TAG, "NextStation: new index=%d count=%d", station_index_, count);
 }
 
 bool RadioService::FinishCustomUrlIfCurrent(uint32_t stream_generation, bool completed,
@@ -2230,16 +2397,23 @@ bool RadioService::FinishCustomUrlIfCurrent(uint32_t stream_generation, bool com
 
 void RadioService::SetUi(const char* state, const char* detail) {
     if (!desktop_ui_ && !state_callback_) return;
-    const auto& station = kStations[station_index_];
+    // Every station change publishes before it reports, so the published
+    // copy names the station this state belongs to.
+    char name[96];
     char meta[96];
-    snprintf(meta, sizeof(meta), "%s %d kbps  %s", station.codec.c_str(), station.bitrate_kbps, detail ? detail : "");
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        snprintf(name, sizeof(name), "%s", published_station_name_.c_str());
+        snprintf(meta, sizeof(meta), "%s %d kbps  %s", published_station_codec_.c_str(),
+                 published_station_bitrate_, detail ? detail : "");
+    }
     if (state_callback_) {
-        state_callback_(station.name.c_str(), state, meta);
+        state_callback_(name, state, meta);
         return;
     }
 #if !CONFIG_QDTECH_TAB5_NATIVE_UI
     if (lvgl_port_lock(100)) {
-        desktop_ui_->SetRadioState(station.name.c_str(), state, meta);
+        desktop_ui_->SetRadioState(name, state, meta);
         lvgl_port_unlock();
     }
 #endif

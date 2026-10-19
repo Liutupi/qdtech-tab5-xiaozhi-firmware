@@ -18,7 +18,7 @@ Nabo 原画及生成说明见 [assets/nabo/README.md](../../../../assets/nabo/RE
 
 ## NABO FM 电台页
 
-原生电台页沿用 AI Passport 版 NABO FM 的“午夜琥珀”设计，按 1280 × 720 横屏重新排版：左侧是 Nabo 的直播间（ON AIR 灯、话筒、电平灯、旋钮），右侧是台名、提示或歌词条、波段标签、刻度盘和播放按钮。拖动刻度盘换台，松手吸附到最近的台，停手 0.5 秒才连接；刻度下方的左右邻台、上一台和下一台按钮都在当前波段内移动，到头后进入相邻波段。波段由“收藏”、电台分类和“全部”组成。页面代码在 `tab5_radio_page.cc`，直播间在 `tab5_radio_stage.cc`，Nabo 动作和电台状态的对应关系在 `nabo_radio_mood.h`（打开页面招手，开始播放戴耳机，连接中调台，音乐台点头和跟唱交替，谈话台听，停止摘耳机，连不上说哎呀，没网找信号，播放中每 60–120 秒喝一次咖啡，收藏比心）。
+原生电台页沿用 AI Passport 版 NABO FM 的“午夜琥珀”设计，按 1280 × 720 横屏重新排版：左侧是 Nabo 的直播间（ON AIR 灯、话筒、电平灯、旋钮），右侧是台名、提示或歌词条、波段标签、刻度盘和播放按钮。拖动刻度盘换台，松手吸附到最近的台，停手 0.5 秒才连接；刻度下方的左右邻台、上一台和下一台按钮都在当前波段内移动，到头后进入相邻波段。波段见下文“电台表”。页面代码在 `tab5_radio_page.cc`，直播间在 `tab5_radio_stage.cc`，Nabo 动作和电台状态的对应关系在 `nabo_radio_mood.h`（打开页面招手，开始播放戴耳机，连接中调台，音乐台点头和跟唱交替，谈话台听，停止摘耳机，连不上说哎呀，没网找信号，播放中每 60–120 秒喝一次咖啡，收藏比心）。
 
 Nabo 的 13 个电台动作、话筒和杯子道具以及 56 px 霞鹜文楷台名字库放在 SD 卡 `/tab5/nabo/radio-v1/`，不占用 flash。动作为 451 × 395 的 NABOSD1 v3 包（LZ4 压缩的 RGB565A8，每帧裁到人物范围），循环动作按 8 fps 播放，一次性手势按约 16 fps 播放。独立任务借用隐藏首页的三个帧缓冲读帧，将人物、墙面和道具预合成为 RGB565 后直接写屏，离开电台页时归还缓冲。26 根音柱由一个控件统一绘制，避免大量脏区触发整屏重画。用 `scripts/prepare_nabo_radio_actions.py` 从 ai-passport-nabo-xiaozhi-radio 仓库 `design/nabo-radio/art/video/batch1/source` 的绿幕视频生成：
 
@@ -27,7 +27,21 @@ python3 scripts/prepare_nabo_radio_actions.py --clips <batch1/source> --props <a
     --font <fonts/LXGWWenKai-Regular.ttf> --catalog <catalog/stations.json> --output <新目录>/tab5/nabo/radio-v1
 ```
 
-把输出的 `tab5` 文件夹合并复制到 SD 卡根目录。卡里没有这些文件时，直播间显示说明文字，电台照常可用；没有字库时台名改用普通文字字体。在线固件升级不会安装这些文件。2026-10-19 的实机日志已确认播放时 Nabo 稳定 8 fps、LVGL 平均刷新 7–10 ms；刻度拖动、反复收藏、点歌歌词及返回首页的动画恢复仍需在清理调试日志后的固件上验收。
+把输出的 `tab5` 文件夹合并复制到 SD 卡根目录。卡里没有这些文件时，直播间显示说明文字，电台照常可用；没有字库时台名改用普通文字字体。在线固件升级不会安装这些文件。2026-10-19 的实机日志已确认播放时 Nabo 接近 8 fps；用户确认动作、刻度拖动、波段、反复收藏、点歌歌词及返回首页动画均正常。直写屏即使在 DMA 立即完成时也至少让出 5 ms，后台天空和云层生成也按行分批让出 CPU，保留空闲任务运行机会；分批计算不改变画面像素。
+
+### 电台表（SD 卡）
+
+AI Passport 版的电台表 `design/nabo-radio/catalog/stations.json` 有 1,105 台。Tab5 只解 MP3，所以去掉 AAC 台、`.aac` 地址和只能在浏览器里播的 `health: "cors"` 台，剩 1,079 台。用下面的脚本转成约 97 KB 的二进制表，放到 SD 卡 `/tab5/nabo/radio-v1/catalog.bin`：
+
+```sh
+python3 scripts/prepare_nabo_radio_catalog.py <catalog/stations.json> --output <新目录>/catalog.bin
+```
+
+格式见 `nabo_radio_catalog.h`。开机只把头部、地区和类型表以及每台 16 字节的索引（共约 18 KB）一次读进 PSRAM；台名和地址在用到时从卡里读，最近 16 个台名有缓存。语音点台按台名或拼音首字母（如 `hbjtgb`）顺序扫一遍卡里的字符串区。卡里没有这个文件或校验失败时，退回 `/sdcard/radio.json`，再退回内置的 37 台。为了让大字号台名覆盖新台，生成字库时把同一个 `stations.json` 传给 `--catalog`；刻度下方的邻台名用 28 px 字体，其中 47 个台名有生僻字缺字。
+
+波段依次是：收藏、最近（最近播放的 10 台）、本地（默认广东，NVS `radio_st/home` 可改）、新闻、音乐、交通、文艺、各省（按台数多的省份在前）、港澳·海外、全部。收藏和上次收听的台按稳定的台号保存（蜻蜓台用蜻蜓 ID，其余用地址哈希），换电台表后仍然对得上：收藏是 NVS `radio_fav/ids` 一条 blob，上次的台是 `radio_st/last_id`，最近列表是 `radio_st/recent`。旧固件按序号保存的 `radio_fav/fav_<n>` 和 `radio_st/last` 会在第一次启动时换算成台号；只有新收藏写入并提交成功后才删除旧收藏键，失败时保留旧键以便重试。新台表中没有的旧台号继续保存在收藏 blob 中，但该台暂时不会出现在当前波段。
+
+2026-10-19 已在 P4 rev 1.3 上确认加载 1,079 台、35 个地区，常驻台表约 20 KB，37 个旧收藏记录迁移为 3 个收藏台。用户确认各波段、拖动换台和旧收藏正常，新增收藏重启后仍保留。SD 卡安装时对原有 17 个动作、道具和字库文件逐个校验，内容未变。
 
 原生应用页的 ICU 数值工具及 Nabo 语音计算入口见 [ICU_CALCULATORS.md](ICU_CALCULATORS.md)。静脉泵输入中的 50 mL 指配好后的最终总液量；公式、单位与临床使用边界在该文档中列明。
 

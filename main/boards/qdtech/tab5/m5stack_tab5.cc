@@ -941,7 +941,7 @@ private:
         native_radio_ready_.store(radio_service_.IsStarted());
         if (native_radio_ready_.load()) {
             native_display->PostRadioState(
-                radio_service_.GetStationName(radio_service_.GetCurrentIndex()), "Ready",
+                radio_service_.GetStationName(radio_service_.GetCurrentIndex()).c_str(), "Ready",
                 "Tap Play");
         }
     }
@@ -960,7 +960,8 @@ private:
                     });
         mcp.AddTool("self.radio.play",
                     "When the user asks to listen to radio or broadcast, start internet radio and "
-                    "show the radio screen. Optionally choose a station by name.",
+                    "show the radio screen. Optionally choose a station by name (about 1,000 "
+                    "Chinese stations, e.g. 河北交通广播) or its pinyin initials (hbjtgb).",
                     PropertyList({Property("station", kPropertyTypeString, std::string(""))}),
                     [this](const PropertyList& properties) -> ReturnValue {
                         const auto station = properties["station"].value<std::string>();
@@ -2462,12 +2463,20 @@ public:
                 return radio_service_.GetStationCount();
             };
             actions.station_name = [this](int index) {
-                const char* name = radio_service_.GetStationName(index);
-                return std::string(name ? name : "");
+                return radio_service_.GetStationName(index);
             };
             actions.station_band = [this](int index) {
                 const char* band = radio_service_.GetStationCategory(index);
                 return std::string(band ? band : "");
+            };
+            actions.station_label = [this](int index) {
+                return radio_service_.GetStationLabel(index);
+            };
+            actions.station_bands = [this] {
+                std::vector<Tab5NativeApps::StationBand> bands;
+                for (auto& band : radio_service_.GetBands())
+                    bands.push_back({band.name, std::move(band.stations)});
+                return bands;
             };
             actions.current_station = [this] { return radio_service_.GetCurrentIndex(); };
             actions.station_favorite = [this](int index) {

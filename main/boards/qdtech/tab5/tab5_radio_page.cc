@@ -395,23 +395,23 @@ void Tab5NativeApps::RebuildRadioBands(bool reload_favorites) {
         for (int i = 0; i < count; ++i)
             radio_favorites_[i] = actions_.station_favorite && actions_.station_favorite(i);
     }
+    // 收藏, the service's bands (最近, 本地, 新闻, ...), then 全部.
     std::vector<RadioBand> bands{{"收藏", {}}};
-    for (int i = 0; i < count; ++i) {
+    for (int i = 0; i < count; ++i)
         if (radio_favorites_[i])
-            bands[0].stations.push_back(i);
-        std::string name = actions_.station_band ? actions_.station_band(i) : "";
-        if (name.empty())
-            name = "其他";
-        auto it = std::find_if(bands.begin() + 1, bands.end(),
-                               [&](const RadioBand& band) { return band.name == name; });
-        if (it == bands.end())
-            bands.push_back({name, {i}});
-        else
-            it->stations.push_back(i);
+            bands[0].stations.push_back(uint16_t(i));
+    if (actions_.station_bands) {
+        for (auto& band : actions_.station_bands()) {
+            band.stations.erase(std::remove_if(band.stations.begin(), band.stations.end(),
+                                               [count](uint16_t s) { return s >= count; }),
+                                band.stations.end());
+            bands.push_back(std::move(band));
+        }
     }
     RadioBand all{"全部", {}};
+    all.stations.reserve(count);
     for (int i = 0; i < count; ++i)
-        all.stations.push_back(i);
+        all.stations.push_back(uint16_t(i));
     bands.push_back(std::move(all));
 
     const std::string previous = radio_band_ >= 0 && radio_band_ < int(radio_band_list_.size())
@@ -602,7 +602,7 @@ void Tab5NativeApps::RefreshTuner() {
     SetLabelTextIfChanged(radio_next_name_, valid && at + 1 < int(stations.size())
                                                 ? name(stations[at + 1]).c_str()
                                                 : "");
-    char count[24];
+    char count[32];
     if (valid)
         std::snprintf(count, sizeof(count), "%d / %d", at + 1, int(stations.size()));
     else
@@ -614,8 +614,10 @@ void Tab5NativeApps::RefreshTuner() {
         if (dial_dragging_ || dial_gliding_ || tune_due_ms_ || station != radio_current_ ||
             current_station_name_.empty())
             SetLabelTextIfChanged(radio_station_, name(station).c_str());
-        const std::string band = actions_.station_band ? actions_.station_band(station) : "";
-        SetLabelTextIfChanged(radio_eyebrow_, band.c_str());
+        const std::string label = actions_.station_label  ? actions_.station_label(station)
+                                  : actions_.station_band ? actions_.station_band(station)
+                                                          : "";
+        SetLabelTextIfChanged(radio_eyebrow_, label.c_str());
     }
     if (radio_fav_)
         lv_obj_invalidate(radio_fav_);

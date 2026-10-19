@@ -9,6 +9,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include "radio_catalog.h"
 #include "tab5_playback_clock.h"
 
 class DesktopUI;
@@ -43,11 +44,17 @@ public:
     bool IsFavorite(int index) const;
     std::vector<int> GetFavorites() const;
     std::vector<int> GetByCategory(int category) const;
+    // Dial bands after 收藏: 最近, 本地, 新闻, 音乐, 交通, 文艺, 各省, 港澳·海外.
+    std::vector<RadioBandStations> GetBands() const;
     int GetCurrentIndex() const { return published_station_index_.load(std::memory_order_acquire); }
     int GetAudioLevel() const { return audio_level_.load(std::memory_order_relaxed); }
     int GetStationCount() const;
-    const char* GetStationName(int index) const;
+    // Read from the SD catalog when it is in use; a few recent names are cached.
+    std::string GetStationName(int index) const;
+    // The station's own dial band (音乐, 新闻, ...); "" when only in 全部.
     const char* GetStationCategory(int index) const;
+    // "广东 · 交通"
+    std::string GetStationLabel(int index) const;
     int GetStationCategoryId(int index) const;
 
 private:
@@ -89,6 +96,10 @@ private:
     void LoadFavorites();
     void SaveFavorites();
     void LoadStationIndex();
+    // Catalog stations plus the music URL slot.
+    int SlotCount() const;
+    // Task-side copy of station_index_'s fields, reloaded when it changes.
+    const RadioStationInfo& CurrentStation();
     void SaveStationIndex();
     void NotifyPlaybackReleased();
     void PublishCurrentStation();
@@ -127,12 +138,15 @@ private:
     std::function<void()> playback_released_callback_;
     bool focus_pause_logged_ = false;
     int reconnect_attempt_ = 0;
-    std::vector<int> last_success_url_;
-    // Loaded before the player task starts. The final vector entry is a reserved
-    // music URL slot; public station listings only expose catalog_station_count_.
+    std::vector<int8_t> last_success_url_;
+    // Set before the player task starts. Index catalog_station_count_ is the
+    // reserved music URL slot; public station listings only expose the catalog.
     int catalog_station_count_ = 0;
     int station_index_ = 0;
     int custom_station_index_ = -1;
+    RadioStationInfo custom_station_;
+    RadioStationInfo current_;
+    int current_index_ = -1;
     int last_radio_station_index_ = 0;
     std::atomic<bool> playing_custom_url_{false};
     bool custom_url_stream_completed_ = false;

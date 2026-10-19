@@ -602,8 +602,11 @@ void Tab5SdScene::ApplySkyToBackground(const uint16_t* from, const uint16_t* to,
 void Tab5SdScene::SkyJob(void* arg) {
     auto* self = static_cast<Tab5SdScene*>(arg);
     const int64_t started = esp_timer_get_time();
-    nabo_sky::RenderSkyBase(self->sky_pending_, self->sky_next_, kSkyW, kSkyH);
-    self->fx_[1 - self->sky_slot_].Reset(self->sky_pending_);
+    // Sky generation is CPU-heavy and can take longer than the idle watchdog
+    // period. Let IDLE0 run between bounded row batches on the weather task.
+    const auto yield = [] { vTaskDelay(pdMS_TO_TICKS(5)); };
+    nabo_sky::RenderSkyBase(self->sky_pending_, self->sky_next_, kSkyW, kSkyH, yield);
+    self->fx_[1 - self->sky_slot_].Reset(self->sky_pending_, yield);
     self->sky_job_ms_ = uint32_t((esp_timer_get_time() - started) / 1000);
     // Cross-fade the sky behind Nabo over ~2 s instead of jumping: blend the shown sky
     // (sky_buf_, still on screen and unchanged) into the new one in 8 steps. Only the

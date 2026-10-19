@@ -134,8 +134,11 @@ class QdtechTab5Display : public MipiLcdDisplay {
             return false;
         }
         const int64_t deadline = esp_timer_get_time() + 100000;
-        while (display_->flushing && esp_timer_get_time() < deadline)
-            vTaskDelay(1);
+        // Even an already-completed DMA copy must leave time for the idle task.
+        // One tick can be consumed by higher-priority work before IDLE0 runs.
+        do {
+            vTaskDelay(pdMS_TO_TICKS(5));
+        } while (display_->flushing && esp_timer_get_time() < deadline);
         if (display_->flushing) {
             // Completion never arrived: stop using the direct path for safety.
             display_->flushing = 0;

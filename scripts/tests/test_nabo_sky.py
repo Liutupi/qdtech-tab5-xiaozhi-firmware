@@ -16,6 +16,8 @@ SMOKE = r'''
 #include <vector>
 #include "nabo_sky.h"
 using namespace nabo_sky;
+int yielded = 0;
+void YieldSky() { ++yielded; }
 int main() {
     const int W = kPanelW, H = kPanelH;
     static_assert(kVideoRight - kVideoLeft + 1 == 512);
@@ -40,12 +42,15 @@ int main() {
     assert(kOrbX - 18 > 440 && kOrbY - 18 > 20);
     std::vector<uint16_t> a(W * H), b(W * H);
     auto fx = std::make_unique<SkyFx>();
+    auto cooperative_fx = std::make_unique<SkyFx>();
     const uint16_t page = To565(Hex(kPage));
     for (int p = 0; p < 3; ++p)
         for (int w = 0; w < 4; ++w) {
             const Sky sky{Period(p), Weather(w), uint8_t(p * 5 + w * 2 + 3)};
             RenderSkyBase(sky, a.data(), W, H);
-            RenderSkyBase(sky, b.data(), W, H);
+            yielded = 0;
+            RenderSkyBase(sky, b.data(), W, H, YieldSky);
+            assert(yielded >= 2 * (H / 8));
             assert(a == b);
             // No frame: the outer edge is the page colour itself.
             for (int x = 0; x < W; ++x)
@@ -53,6 +58,13 @@ int main() {
             for (int y = 0; y < H; ++y)
                 assert(a[y * W] == page && a[y * W + W - 1] == page);
             fx->Reset(sky);
+            yielded = 0;
+            cooperative_fx->Reset(sky, YieldSky);
+            assert(yielded > 0);
+            std::vector<uint16_t> standard = a, cooperative = a;
+            fx->Draw(4321, standard.data(), W, H, 0, [](int, int) { return 0; });
+            cooperative_fx->Draw(4321, cooperative.data(), W, H, 0, [](int, int) { return 0; });
+            assert(standard == cooperative);  // yielding cannot change sky or cloud pixels
             std::vector<uint16_t> f = a;
             fx->Draw(1234, f.data(), W, H, 0, [](int, int) { return 255; });
             assert(f == a);  // never over an opaque Nabo

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -22,6 +23,11 @@ class LvglFont;
 // All methods that touch LVGL are called while the display lock is held.
 class Tab5NativeApps {
 public:
+    // One dial band: station indices in dial order.
+    struct StationBand {
+        std::string name;
+        std::vector<uint16_t> stations;
+    };
     struct Actions {
         std::function<void()> reconfigure_wifi;
         std::function<std::string()> wifi_summary;
@@ -40,8 +46,12 @@ public:
         std::function<void(int)> radio_select;
         std::function<int()> station_count;
         std::function<std::string(int)> station_name;
-        // Band name of a station (全国, 北京, 音乐, ...); empty when unknown.
+        // The station's own dial band (音乐, 新闻, 各省, ...); empty when only in 全部.
         std::function<std::string(int)> station_band;
+        // Region and program type for the eyebrow, e.g. "广东 · 交通".
+        std::function<std::string(int)> station_label;
+        // Bands between 收藏 and 全部, in dial order.
+        std::function<std::vector<StationBand>()> station_bands;
         std::function<int()> current_station;
         std::function<bool(int)> station_favorite;
         std::function<void(int)> toggle_favorite;
@@ -194,10 +204,7 @@ private:
     std::shared_ptr<LvglFont> music_font_owner_;
     lv_obj_t* radio_play_label_ = nullptr;
     // NABO FM page: studio on the left, tuner on the right.
-    struct RadioBand {
-        std::string name;
-        std::vector<int> stations;
-    };
+    using RadioBand = StationBand;
     std::unique_ptr<Tab5RadioStage> radio_stage_;
     lv_obj_t* radio_eyebrow_ = nullptr;
     lv_obj_t* radio_fav_ = nullptr;
