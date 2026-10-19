@@ -35,6 +35,9 @@ struct MusicCommand {
 // One Muse 电台 track resolved by the NAS (full-length NetEase URL).
 struct ResolvedTrack {
     bool ok = false;
+    bool is_trial = false;
+    int http_status = 0;
+    std::string error_code;
     int episode = 0;
     int index = 0;
     int count = 0;
@@ -86,6 +89,8 @@ public:
     // Asks the relay to resolve one episode track; done runs on the inbox task.
     // A newer request replaces a pending one.
     void ResolveTrack(int episode, int index, TrackCallback done);
+    void ResolveSong(const std::string& title, const std::string& artist,
+                     const std::string& song_id, TrackCallback done);
     void MarkAllSeen();
     Snapshot Current();
     void SetHost(const std::string& host);
@@ -109,6 +114,7 @@ private:
     bool track_pending_ = false;
     int track_episode_ = 0;
     int track_index_ = 0;
+    std::string track_title_, track_artist_, track_song_id_;
     TrackCallback track_done_;
 
     std::mutex mutex_;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the native NABO podcast's 40 px WenKai lyric font without SD changes."""
+"""Build the native NABO podcast's 48 px WenKai lyric font without SD changes."""
 
 import argparse
 import hashlib
@@ -18,12 +18,12 @@ def main():
     args = parser.parse_args()
     if hashlib.sha256(args.font.read_bytes()).hexdigest() != FONT_SHA256:
         parser.error("source font SHA-256 does not match the reviewed version")
-    output = ROOT / "main/boards/qdtech/tab5/qd_font_lyric_40.c"
-    # Two-bit antialiasing keeps broad CJK coverage inside the 12 MiB factory app.
+    output = ROOT / "main/boards/qdtech/tab5/qd_font_lyric_48.c"
+    # A larger one-bit raster keeps broad CJK coverage inside the 12 MiB factory app.
     # Rare characters retain the pinned full text-font fallback on the page.
     subprocess.run([
-        args.converter, "--font", str(args.font), "--size", "40", "--bpp", "2",
-        "--format", "lvgl", "--lv-include", "lvgl.h", "--lv-font-name", "qd_font_lyric_40",
+        args.converter, "--font", str(args.font), "--size", "48", "--bpp", "1",
+        "--format", "lvgl", "--lv-include", "lvgl.h", "--lv-font-name", "qd_font_lyric_48",
         "-r", "0x20-0x7F", "--symbols", (ROOT / "scripts/tab5_dynamic_symbols.txt").read_text().strip(),
         "-o", str(output),
     ], check=True)

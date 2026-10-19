@@ -34,7 +34,7 @@ unsigned now=100;
 unsigned lv_tick_get() {return now;}
 class Tab5PodcastPage {
 public:
- enum class PlaybackKind {None,Podcast,Songs};
+ enum class PlaybackKind {None,Podcast,Songs,Favorites};
  PlaybackKind playback_kind_=PlaybackKind::Podcast;
  int playback_episode_id_=4,selected_id_=4,active_cue_=-1;
  tab5_podcast::EpisodeList episodes_;

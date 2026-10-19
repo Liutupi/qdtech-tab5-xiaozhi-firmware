@@ -42,9 +42,9 @@ struct Tab5PodcastPage {
     std::function<void()> stop;
     std::function<void()> refresh;
   } callbacks_;
-  enum class PlaybackKind {None, Podcast, Songs};
+  enum class PlaybackKind {None, Podcast, Songs, Favorites};
   PlaybackKind playback_kind_=PlaybackKind::None;
-  int playback_episode_id_=0, selected_id_=3;
+  int playback_episode_id_=0, selected_id_=3, pane_=0;
   bool playing_=false;
   tab5_podcast::SharedEpisodes episodes_;
   lv_obj_t podcast_label, songs_label;
@@ -56,6 +56,7 @@ struct Tab5PodcastPage {
   std::string status, now_title_, now_artist_, now_line_;
   void UpdateTransport() {}
   void UpdateHero() {}
+  void PlayFavorite(size_t) {}
   const tab5_podcast::EpisodeList& List() const {return *episodes_;}
   void SetStatus(const char* text,unsigned) {status=text;}
   void Refresh(); void SetRefreshResult(bool,unsigned);

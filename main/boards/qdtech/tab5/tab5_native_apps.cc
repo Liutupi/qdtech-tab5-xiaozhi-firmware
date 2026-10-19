@@ -1,4 +1,5 @@
 #include "tab5_native_apps.h"
+#include "tab5_song_favorites.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -258,6 +259,18 @@ void Tab5NativeApps::OpenPodcast() {
         callbacks.play_track = [this](int episode, int index, int count) {
             return actions_.podcast_play ? actions_.podcast_play(episode, index, count) : false;
         };
+        callbacks.play_favorite = [this](const std::string& title, const std::string& artist,
+                                         const std::string& id) {
+            return actions_.podcast_favorite_play &&
+                   actions_.podcast_favorite_play(title, artist, id);
+        };
+        auto* favorites = Tab5SongFavorites::Get();
+        callbacks.favorites = [favorites] {
+            return favorites ? favorites->Current() : nabo_song_favorites::Snapshot{};
+        };
+        callbacks.toggle_favorite = [favorites](const nabo_song_favorites::Track& song) {
+            return favorites ? favorites->Toggle(song) : nabo_song_favorites::Change::Unavailable;
+        };
         callbacks.stop = [this] { Schedule(actions_.radio_stop); };
         callbacks.playback_position = [this](std::string_view url) {
             return actions_.podcast_position ? actions_.podcast_position(url)
@@ -272,6 +285,7 @@ void Tab5NativeApps::OpenPodcast() {
     Show(nullptr);
     podcast_page_->SetPlayback(radio_playing_, radio_station_name_.c_str());
     podcast_page_->Show();
+    podcast_page_->SetSongTrial(podcast_song_trial_);
     podcast_page_->SetNowPlaying(podcast_now_title_.c_str(), podcast_now_artist_.c_str(),
                                  podcast_now_line_.c_str());
     if (radio_stage_) {
@@ -391,6 +405,12 @@ bool Tab5NativeApps::IsRadioVisible() const {
 
 bool Tab5NativeApps::IsPodcastVisible() const {
     return IsVisible() && podcast_page_ && podcast_page_->IsVisible();
+}
+
+void Tab5NativeApps::SetPodcastSongTrial(bool trial) {
+    podcast_song_trial_ = trial;
+    if (podcast_page_)
+        podcast_page_->SetSongTrial(trial);
 }
 
 void Tab5NativeApps::SetPodcastNowPlaying(const char* title, const char* artist,

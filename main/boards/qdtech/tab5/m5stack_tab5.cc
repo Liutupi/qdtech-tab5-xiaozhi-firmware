@@ -13,6 +13,7 @@
 #include "tab5_music_track_gate.h"
 #include "tab5_native_display.h"
 #include "tab5_sd_assets.h"
+#include "tab5_song_favorites.h"
 #include "tab5_vision_service.h"
 #else
 #include "desktop_ui.h"
@@ -434,9 +435,27 @@ private:
         if (!podcast_session_ || seq != podcast_request_seq_)
             return;  // stopped, or a newer tap replaced this request
         std::string result = "Music URL was NOT started: song unavailable.";
-        if (track.ok)
-            result = PlayMusicRequest(track.title, track.artist, track.url, "", track.song_id,
-                                      false);
+        if (track.ok) {
+            if (auto* favorites = Tab5SongFavorites::Get()) {
+                favorites->Remember(track.title, track.artist, track.song_id);
+                const auto episodes = tab5_muse::Inbox::GetInstance().Current().episodes;
+                if (episodes) {
+                    for (const auto& episode : *episodes) {
+                        if (episode.id == track.episode && track.index >= 0 &&
+                            size_t(track.index) < episode.tracks.size()) {
+                            const auto& original = episode.tracks[track.index];
+                            favorites->Remember(std::string(original.title),
+                                                std::string(original.artist), track.song_id);
+                            break;
+                        }
+                    }
+                }
+            }
+            result =
+                PlayMusicRequest(track.title, track.artist, track.url, "", track.song_id, false);
+            if (display_ && result.rfind("Music URL was NOT started", 0) != 0)
+                static_cast<QdtechTab5Display*>(display_)->SetPodcastSongTrial(track.is_trial);
+        }
         if (result.rfind("Music URL was NOT started", 0) == 0) {
             ESP_LOGW("Tab5Podcast", "track %d unavailable: %s", track.index + 1, result.c_str());
             if (++podcast_misses_ >= 3 || podcast_index_ + 1 >= podcast_count_) {
@@ -2558,6 +2577,52 @@ public:
                     podcast_count_ = count;
                     podcast_misses_ = 0;
                     StartPodcastTrack(index);
+                });
+                return true;
+            };
+            actions.podcast_favorite_play = [this](const std::string& title,
+                                                   const std::string& artist,
+                                                   const std::string& song_id) {
+                if (!nabo_song_favorites::TextValid(title, 256, false) ||
+                    !nabo_song_favorites::TextValid(artist, 192, true) ||
+                    !nabo_song_favorites::IdValid(song_id))
+                    return false;
+                Application::GetInstance().Schedule([this, title, artist, song_id] {
+                    podcast_session_ = false;
+                    const uint32_t sequence = ++podcast_request_seq_;
+                    ReplaceMusicSource([this] {
+                        EndContinuousSession();
+                        if (native_radio_ready_.load())
+                            radio_service_.Stop();
+                    });
+                    const uint32_t generation = music_request_generation_.load();
+                    SetPodcastStatus("正在获取收藏歌曲…");
+                    tab5_muse::Inbox::GetInstance().ResolveSong(
+                        title, artist, song_id,
+                        [this, sequence, generation, title,
+                         artist](const tab5_muse::ResolvedTrack& track) {
+                            Application::GetInstance().Schedule([this, sequence, generation, track,
+                                                                 title, artist] {
+                                if (sequence != podcast_request_seq_ ||
+                                    generation != music_request_generation_.load())
+                                    return;
+                                if (!track.ok) {
+                                    SetPodcastStatus(track.http_status == 404
+                                                         ? "暂不可播"
+                                                         : "获取失败，请稍后重试");
+                                    return;
+                                }
+                                if (auto* favorites = Tab5SongFavorites::Get())
+                                    favorites->Remember(title, artist, track.song_id);
+                                const auto result = PlayMusicRequest(
+                                    track.title, track.artist, track.url, "", track.song_id, false);
+                                if (result.rfind("Music URL was NOT started", 0) == 0)
+                                    SetPodcastStatus("暂不可播");
+                                else if (display_)
+                                    static_cast<QdtechTab5Display*>(display_)->SetPodcastSongTrial(
+                                        track.is_trial);
+                            });
+                        });
                 });
                 return true;
             };

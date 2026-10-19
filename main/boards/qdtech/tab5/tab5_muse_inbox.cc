@@ -1,4 +1,5 @@
 #include "tab5_muse_inbox.h"
+#include "nabo_song_favorites.h"
 #include "tab5_net_gate.h"
 #include "tab5_podcast_transcript.h"
 
@@ -318,6 +319,9 @@ void Inbox::ResolveTrack(int episode, int index, TrackCallback done) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         track_pending_ = true;
+        track_title_.clear();
+        track_artist_.clear();
+        track_song_id_.clear();
         track_episode_ = episode;
         track_index_ = index;
         track_done_ = std::move(done);
@@ -325,11 +329,44 @@ void Inbox::ResolveTrack(int episode, int index, TrackCallback done) {
     RequestRefresh();
 }
 
+void Inbox::ResolveSong(const std::string& title, const std::string& artist,
+                        const std::string& song_id, TrackCallback done) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        track_pending_ = true;
+        track_episode_ = 0;
+        track_index_ = 0;
+        track_title_ = title;
+        track_artist_ = artist;
+        track_song_id_ = song_id;
+        track_done_ = std::move(done);
+    }
+    RequestRefresh();
+}
+
+namespace {
+std::string SongQueryEscape(const std::string& text) {
+    constexpr const char* hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : text) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~')
+            out += char(c);
+        else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 15];
+        }
+    }
+    return out;
+}
+}  // namespace
+
 // Inbox task: the NAS looks the song up on NetEase (a few seconds), so allow a
 // longer timeout than the regular polls.
 void Inbox::ServeTrackRequest() {
     int episode = 0, index = 0;
-    std::string url, host;
+    std::string url, host, title, artist, song_id;
     TrackCallback done;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -338,28 +375,35 @@ void Inbox::ServeTrackRequest() {
         track_pending_ = false;
         episode = track_episode_;
         index = track_index_;
+        title = track_title_;
+        artist = track_artist_;
+        song_id = track_song_id_;
         done = std::move(track_done_);
         url = snapshot_.url;
         host = snapshot_.host;
     }
     std::string endpoint;
     if (url.empty()) {
-        endpoint = "http://" + host + "/tab5/podcast/track";
+        endpoint =
+            "http://" + host + (title.empty() ? "/tab5/podcast/track" : "/tab5/podcast/song");
     } else {
         const auto path = url.find("/inbox/");
         if (path == std::string::npos)
             return;
         endpoint = url;
         endpoint.replace(path, 7, "/podcast/");
-        endpoint += "/track";
+        endpoint += title.empty() ? "/track" : "/song";
     }
     int status = 0;
-    const std::string body = HttpGet(
-        endpoint + "?episode=" + std::to_string(episode) + "&index=" + std::to_string(index),
-        &status, 8 * 1024, 20000);
+    const std::string query =
+        title.empty() ? "?episode=" + std::to_string(episode) + "&index=" + std::to_string(index)
+                      : "?title=" + SongQueryEscape(title) + "&artist=" + SongQueryEscape(artist) +
+                            (song_id.empty() ? "" : "&id=" + SongQueryEscape(song_id));
+    const std::string body = HttpGet(endpoint + query, &status, 8 * 1024, 20000);
     std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
         body.empty() ? nullptr : cJSON_ParseWithLength(body.data(), body.size()), cJSON_Delete);
     ResolvedTrack track;
+    track.http_status = status;
     track.episode = episode;
     track.index = index;
     if (cJSON_IsObject(root.get())) {
@@ -369,12 +413,18 @@ void Inbox::ServeTrackRequest() {
         track.artist = JsonString(root.get(), "artist");
         track.url = JsonString(root.get(), "url");
         track.song_id = JsonString(root.get(), "song_id");
+        track.error_code = JsonString(root.get(), "code");
+        track.is_trial = cJSON_IsTrue(cJSON_GetObjectItem(root.get(), "is_trial"));
         track.ok = status == 200 && cJSON_IsTrue(cJSON_GetObjectItem(root.get(), "ok")) &&
                    (track.url.rfind("https://", 0) == 0 || track.url.rfind("http://", 0) == 0) &&
-                   track.url.size() <= 1200 && track.song_id.size() <= 20;
+                   track.url.size() <= 1200 &&
+                   nabo_song_favorites::TextValid(track.title, 256, false) &&
+                   nabo_song_favorites::TextValid(track.artist, 192, true) &&
+                   nabo_song_favorites::IdValid(track.song_id) &&
+                   (song_id.empty() || song_id == track.song_id);
     }
-    ESP_LOGI(TAG, "podcast track %d/%d %s (http %d)", episode, index,
-             track.ok ? "ok" : "unavailable", status);
+    ESP_LOGI(TAG, "%s track %d/%d %s (http %d)", title.empty() ? "podcast" : "favorite", episode,
+             index, track.ok ? "ok" : "unavailable", status);
     if (done)
         done(track);
 }

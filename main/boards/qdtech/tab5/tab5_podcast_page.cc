@@ -10,7 +10,7 @@
 LV_FONT_DECLARE(qd_font_lxgw_28);
 LV_FONT_DECLARE(qd_font_lxgw_36);
 LV_FONT_DECLARE(qd_font_cjk_28);
-LV_FONT_DECLARE(qd_font_lyric_40);
+LV_FONT_DECLARE(qd_font_lyric_48);
 
 namespace {
 constexpr uint32_t kPage = 0x080b12, kPanel = 0x131a28, kChip = 0x1a2131;
@@ -68,7 +68,7 @@ lv_obj_t* ScrollColumn(lv_obj_t* parent, int x, int y, int w, int h, int gap) {
 Tab5PodcastPage::Tab5PodcastPage(lv_obj_t* parent, Callbacks callbacks)
     : callbacks_(std::move(callbacks)) {
     body_font_ = qd_font_cjk_28;
-    large_font_ = qd_font_lyric_40;
+    large_font_ = qd_font_lyric_48;
     root_ = Box(parent, 0, 0, 1280, 720, kPage, kPage, 0);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
     Build();
@@ -115,25 +115,23 @@ void Tab5PodcastPage::Build() {
     button(
         root_, 1080, 68, 176, 50, kPage, "往期节目 >", kMuted,
         [](lv_event_t* event) {
-            static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event))->SelectPane(2);
+            static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event))->SelectPane(3);
         },
         this);
-    meta_ = Text(root_, "Nabo 的每日音乐来信", &qd_font_cjk_28, kMuted, kColX, 132, kColW);
+    meta_ = Text(root_, "Nabo 的每日音乐来信", &qd_font_cjk_28, kMuted, kColX, 124, kColW);
     lv_label_set_long_mode(meta_, LV_LABEL_LONG_DOT);
     lv_obj_set_height(meta_, 36);
-    // Long lyrics wrap at 40 px and can be scrolled vertically. No marquee
+    // Long lyrics wrap at 48 px and can be scrolled vertically. No marquee
     // timer, scaled layer or second framebuffer competes with the studio.
-    hero_ = ScrollColumn(root_, kColX, 176, kColW, 84, 0);
+    hero_ = ScrollColumn(root_, kColX, 164, kColW, 106, 0);
     title_ = Text(hero_, "今天，听 Nabo 说说", &large_font_, kText, 0, 0, kRowW);
     lv_obj_set_style_text_line_space(title_, 2, 0);
-    Box(root_, kColX, 270, kColW, 1, 0x30394b, 0x30394b, 0);
+    Box(root_, kColX, 282, kColW, 1, 0x30394b, 0x30394b, 0);
 
-    const char* tabs[] = {"节目文稿", "推荐歌单", "往期节目"};
+    const char* tabs[] = {"节目文稿", "推荐歌单", "收藏歌单"};
     for (int i = 0; i < 3; ++i) {
-        // History opens from the date row; the third tab appears only while
-        // that archive is selected, keeping the reading surface quiet.
         pane_labels_[i] = button(
-            root_, kColX + i * 210, 278, 200, 48, kPage, tabs[i], kMuted,
+            root_, kColX + i * 216, 290, 208, 48, kPage, tabs[i], kMuted,
             [](lv_event_t* event) {
                 auto* page = static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event));
                 for (int pane = 0; pane < 3; ++pane)
@@ -143,15 +141,18 @@ void Tab5PodcastPage::Build() {
                     }
             },
             this);
+        lv_label_set_long_mode(pane_labels_[i], LV_LABEL_LONG_CLIP);
+        lv_obj_set_height(pane_labels_[i], 36);
         pane_buttons_[i] = lv_obj_get_parent(pane_labels_[i]);
         lv_obj_set_style_radius(pane_buttons_[i], 0, 0);
         lv_obj_set_style_border_side(pane_buttons_[i], LV_BORDER_SIDE_BOTTOM, 0);
     }
-    Box(root_, kColX, 326, kColW, 1, 0x30394b, 0x30394b, 0);
+    Box(root_, kColX, 338, kColW, 1, 0x30394b, 0x30394b, 0);
     script_heading_ = pane_labels_[0];
     script_box_ = ScrollColumn(root_, kColX, kContentY, kColW, kContentH, 8);
     tracks_ = ScrollColumn(root_, kColX, kContentY, kColW, kContentH, 8);
     list_ = ScrollColumn(root_, kColX, kContentY, kColW, kContentH, 10);
+    favorites_list_ = ScrollColumn(root_, kColX, kContentY, kColW, kContentH, 8);
     Box(root_, kColX, 586, kColW, 1, 0x30394b, 0x30394b, 0);
     status_ =
         Text(root_, "选一期节目，和 Nabo 一起听。", &qd_font_cjk_28, kMuted, kColX, 594, kColW);
@@ -195,29 +196,31 @@ void Tab5PodcastPage::Build() {
 }
 
 void Tab5PodcastPage::SelectPane(int pane) {
-    if (pane < 0 || pane >= 3)
+    if (pane < 0 || pane >= 4)
         return;
     pane_ = pane;
-    lv_obj_t* columns[] = {script_box_, tracks_, list_};
-    for (int i = 0; i < 3; ++i) {
+    lv_obj_t* columns[] = {script_box_, tracks_, favorites_list_, list_};
+    for (int i = 0; i < 4; ++i) {
         if (i == pane)
             lv_obj_remove_flag(columns[i], LV_OBJ_FLAG_HIDDEN);
         else
             lv_obj_add_flag(columns[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    for (int i = 0; i < 3; ++i) {
         lv_obj_set_style_border_width(pane_buttons_[i], i == pane ? 3 : 0, 0);
         lv_obj_set_style_border_color(pane_buttons_[i], lv_color_hex(kAmber), 0);
         lv_obj_set_style_text_color(pane_labels_[i], lv_color_hex(i == pane ? kAmber : kMuted), 0);
-        if (i == 2 && pane != 2)
-            lv_obj_add_flag(pane_buttons_[i], LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_remove_flag(pane_buttons_[i], LV_OBJ_FLAG_HIDDEN);
     }
     if (pane == 0 && active_cue_ >= 0)
         transcript_scroll_pending_ = true;
+    if (pane == 2)
+        RenderFavorites();
+    UpdatePlayLabels();
 }
 
 void Tab5PodcastPage::Show() {
     BindFont();
+    RefreshFavorites();
     if (list_dirty_)
         RenderList();
     lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
@@ -365,6 +368,7 @@ void Tab5PodcastPage::RenderEpisode() {
     lv_obj_clean(tracks_);
     track_tags_.clear();
     track_rows_.clear();
+    track_favorite_labels_.clear();
     lv_obj_clean(script_box_);
     cue_rows_.clear();
     active_cue_ = -1;
@@ -394,9 +398,7 @@ void Tab5PodcastPage::RenderEpisode() {
     std::snprintf(meta, sizeof(meta), "%u 首推荐%s%s", unsigned(e.tracks.size()),
                   e.from.empty() ? "" : " · ", tab5_podcast::DisplayText(e.from).c_str());
     episode_detail_ = meta;
-    char songs[64];
-    std::snprintf(songs, sizeof(songs), "推荐歌单 · %u首", unsigned(e.tracks.size()));
-    lv_label_set_text(pane_labels_[1], songs);
+    lv_label_set_text(pane_labels_[1], "推荐歌单");
     UpdateHero();
     lv_obj_set_style_text_font(script_, font, 0);
     const std::string script = tab5_podcast::DisplayText(e.script);
@@ -420,9 +422,19 @@ void Tab5PodcastPage::RenderEpisode() {
 
     if (e.tracks.empty())
         Text(tracks_, "本期没有歌单。", &qd_font_cjk_28, kMuted, 0, 0, kRowW);
-    for (size_t i = 0; i < e.tracks.size(); ++i) {
-        const auto& t = e.tracks[i];
-        auto* row = lv_obj_create(tracks_);
+    RenderSongRows(tracks_, e.tracks, false);
+    lv_obj_scroll_to_y(tracks_, 0, LV_ANIM_OFF);
+    HighlightNowPlaying();
+}
+
+void Tab5PodcastPage::RenderSongRows(lv_obj_t* parent, const nabo_song_favorites::List& songs,
+                                     bool saved) {
+    const lv_font_t* font = &body_font_;
+    auto& tags = saved ? favorite_tags_ : track_tags_;
+    auto& rows = saved ? favorite_rows_ : track_rows_;
+    for (size_t i = 0; i < songs.size(); ++i) {
+        const auto& t = songs[i];
+        auto* row = lv_obj_create(parent);
         lv_obj_set_size(row, kRowW, 84);
         lv_obj_set_style_radius(row, 14, 0);
         lv_obj_set_style_bg_color(row, lv_color_hex(kPanel), 0);
@@ -436,27 +448,147 @@ void Tab5PodcastPage::RenderEpisode() {
         std::snprintf(number, sizeof(number), "%02u", unsigned(i + 1));
         auto* num = Text(row, number, &qd_font_cjk_28, kAmber, 10, 18, 40);
         auto* name =
-            Text(row, tab5_podcast::DisplayText(t.title).c_str(), font, kText, 64, 4, kRowW - 82);
+            Text(row, tab5_podcast::DisplayText(t.title).c_str(), font, kText, 64, 4, kRowW - 198);
         lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
         lv_obj_set_height(name, 38);
         auto* artist = Text(row, tab5_podcast::DisplayText(t.artist).c_str(), font, kMuted, 64, 42,
-                            kRowW - 82);
+                            kRowW - 198);
         lv_label_set_long_mode(artist, LV_LABEL_LONG_DOT);
         lv_obj_set_height(artist, 34);
         for (auto* l : {num, name, artist})
             lv_obj_add_flag(l, LV_OBJ_FLAG_EVENT_BUBBLE);
-        track_tags_.push_back(std::make_unique<Tag>(Tag{this, int(i)}));
+        tags.push_back(std::make_unique<Tag>(Tag{this, int(i), saved}));
         lv_obj_add_event_cb(
             row,
             [](lv_event_t* ev) {
                 auto* tag = static_cast<Tag*>(lv_event_get_user_data(ev));
-                tag->page->PlayTrack(size_t(tag->value));
+                if (tag->saved)
+                    tag->page->PlayFavorite(size_t(tag->value));
+                else
+                    tag->page->PlayTrack(size_t(tag->value));
             },
-            LV_EVENT_CLICKED, track_tags_.back().get());
-        track_rows_.push_back(row);
+            LV_EVENT_CLICKED, tags.back().get());
+        auto* favorite = Box(row, kRowW - 120, 12, 110, 60, kChip, kChip, 16);
+        lv_obj_add_flag(favorite, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(favorite, lv_color_hex(kPressed), LV_STATE_PRESSED);
+        tab5_ui::AddPressFeel(favorite);
+        const bool on =
+            saved || (favorites_.songs && nabo_song_favorites::Contains(*favorites_.songs, t));
+        auto* mark = Text(favorite, on ? "已收藏" : "收藏", &qd_font_cjk_28, on ? kAmber : kMuted,
+                          0, 0, 110);
+        lv_label_set_long_mode(mark, LV_LABEL_LONG_CLIP);
+        lv_obj_set_height(mark, 36);
+        lv_obj_set_style_text_align(mark, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(mark);
+        lv_obj_add_event_cb(
+            favorite,
+            [](lv_event_t* event) {
+                auto* tag = static_cast<Tag*>(lv_event_get_user_data(event));
+                tag->page->ToggleFavorite(size_t(tag->value), tag->saved);
+            },
+            LV_EVENT_CLICKED, tags.back().get());
+        if (!saved)
+            track_favorite_labels_.push_back(mark);
+        rows.push_back(row);
     }
-    lv_obj_scroll_to_y(tracks_, 0, LV_ANIM_OFF);
+}
+
+void Tab5PodcastPage::RenderFavorites() {
+    lv_obj_clean(favorites_list_);
+    favorite_tags_.clear();
+    favorite_rows_.clear();
+    if (!favorites_.ready) {
+        Text(favorites_list_,
+             favorites_.error == nabo_song_favorites::Error::Corrupt
+                 ? "收藏文件读取失败，请检查 SD 卡。"
+                 : "正在读取收藏歌单，请确认 SD 卡已插入。",
+             &body_font_, kMuted, 0, 0, kRowW);
+    } else if (!favorites_.songs || favorites_.songs->empty()) {
+        Text(favorites_list_, "还没有收藏歌曲。\n在推荐歌单里点“收藏”，喜欢的歌就会留在这里。",
+             &body_font_, kMuted, 0, 0, kRowW);
+    } else
+        RenderSongRows(favorites_list_, *favorites_.songs, true);
     HighlightNowPlaying();
+}
+
+void Tab5PodcastPage::UpdateFavoriteButtons() {
+    const auto& episodes = List();
+    auto episode = std::find_if(episodes.begin(), episodes.end(),
+                                [this](const auto& item) { return item.id == selected_id_; });
+    if (episode == episodes.end())
+        return;
+    for (size_t i = 0; i < track_favorite_labels_.size() && i < episode->tracks.size(); ++i) {
+        const bool on = favorites_.songs &&
+                        nabo_song_favorites::Contains(*favorites_.songs, episode->tracks[i]);
+        lv_label_set_text(track_favorite_labels_[i], on ? "已收藏" : "收藏");
+        lv_obj_set_style_text_color(track_favorite_labels_[i], lv_color_hex(on ? kAmber : kMuted),
+                                    0);
+    }
+}
+
+void Tab5PodcastPage::RefreshFavorites() {
+    if (!callbacks_.favorites)
+        return;
+    auto snapshot = callbacks_.favorites();
+    if (favorites_seen_ && snapshot.revision == favorites_.revision)
+        return;
+    const bool changed = !favorites_seen_ || snapshot.songs != favorites_.songs ||
+                         snapshot.ready != favorites_.ready;
+    const bool was_pending = favorites_.pending;
+    favorites_ = std::move(snapshot);
+    favorites_seen_ = true;
+    if (changed) {
+        UpdateFavoriteButtons();
+        if (pane_ == 2)
+            RenderFavorites();
+    }
+    if (favorites_.error == nabo_song_favorites::Error::Write)
+        SetStatus("收藏保存失败，请检查 SD 卡", kError);
+    else if (was_pending && !favorites_.pending)
+        SetStatus("收藏歌单已保存", kMuted);
+}
+
+void Tab5PodcastPage::ToggleFavorite(size_t index, bool saved) {
+    if (!callbacks_.toggle_favorite)
+        return;
+    nabo_song_favorites::Track song;
+    if (saved) {
+        if (!favorites_.songs || index >= favorites_.songs->size())
+            return;
+        song = (*favorites_.songs)[index];
+    } else {
+        const auto& episodes = List();
+        auto episode = std::find_if(episodes.begin(), episodes.end(),
+                                    [this](const auto& item) { return item.id == selected_id_; });
+        if (episode == episodes.end() || index >= episode->tracks.size())
+            return;
+        song = episode->tracks[index];
+    }
+    const auto result = callbacks_.toggle_favorite(song);
+    RefreshFavorites();
+    using Change = nabo_song_favorites::Change;
+    SetStatus(result == Change::Added     ? "已加入收藏，正在保存…"
+              : result == Change::Removed ? "已取消收藏，正在保存…"
+              : result == Change::Full    ? "收藏已满，请先移除一首"
+                                          : "收藏暂不可用，请检查 SD 卡",
+              result == Change::Added || result == Change::Removed ? kAmber : kError);
+}
+
+void Tab5PodcastPage::PlayFavorite(size_t index) {
+    if (!favorites_.songs || index >= favorites_.songs->size() || !callbacks_.play_favorite)
+        return;
+    const auto song = (*favorites_.songs)[index];
+    const bool ok = callbacks_.play_favorite(std::string(song.title), std::string(song.artist),
+                                             std::string(song.song_id));
+    if (ok) {
+        playback_kind_ = PlaybackKind::Favorites;
+        playback_episode_id_ = 0;
+        now_title_ = tab5_podcast::DisplayText(song.title);
+        now_artist_ = tab5_podcast::DisplayText(song.artist);
+        now_line_.clear();
+        UpdatePlayLabels();
+    }
+    SetStatus(ok ? "正在获取收藏歌曲…" : "收藏歌曲暂时无法播放", ok ? kAmber : kError);
 }
 
 void Tab5PodcastPage::SetStatus(const char* text, uint32_t color) {
@@ -492,6 +624,16 @@ void Tab5PodcastPage::PlaySelected() {
 }
 
 void Tab5PodcastPage::PlaySongs() {
+    if (playing_ && playback_kind_ == PlaybackKind::Favorites) {
+        if (callbacks_.stop)
+            callbacks_.stop();
+        SetStatus("已停止播放", kMuted);
+        return;
+    }
+    if (pane_ == 2) {
+        PlayFavorite(0);
+        return;
+    }
     if (playing_ && playback_kind_ == PlaybackKind::Songs && playback_episode_id_ == selected_id_) {
         if (callbacks_.stop)
             callbacks_.stop();
@@ -505,7 +647,10 @@ void Tab5PodcastPage::UpdatePlayLabels() {
     const bool active = playing_ && playback_episode_id_ == selected_id_;
     lv_label_set_text(play_label_,
                       active && playback_kind_ == PlaybackKind::Podcast ? "停止播客" : "播放播客");
-    lv_label_set_text(songs_label_, active && playback_kind_ == PlaybackKind::Songs
+    const bool favorite = playback_kind_ == PlaybackKind::Favorites && playing_;
+    lv_label_set_text(songs_label_, favorite     ? "停止收藏歌曲"
+                                    : pane_ == 2 ? "播放收藏歌曲"
+                                    : active && playback_kind_ == PlaybackKind::Songs
                                         ? "停止推荐歌曲"
                                         : "播放推荐歌曲");
     UpdateTransport();
@@ -535,8 +680,10 @@ void Tab5PodcastPage::PlayTrack(size_t index) {
 }
 
 void Tab5PodcastPage::UpdateTransport() {
-    const bool songs = playback_kind_ == PlaybackKind::Songs;
-    const bool active = playing_ && playback_episode_id_ == selected_id_;
+    const bool songs =
+        playback_kind_ == PlaybackKind::Songs || playback_kind_ == PlaybackKind::Favorites;
+    const bool active = playing_ && (playback_kind_ == PlaybackKind::Favorites ||
+                                     playback_episode_id_ == selected_id_);
     const int mode = int(songs) | (active ? 2 : 0);
     if (mode == transport_mode_)
         return;
@@ -576,6 +723,8 @@ void Tab5PodcastPage::UpdateHero() {
         lv_label_set_text(title_, heading.c_str());
         lv_obj_scroll_to_y(hero_, 0, LV_ANIM_OFF);
     }
+    if (song && song_trial_)
+        meta = "仅试听 · " + meta;
     if (meta != lv_label_get_text(meta_))
         lv_label_set_text(meta_, meta.c_str());
 }
@@ -606,6 +755,16 @@ void Tab5PodcastPage::HighlightNowPlaying() {
         if (on)
             lv_obj_scroll_to_view(track_rows_[i], LV_ANIM_ON);
     }
+    for (size_t i = 0;
+         favorites_.songs && i < favorite_rows_.size() && i < favorites_.songs->size(); ++i) {
+        const auto& song = (*favorites_.songs)[i];
+        const bool on =
+            playing_ && tab5_podcast::DisplayText(song.title) == now_title_ &&
+            (now_artist_.empty() || tab5_podcast::DisplayText(song.artist) == now_artist_);
+        lv_obj_set_style_bg_color(favorite_rows_[i], lv_color_hex(on ? 0x302719 : kPanel), 0);
+        lv_obj_set_style_border_color(favorite_rows_[i], lv_color_hex(kAmber), 0);
+        lv_obj_set_style_border_width(favorite_rows_[i], on ? 2 : 0, 0);
+    }
 }
 
 void Tab5PodcastPage::SetPlayback(bool playing, const char* now_playing) {
@@ -617,9 +776,10 @@ void Tab5PodcastPage::SetPlayback(bool playing, const char* now_playing) {
     UpdatePlayLabels();
     HighlightNowPlaying();
     if (playing && !now.empty()) {
-        const char* prefix = playback_kind_ == PlaybackKind::Podcast ? "播客播放中 · "
-                             : playback_kind_ == PlaybackKind::Songs ? "推荐歌曲播放中 · "
-                                                                     : "正在播放 · ";
+        const char* prefix = playback_kind_ == PlaybackKind::Podcast     ? "播客播放中 · "
+                             : playback_kind_ == PlaybackKind::Favorites ? "收藏歌曲播放中 · "
+                             : playback_kind_ == PlaybackKind::Songs     ? "推荐歌曲播放中 · "
+                                                                         : "正在播放 · ";
         const std::string text = prefix + tab5_podcast::DisplayText(now);
         SetStatus(text.c_str(), kAmber);
     }
@@ -636,6 +796,7 @@ void Tab5PodcastPage::Tick() {
     }
     BindFont();
     UpdateTranscript();
+    RefreshFavorites();
 }
 
 void Tab5PodcastPage::UpdateTranscript() {
@@ -680,7 +841,7 @@ void Tab5PodcastPage::UpdateTranscript() {
 nabo_radio::Mood Tab5PodcastPage::StudioMood(const char* state) const {
     nabo_radio::Mood mood;
     mood.link = nabo_radio::LinkFromState(state);
-    mood.music = playback_kind_ == PlaybackKind::Songs;
+    mood.music = playback_kind_ == PlaybackKind::Songs || playback_kind_ == PlaybackKind::Favorites;
     if (playback_kind_ == PlaybackKind::Podcast && playback_episode_id_ == selected_id_ &&
         active_cue_ >= 0) {
         const auto& episodes = List();

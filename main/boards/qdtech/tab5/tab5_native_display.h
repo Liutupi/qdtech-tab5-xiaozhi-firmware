@@ -2610,10 +2610,18 @@ public:
         }
     }
 
+    void SetPodcastSongTrial(bool trial) {
+        DisplayLockGuard lock(this);
+        if (lock.locked() && apps_)
+            apps_->SetPodcastSongTrial(trial);
+    }
+
     void BeginMusicTrack(const char* title, const char* artist) {
         DisplayLockGuard lock(this);
         if (!lock.locked())
             return;
+        if (apps_)
+            apps_->SetPodcastSongTrial(false);
         music_title_ = title && *title ? title : "音乐";
         music_artist_ = artist ? artist : "";
         music_lyrics_ = {};

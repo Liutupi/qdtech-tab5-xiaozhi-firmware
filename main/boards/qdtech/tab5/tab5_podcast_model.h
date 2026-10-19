@@ -7,6 +7,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #ifdef ESP_PLATFORM
@@ -54,6 +55,9 @@ inline Str ToStr(std::string_view v) { return Str(v.data(), v.size()); }
 struct Track {
     Str title;
     Str artist;
+    Str song_id;  // optional resolver identity; never an expiring audio URL
+    Track(Str title = {}, Str artist = {}, Str song_id = {})
+        : title(std::move(title)), artist(std::move(artist)), song_id(std::move(song_id)) {}
 };
 using TrackList = std::vector<Track, PsramAllocator<Track>>;
 
@@ -101,7 +105,9 @@ inline bool SameEpisodes(const EpisodeList& a, const EpisodeList& b) {
             x.cues.size() != y.cues.size())
             return false;
         for (size_t j = 0; j < x.tracks.size(); ++j)
-            if (x.tracks[j].title != y.tracks[j].title || x.tracks[j].artist != y.tracks[j].artist)
+            if (x.tracks[j].title != y.tracks[j].title ||
+                x.tracks[j].artist != y.tracks[j].artist ||
+                x.tracks[j].song_id != y.tracks[j].song_id)
                 return false;
         for (size_t j = 0; j < x.cues.size(); ++j)
             if (x.cues[j].start_ms != y.cues[j].start_ms || x.cues[j].end_ms != y.cues[j].end_ms ||

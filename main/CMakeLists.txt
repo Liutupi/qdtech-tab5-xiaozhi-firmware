@@ -921,7 +921,7 @@ file(GLOB BOARD_SOURCES
 list(FILTER BOARD_SOURCES EXCLUDE REGEX "/nabo_portrait_matte\\.c$")
 list(FILTER BOARD_SOURCES EXCLUDE REGEX "/nabo_sd_static\\.c$")
 list(FILTER BOARD_SOURCES EXCLUDE REGEX "/nabo_think_torso_raw\\.c$")
-list(FILTER BOARD_SOURCES EXCLUDE REGEX "/qd_font_lyric_40\\.c$")
+list(FILTER BOARD_SOURCES EXCLUDE REGEX "/qd_font_lyric_48\\.c$")
 if(CONFIG_QDTECH_TAB5_NATIVE_UI)
     # The native interface uses the board hardware and XiaoZhi core, without
     # compiling the fixed-size desktop, its apps, or their image assets.
@@ -931,7 +931,7 @@ if(CONFIG_QDTECH_TAB5_NATIVE_UI)
     list(APPEND BOARD_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_lxgw_28.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_cjk_28.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_lyric_40.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_lyric_48.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_lxgw_36.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_clock_72.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/nabo_assets.c
@@ -1016,7 +1016,7 @@ if(CONFIG_QDTECH_TAB5_NATIVE_UI)
             ${TAB5_THINK_TORSO_RAW_ASM})
     endif()
 else()
-    list(FILTER BOARD_SOURCES EXCLUDE REGEX "/(tab5_vision_service|tab5_native_apps|tab5_radio_page|tab5_radio_stage|tab5_icu_page|tab5_music_lyrics|tab5_muse_inbox|tab5_sd_assets|icu_calculators)\\.cc$")
+    list(FILTER BOARD_SOURCES EXCLUDE REGEX "/(tab5_vision_service|tab5_native_apps|tab5_radio_page|tab5_radio_stage|tab5_song_favorites|tab5_icu_page|tab5_music_lyrics|tab5_muse_inbox|tab5_sd_assets|icu_calculators)\\.cc$")
 endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 

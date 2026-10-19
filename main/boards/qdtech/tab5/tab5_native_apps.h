@@ -77,6 +77,9 @@ public:
         std::function<bool(const std::string& url, const std::string& title)> podcast_play_url;
         // Play an episode's tracks from index (NAS resolves each song on NetEase).
         std::function<bool(int episode, int index, int count)> podcast_play;
+        std::function<bool(const std::string& title, const std::string& artist,
+                           const std::string& song_id)>
+            podcast_favorite_play;
     };
 
     explicit Tab5NativeApps(lv_obj_t* screen);
@@ -125,6 +128,7 @@ public:
     bool IsRadioVisible() const;
     bool IsSettingsVisible() const;
     bool IsPodcastVisible() const;
+    void SetPodcastSongTrial(bool trial);
     void SetPodcastNowPlaying(const char* title, const char* artist, const char* line);
 
 private:
@@ -150,6 +154,7 @@ private:
     // Created on first open; episodes and playback state are kept here meanwhile.
     std::unique_ptr<Tab5PodcastPage> podcast_page_;
     tab5_podcast::SharedEpisodes podcast_episodes_;
+    bool podcast_song_trial_ = false;
     std::string podcast_now_title_, podcast_now_artist_, podcast_now_line_;
     std::string radio_station_name_;
     lv_obj_t* podcast_entry_detail_ = nullptr;
