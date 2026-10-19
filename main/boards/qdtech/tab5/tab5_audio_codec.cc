@@ -351,3 +351,32 @@ int Tab5AudioCodec::Write(const int16_t* data, int samples) {
     }
     return samples;
 }
+
+int Tab5AudioCodec::OutputStereoFrames(const int16_t* data, int frames) {
+    if (!data || frames <= 0)
+        return 0;
+    std::lock_guard<std::mutex> lock(codec_mutex_);
+    if (!output_enabled_)
+        return 0;
+    int written = 0;
+    while (written < frames) {
+        const int count = std::min(frames - written, int(stereo_output_.size() / 2));
+        std::copy_n(data + written * 2, count * 2, stereo_output_.begin());
+        const int err =
+            esp_codec_dev_write(output_dev_, stereo_output_.data(), count * 2 * sizeof(int16_t));
+        if (err != 0) {
+            ++write_failures_;
+            if (write_failures_ == 1 || write_failures_ % 32 == 0)
+                ESP_LOGW(TAG, "stereo output write failed err=%d count=%u", err,
+                         unsigned(write_failures_));
+            if (write_failures_ >= 4) {
+                write_failures_ = 0;
+                ReopenOutputLocked();
+            }
+            break;
+        }
+        write_failures_ = 0;
+        written += count;
+    }
+    return written;
+}

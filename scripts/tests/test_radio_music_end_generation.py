@@ -31,6 +31,7 @@ public:
     std::atomic<uint32_t> stream_generation_{1};
     std::atomic<bool> replacement_pending_{false};
     std::atomic<bool> play_requested_{true};
+    std::atomic<bool> user_paused_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> playing_custom_url_{true};
     std::atomic<bool> playback_release_pending_{false};

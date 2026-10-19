@@ -37,7 +37,7 @@ struct QdtechTab5Display {
     std::mutex wait_mutex;
     std::condition_variable wait_cv;
     bool block_connect = false, connect_entered = false, resume_connect = false;
-    void BeginMusicTrack(const char* next_title, const char* next_artist) {
+    void BeginMusicTrack(const char* next_title, const char* next_artist, const char*) {
         title = next_title; artist = next_artist; active = true;
         line.clear(); lyrics.clear();
     }

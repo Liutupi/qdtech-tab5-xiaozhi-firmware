@@ -5,7 +5,7 @@
 #include <string_view>
 
 // Audio-output time, not download time or wall time. Nothing advances during
-// buffering. A new HTTP stream (including reconnect) starts from zero.
+// buffering or pause. Range resumes begin at the saved output position.
 namespace tab5_playback {
 struct Position {
     bool matches = false;
@@ -15,11 +15,11 @@ struct Position {
 
 class Clock {
 public:
-    void Begin(std::string_view url, uint32_t generation) {
+    void Begin(std::string_view url, uint32_t generation, uint32_t base_ms = 0) {
         std::lock_guard<std::mutex> lock(mutex_);
         source_ = Key(url);
         generation_ = generation;
-        microseconds_ = 0;
+        microseconds_ = uint64_t(base_ms) * 1000;
     }
     void Advance(int samples, int rate, uint32_t generation) {
         if (samples <= 0 || rate <= 0)

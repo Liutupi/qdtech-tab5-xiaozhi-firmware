@@ -371,9 +371,8 @@ class QdtechTab5Display : public MipiLcdDisplay {
     std::string music_artist_;
     tab5_lrc::Document music_lyrics_;
     int music_line_index_ = -2;
-    int64_t music_elapsed_ms_ = 0;
-    int64_t music_resume_ms_ = 0;
-    uint32_t music_stream_open_sequence_ = 0;
+    std::string music_source_url_;
+    std::function<tab5_playback::Position(std::string_view)> music_position_;
     bool music_playing_ = false;
     bool music_active_ = false;
     bool music_seen_station_ = false;
@@ -385,11 +384,13 @@ class QdtechTab5Display : public MipiLcdDisplay {
     void RefreshMusicLyrics() {
         if (music_lyrics_.lines.empty())
             return;
-        const int64_t now_ms = esp_timer_get_time() / 1000;
-        const int64_t elapsed =
-            music_elapsed_ms_ + (music_playing_ ? now_ms - music_resume_ms_ : 0);
-        const int index = tab5_lrc::ActiveLine(
-            music_lyrics_, static_cast<uint32_t>(std::max<int64_t>(0, elapsed)));
+        // The decoder clock advances only after frames reach I2S, including
+        // Range resumes. Buffering, pause and a delayed UI tick cannot drift it.
+        const auto position =
+            music_position_ ? music_position_(music_source_url_) : tab5_playback::Position{};
+        if (!position.matches)
+            return;
+        const int index = tab5_lrc::ActiveLine(music_lyrics_, position.milliseconds);
         if (index == music_line_index_)
             return;
         music_line_index_ = index;
@@ -407,8 +408,7 @@ class QdtechTab5Display : public MipiLcdDisplay {
 
     // Called only while LVGL owns the display context. The radio decoder posts
     // status to a mailbox so it never waits for a slow render frame here.
-    void UpdateMusicPlaybackStateLocked(const char* station, const char* state,
-                                        uint32_t stream_open_sequence = 0) {
+    void UpdateMusicPlaybackStateLocked(const char* station, const char* state) {
         if (!music_active_)
             return;
         const std::string expected =
@@ -425,28 +425,12 @@ class QdtechTab5Display : public MipiLcdDisplay {
         }
         if (!music_seen_station_)
             return;
-        // A broken HTTP stream is reopened from byte zero, not resumed with a
-        // Range request. Rewind the lyrics even if Connecting was overwritten
-        // by Buffering/Playing in the latest-state mailbox before this tick.
-        if (stream_open_sequence != 0 && stream_open_sequence != music_stream_open_sequence_) {
-            music_stream_open_sequence_ = stream_open_sequence;
-            music_elapsed_ms_ = 0;
-            music_resume_ms_ = 0;
-            music_playing_ = false;
-            music_line_index_ = -2;
-            RefreshMusicLyrics();
-        }
         const bool playing = state && std::strcmp(state, "Playing") == 0;
         if (playing == music_playing_)
             return;
-        const int64_t now_ms = esp_timer_get_time() / 1000;
-        if (playing)
-            music_resume_ms_ = now_ms;
-        else
-            music_elapsed_ms_ += now_ms - music_resume_ms_;
         music_playing_ = playing;
         if (playing)
-            next_idle_reaction_ms_ = static_cast<uint64_t>(now_ms);
+            next_idle_reaction_ms_ = static_cast<uint64_t>(esp_timer_get_time() / 1000);
     }
 
 #ifdef CONFIG_QDTECH_TAB5_PPA_FLUSH_EXPERIMENT
@@ -1574,8 +1558,7 @@ class QdtechTab5Display : public MipiLcdDisplay {
             tick_ = service_tick;
             if (radio_status_mailbox_.Take(radio_status_current_)) {
                 UpdateMusicPlaybackStateLocked(radio_status_current_.station.data(),
-                                               radio_status_current_.state.data(),
-                                               radio_status_current_.stream_open_sequence);
+                                               radio_status_current_.state.data());
                 if (apps_)
                     apps_->SetRadioState(radio_status_current_.station.data(),
                                          radio_status_current_.state.data(),
@@ -2308,6 +2291,7 @@ public:
 
     void SetAppsActions(Tab5NativeApps::Actions actions, std::function<void()> voice_play) {
         DisplayLockGuard lock(this);
+        music_position_ = actions.podcast_position;
         if (apps_)
             apps_->SetActions(std::move(actions));
         radio_voice_action_ = std::move(voice_play);
@@ -2616,7 +2600,7 @@ public:
             apps_->SetPodcastSongTrial(trial);
     }
 
-    void BeginMusicTrack(const char* title, const char* artist) {
+    void BeginMusicTrack(const char* title, const char* artist, const char* url) {
         DisplayLockGuard lock(this);
         if (!lock.locked())
             return;
@@ -2626,9 +2610,7 @@ public:
         music_artist_ = artist ? artist : "";
         music_lyrics_ = {};
         music_line_index_ = -2;
-        music_elapsed_ms_ = 0;
-        music_resume_ms_ = 0;
-        music_stream_open_sequence_ = 0;
+        music_source_url_ = url ? url : "";
         music_playing_ = false;
         music_active_ = true;
         music_seen_station_ = false;

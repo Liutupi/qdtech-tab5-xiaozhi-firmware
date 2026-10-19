@@ -40,7 +40,7 @@ struct Tab5PodcastPage {
  struct Callbacks {std::function<tab5_playback::Position(std::string_view)> playback_position;} callbacks_;
  enum class PlaybackKind {None,Podcast,Songs};
  PlaybackKind playback_kind_=PlaybackKind::Podcast;
- bool playing_=true,manual_scroll_=false,transcript_scroll_pending_=false;
+ bool playing_=true,paused_=false,requested_=false,manual_scroll_=false,transcript_scroll_pending_=false;
  unsigned manual_scroll_started_=0;
  int active_cue_=-1,playback_episode_id_=4,selected_id_=4,pane_=0;
  std::vector<lv_obj_t*> cue_rows_;

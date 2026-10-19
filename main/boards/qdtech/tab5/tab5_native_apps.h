@@ -38,6 +38,7 @@ public:
         std::function<void()> start_radio;
         std::function<void()> radio_play_pause;
         std::function<bool()> radio_play_requested;
+        std::function<bool()> radio_is_paused;
         std::function<void()> radio_stop;
         std::function<void()> radio_next;
         std::function<void()> radio_previous;
@@ -245,6 +246,7 @@ private:
     std::string radio_link_state_;
     std::string current_station_name_;
     bool radio_playing_ = false;
+    bool radio_paused_ = false;
     Actions actions_;
 
     static lv_obj_t* Card(lv_obj_t* parent, int x, int y, int width, int height,

@@ -666,7 +666,7 @@ private:
             return "Music URL was NOT started: superseded by a newer request.";
         auto* display = static_cast<QdtechTab5Display*>(display_);
         music_track_.Begin(generation, title, artist);
-        display->BeginMusicTrack(title.c_str(), artist.c_str());
+        display->BeginMusicTrack(title.c_str(), artist.c_str(), url.c_str());
         display->SetMusicInfo(title.c_str(), artist.c_str(), "正在连接音源…");
         const auto result = radio_service_.PlayUrlFromTool(title, artist, url);
         if (result.rfind("Music URL was NOT started", 0) == 0) {
@@ -2406,11 +2406,14 @@ public:
             };
             actions.start_radio = [this] { EnsureNativeRadio(); };
             actions.radio_play_requested = [this] { return radio_service_.IsPlayRequested(); };
+            actions.radio_is_paused = [this] { return radio_service_.IsPaused(); };
             actions.radio_play_pause = [this] {
-                ReplaceMusicSource([this] {
-                    EnsureNativeRadio();
+                EnsureNativeRadio();
+                if (radio_service_.IsPlayRequested()) {
                     radio_service_.PlayPause();
-                });
+                    return;
+                }
+                ReplaceMusicSource([this] { radio_service_.PlayPause(); });
             };
             actions.radio_stop = [this] {
                 ReplaceMusicSource([this] {

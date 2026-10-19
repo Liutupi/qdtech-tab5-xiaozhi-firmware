@@ -10,6 +10,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include "radio_catalog.h"
+#include "tab5_audio_stream.h"
 #include "tab5_playback_clock.h"
 
 class DesktopUI;
@@ -20,6 +21,7 @@ public:
     void Start(DesktopUI* desktop_ui, StateCallback callback = {});
     bool IsStarted() const { return started_.load(std::memory_order_acquire); }
     bool IsPlayRequested() const { return play_requested_.load(std::memory_order_acquire); }
+    bool IsPaused() const { return user_paused_.load(std::memory_order_acquire); }
     void Play();
     void Pause();
     void PlayPause();
@@ -88,9 +90,8 @@ private:
     int AdjacentCatalogIndex(int from, int delta, int category_filter) const;
     void SetUi(const char* state, const char* detail);
     bool FinishCustomUrlIfCurrent(uint32_t stream_generation, bool completed, const char* detail);
-    void WritePcm(const int16_t* pcm, int samples, int channels, int sample_rate,
-                  int16_t* mono_buffer, int mono_capacity, int16_t* output_buffer,
-                  int output_capacity, uint32_t stream_generation);
+    bool WritePcm(const int16_t* pcm, int samples, int channels, int sample_rate,
+                  int16_t* output_buffer, int output_capacity, uint32_t stream_generation);
     void ResetAudioLeveler();
     void ApplyAudioLeveler(int16_t* pcm, int samples);
     void LoadFavorites();
@@ -117,6 +118,8 @@ private:
     bool task_stack_internal_ = false;
     std::atomic<bool> started_{false};
     std::atomic<bool> play_requested_{false};
+    std::atomic<bool> user_paused_{false};
+    tab5_audio_stream::ResumePoint resume_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> audio_focus_blocked_{false};
     std::atomic<bool> playback_release_pending_{false};
@@ -138,6 +141,9 @@ private:
     std::function<void()> playback_released_callback_;
     bool focus_pause_logged_ = false;
     int reconnect_attempt_ = 0;
+    bool relay_preparing_ = false;
+    int64_t preparation_started_us_ = 0;
+    uint64_t resample_phase_ = 0;
     std::vector<int8_t> last_success_url_;
     // Set before the player task starts. Index catalog_station_count_ is the
     // reserved music URL slot; public station listings only expose the catalog.

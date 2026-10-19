@@ -698,6 +698,8 @@ void Tab5NativeApps::SetRadioState(const char* station, const char* state, const
     if (state) {
         if (std::strcmp(state, "Playing") == 0)
             localized = "播放中", color = kLevel;
+        else if (std::strcmp(state, "Preparing") == 0)
+            localized = "音频准备中", color = kAmber;
         else if (std::strcmp(state, "Buffering") == 0)
             localized = "缓冲中", color = kAmber;
         else if (std::strcmp(state, "Connecting") == 0 || std::strcmp(state, "Reconnecting") == 0)
@@ -719,12 +721,15 @@ void Tab5NativeApps::SetRadioState(const char* station, const char* state, const
         lv_obj_set_style_text_color(radio_state_, lv_color_hex(color), 0);
     }
     radio_playing_ = state && std::strcmp(state, "Playing") == 0;
+    radio_paused_ = actions_.radio_is_paused && actions_.radio_is_paused();
     radio_station_name_ = station ? station : "";
-    if (podcast_page_)
-        podcast_page_->SetPlayback(radio_playing_, radio_station_name_.c_str());
     const bool play_requested =
         actions_.radio_play_requested ? actions_.radio_play_requested() : radio_playing_;
-    SetLabelTextIfChanged(radio_play_label_, play_requested ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    if (podcast_page_)
+        podcast_page_->SetPlayback(radio_playing_, radio_station_name_.c_str(), radio_paused_,
+                                   play_requested);
+    SetLabelTextIfChanged(radio_play_label_,
+                          play_requested && !radio_paused_ ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
     if (!radio_song_)
         SetMusicLyricLine(nullptr);
     if (station_changed ||

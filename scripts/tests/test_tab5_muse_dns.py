@@ -20,8 +20,9 @@ class MuseDnsTests(unittest.TestCase):
         connection = source[source.index('RelayConnection CachedRelayConnection('):
                             source.index('Inbox& Inbox::GetInstance()')]
         radio = (BOARD / 'radio_service.cc').read_text()
-        radio = radio[radio.index('#if CONFIG_QDTECH_TAB5_NATIVE_UI\n    const auto relay_connection ='):
+        radio = radio[radio.index('    esp_http_client_config_t config = {};', radio.index('bool RadioService::PlayUrl(')):
                       radio.index('    esp_err_t err = esp_http_client_open(client, 0);')]
+        radio = 'const auto relay_connection = tab5_muse::CachedRelayConnection(url);\n' + radio
         radio = radio.replace('return false;', 'return nullptr;')  # setup harness returns its handle
         harness = r'''
 #define CONFIG_QDTECH_TAB5_NATIVE_UI 1
@@ -40,6 +41,7 @@ class MuseDnsTests(unittest.TestCase):
 #include <type_traits>
 #include <vector>
 #include <cJSON.h>
+#include "tab5_audio_stream.h"
 constexpr size_t kMaxJsonBytes=32768;
 constexpr int kTimeoutMs=4000,ESP_OK=0;
 struct RelayConnection {std::string url;std::string server_name;};
@@ -74,7 +76,13 @@ struct Board {
  Network* GetNetwork() {static Network n;return &n;}
 };
 void esp_crt_bundle_attach() {}
+struct StreamResponse {tab5_audio_stream::Range range;};
+constexpr int HTTP_EVENT_ON_HEADER=1;
+using esp_err_t=int;
+struct esp_http_client_event_t {int event_id; const char* header_key; const char* header_value; void* user_data;};
 struct esp_http_client_config_t {
+ void* user_data=nullptr;
+ int(*event_handler)(esp_http_client_event_t*)=nullptr;
  const char* url=nullptr;const char* common_name=nullptr;
  void(*crt_bundle_attach)()=nullptr;
  int timeout_ms=0;bool disable_auto_redirect=false;bool skip_cert_common_name_check=false;
@@ -113,7 +121,9 @@ RelayConnection CachedRelayConnection(const std::string& url) {return ::CachedRe
 }
 void SetUi(const char*,const char*) {}
 bool IsNetEaseMusicUrl(const std::string& url) {return url.find("music.126.net/")!=std::string::npos;}
-Client* CreateRadioClient(const std::string& url,bool playing_custom_url_) {
+Client* CreateRadioClient(const std::string& url,bool) {
+ const bool resuming=false; const uint64_t range_start=0;
+ const auto& playback_url=url;
 ''' + radio + r'''
 return client;
 }
@@ -204,7 +214,7 @@ int main() {
             subprocess.run(['cc', '-c', str(CJSON/'cJSON.c'), '-o', str(obj)],
                            check=True, capture_output=True, text=True)
             result = subprocess.run(['c++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                                     '-I', str(CJSON), str(cpp), str(obj), '-o', str(exe)],
+                                     '-I', str(CJSON), '-I', str(BOARD), str(cpp), str(obj), '-o', str(exe)],
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)

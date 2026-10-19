@@ -96,8 +96,12 @@ static constexpr size_t kMusicRingBytes[] = {384 * 1024, 192 * 1024, 96 * 1024};
 static constexpr size_t kRadioRingBytes[] = {128 * 1024, 64 * 1024};
 
 namespace {
+struct StreamResponse {
+    tab5_audio_stream::Range range;
+};
 struct StreamReader {
     esp_http_client_handle_t client = nullptr;
+    std::unique_ptr<StreamResponse> response;
     StreamBufferHandle_t ring = nullptr;
     SemaphoreHandle_t done = nullptr;
     std::atomic<bool> stop{false};
@@ -229,9 +233,9 @@ void DeferredReaderReaperTask(void* arg) {
             }
             // The reader has signalled done and parked. It can no longer touch
             // its ring or HTTP handle, which the radio task already detached.
-            DestroyStreamReader(orphan.reader, orphan.task);
             esp_http_client_close(orphan.client);
             esp_http_client_cleanup(orphan.client);
+            DestroyStreamReader(orphan.reader, orphan.task);
             pending[i] = pending[--pending_count];
             const size_t remaining = g_deferred_reader_count.fetch_sub(1) - 1;
             ESP_LOGI(TAG, "deferred stream reader reclaimed remaining=%u psram_free=%u",
@@ -284,11 +288,11 @@ void ReapFallbackReaders() {
             ++i;
             continue;
         }
-        // The reader has signalled done and parked. Delete its task first,
-        // then its ring/semaphore, then the HTTP handle it no longer touches.
-        DestroyStreamReader(orphan.reader, orphan.task);
+        // The reader has signalled done and parked. Keep response metadata
+        // alive through HTTP cleanup, then delete the parked task and ring.
         esp_http_client_close(orphan.client);
         esp_http_client_cleanup(orphan.client);
+        DestroyStreamReader(orphan.reader, orphan.task);
         g_deferred_readers[i] = g_deferred_readers[--g_fallback_reader_count];
         const size_t remaining = g_deferred_reader_count.fetch_sub(1) - 1;
         ESP_LOGI(TAG, "deferred stream reader reclaimed remaining=%u",
@@ -997,7 +1001,20 @@ void RadioService::SelectStationIndex(int index, int category_filter) {
 }
 
 void RadioService::PlayPause() {
-    std::lock_guard<std::mutex> submission_lock(submission_mutex_);
+    std::unique_lock<std::mutex> submission_lock(submission_mutex_);
+    if (play_requested_ && !stop_requested_ && !replacement_pending_) {
+        const bool paused = !user_paused_.load();
+        user_paused_ = paused;
+        command_sequence_.fetch_add(1, std::memory_order_relaxed);
+        pending_toggle_parity_ = false;
+        {
+            std::lock_guard<std::mutex> lock(pending_mutex_);
+            pending_navigation_steps_ = 0;
+        }
+        SetUi(paused ? "Paused" : "Connecting", paused ? "Position saved" : "Resuming");
+        return;
+    }
+    user_paused_ = false;
     if (replacement_pending_.load(std::memory_order_acquire)) {
         {
             std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -1023,7 +1040,17 @@ void RadioService::PlayPause() {
 }
 
 void RadioService::Play() {
-    std::lock_guard<std::mutex> submission_lock(submission_mutex_);
+    std::unique_lock<std::mutex> submission_lock(submission_mutex_);
+    if (user_paused_.exchange(false)) {
+        command_sequence_.fetch_add(1, std::memory_order_relaxed);
+        pending_toggle_parity_ = false;
+        {
+            std::lock_guard<std::mutex> lock(pending_mutex_);
+            pending_navigation_steps_ = 0;
+        }
+        SetUi("Connecting", "Resuming");
+        return;
+    }
     bool selection_pending;
     {
         std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -1040,7 +1067,18 @@ void RadioService::Play() {
 }
 
 void RadioService::Pause() {
-    std::lock_guard<std::mutex> submission_lock(submission_mutex_);
+    std::unique_lock<std::mutex> submission_lock(submission_mutex_);
+    if (play_requested_ && !stop_requested_ && !replacement_pending_) {
+        user_paused_ = true;
+        command_sequence_.fetch_add(1, std::memory_order_relaxed);
+        pending_toggle_parity_ = false;
+        {
+            std::lock_guard<std::mutex> lock(pending_mutex_);
+            pending_navigation_steps_ = 0;
+        }
+        SetUi("Paused", "Position saved");
+        return;
+    }
     bool pending_play;
     {
         std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -1063,6 +1101,7 @@ void RadioService::Pause() {
 void RadioService::Stop() {
     std::lock_guard<std::mutex> submission_lock(submission_mutex_);
     ESP_LOGI(TAG, "Stop requested");
+    user_paused_ = false;
     music_playback_state_.store(0, std::memory_order_relaxed);
     playback_release_pending_.store(true, std::memory_order_relaxed);
     play_requested_ = false;
@@ -1171,7 +1210,10 @@ std::string RadioService::GetStatusJson() const {
     cJSON* root = cJSON_CreateObject();
     if (!root) return "{}";
     cJSON_AddStringToObject(root, "station", name.c_str());
-    cJSON_AddStringToObject(root, "state", play_requested_.load() ? "playing" : "stopped");
+    cJSON_AddStringToObject(root, "state",
+                            user_paused_             ? "paused"
+                            : play_requested_.load() ? "playing"
+                                                     : "stopped");
     cJSON_AddStringToObject(root, "codec", codec.c_str());
     cJSON_AddNumberToObject(root, "bitrate_kbps", bitrate);
     char* encoded = cJSON_PrintUnformatted(root);
@@ -1184,7 +1226,8 @@ std::string RadioService::GetStatusJson() const {
 std::string RadioService::GetMusicStatusJson() const {
     const char* states[] = {"stopped", "playing", "ended", "unavailable"};
     const int state = music_playback_state_.load(std::memory_order_relaxed);
-    return std::string("{\"state\":\"") + states[state >= 0 && state < 4 ? state : 0] + "\"}";
+    return std::string("{\"state\":\"") +
+           (user_paused_ ? "paused" : states[state >= 0 && state < 4 ? state : 0]) + "\"}";
 }
 
 std::string RadioService::SelectStation(const std::string& station) {
@@ -1388,6 +1431,14 @@ void RadioService::Task() {
             continue;
         }
 
+        if (user_paused_) {
+            if (!focus_pause_logged_) {
+                ReleaseExternalAudioIfNotReplacing();
+                focus_pause_logged_ = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         if (!play_requested_) {
             reconnect_attempt_ = 0;
             if (playback_release_pending_.exchange(false, std::memory_order_relaxed)) {
@@ -1414,6 +1465,8 @@ void RadioService::Task() {
 
         const uint32_t generation = stream_generation_.load(std::memory_order_relaxed);
         PlayCurrentStation(generation);
+        if (user_paused_)
+            continue;
         if (generation != stream_generation_.load(std::memory_order_relaxed)) {
             reconnect_attempt_ = 0;
             continue;
@@ -1422,6 +1475,10 @@ void RadioService::Task() {
         if (skip_reconnect_once_) {
             skip_reconnect_once_ = false;
             reconnect_attempt_ = 0;
+            continue;
+        }
+        if (relay_preparing_ && play_requested_) {
+            WaitForRetry(2000, generation);
             continue;
         }
         if (play_requested_ && playing_custom_url_) {
@@ -1478,6 +1535,11 @@ void RadioService::HandleCommand(Command command, uint32_t sequence) {
         ESP_LOGI(TAG, "ignored superseded radio command=%d during stream replacement",
                  static_cast<int>(command));
         return;
+    }
+    if (command != Command::FOCUS_CHANGED) {
+        user_paused_ = false;
+        preparation_started_us_ = 0;
+        relay_preparing_ = false;
     }
     const int count = SlotCount();
     if (count <= 0) {
@@ -1734,7 +1796,7 @@ void RadioService::PlayCurrentStation(uint32_t stream_generation) {
         }
         tried_any = true;
         attempted_sources++;
-        if (PlayUrl(url, i, stream_generation)) {
+        if (PlayUrl(url, i, stream_generation) || user_paused_ || relay_preparing_) {
             return;
         }
         if (last_url_permanent_error_) {
@@ -1765,7 +1827,7 @@ void RadioService::PlayCurrentStation(uint32_t stream_generation) {
     if (play_requested_ && !stop_requested_) {
         SetUi("Error", tried_any ? "All sources failed" : "No source");
     }
-    if (!play_requested_.load(std::memory_order_relaxed) ||
+    if (!play_requested_.load(std::memory_order_relaxed) || user_paused_ ||
         stop_requested_.load(std::memory_order_relaxed))
         ReleaseExternalAudioIfNotReplacing();
 }
@@ -1781,16 +1843,29 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     const int64_t t_start_us = esp_timer_get_time();
     SetUi("Connecting", url_index == 0 ? "Opening stream" : "Fallback source");
     ResetAudioLeveler();
+    resample_phase_ = 0;
+    relay_preparing_ = false;
     last_url_permanent_error_ = false;
     if (playing_custom_url_) {
         custom_url_stream_completed_ = false;
         custom_url_fatal_error_ = false;
     }
 
+    const bool resuming = playing_custom_url_ && resume_.Matches(url, stream_generation);
+    const uint64_t range_start = resuming ? resume_.Start() : 0;
+    const uint64_t skip_until = resuming ? resume_.byte : 0;
+    const uint32_t base_ms = resuming ? resume_.milliseconds : 0;
+    std::string playback_url = url;
 #if CONFIG_QDTECH_TAB5_NATIVE_UI
-    const auto relay_connection = tab5_muse::CachedRelayConnection(url);
+    const auto inbox = tab5_muse::Inbox::GetInstance().Current();
+    playback_url = tab5_audio_stream::RelayUrl(inbox.url, inbox.host, url, !playing_custom_url_);
+    if (playback_url.empty()) {
+        SetUi("Error", "96k audio service is not configured");
+        return false;
+    }
+    const auto relay_connection = tab5_muse::CachedRelayConnection(playback_url);
 #else
-    const tab5_muse::RelayConnection relay_connection{url, {}};
+    const tab5_muse::RelayConnection relay_connection{playback_url, {}};
 #endif
     esp_http_client_config_t config = {};
     config.url = relay_connection.url.c_str();
@@ -1801,16 +1876,26 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     // TLS handshake to qtfm/qingting can take several seconds on slower WAN
     // links (e.g. phone hotspots). Keep connect/read timeout generous; mid-stream
     // hangs are still cut by the 5s stall watchdog after data starts flowing.
-    config.timeout_ms = playing_custom_url_ ? 10000 : 8000;
+    config.timeout_ms = 25000;  // NAS file preparation responds within 20 seconds.
     // esp_http_client keeps this buffer in scarce internal SRAM.  Compressed
     // stream headroom lives in the 48 KB PSRAM buffer below, so a larger HTTP
     // scratch buffer only increases the risk of TLS/MQTT allocation failures.
     config.buffer_size = 4096;
-    config.buffer_size_tx = 1024;
+    config.buffer_size_tx =
+        static_cast<int>(std::clamp(playback_url.size() + 1024, size_t(4096), size_t(8192)));
     config.disable_auto_redirect = !relay_connection.server_name.empty();
     config.max_redirection_count = 5;
     config.crt_bundle_attach = esp_crt_bundle_attach;
 
+    auto response = std::make_unique<StreamResponse>();
+    config.user_data = response.get();
+    config.event_handler = [](esp_http_client_event_t* event) -> esp_err_t {
+        if (event->event_id == HTTP_EVENT_ON_HEADER && event->header_key && event->header_value &&
+            strcasecmp(event->header_key, "Content-Range") == 0)
+            static_cast<StreamResponse*>(event->user_data)->range =
+                tab5_audio_stream::ParseRange(event->header_value);
+        return ESP_OK;
+    };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
         SetUi("Error", "HTTP init failed");
@@ -1825,6 +1910,10 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     // Live streams through qtfm/qingting drop the connection after a few
     // minutes; close each response so reconnect starts clean.
     esp_http_client_set_header(client, "Connection", "close");
+    if (resuming) {
+        const std::string range = "bytes=" + std::to_string(range_start) + "-";
+        esp_http_client_set_header(client, "Range", range.c_str());
+    }
     if (IsNetEaseMusicUrl(url)) {
         esp_http_client_set_header(client, "User-Agent",
                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1896,6 +1985,19 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         release_client();
         return false;
     }
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+    if (status == 503) {
+        const int64_t now = esp_timer_get_time();
+        if (!preparation_started_us_)
+            preparation_started_us_ = now;
+        relay_preparing_ = now - preparation_started_us_ < 15LL * 60 * 1000000;
+        SetUi(relay_preparing_ ? "Preparing" : "Error",
+              relay_preparing_ ? "Preparing 96k stereo audio" : "Audio preparation timed out");
+        release_client();
+        return false;
+    }
+#endif
+    preparation_started_us_ = 0;
     if (status < 200 || status >= 400) {
         ESP_LOGW(TAG, "bad stream status station=%s url_index=%d status=%d len=%d url=%s",
                  station_name.c_str(), url_index, status, content_length, url.c_str());
@@ -1915,7 +2017,15 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         return false;
     }
 
-    if (playing_custom_url_ && content_length > 0 && content_length < 256 * 1024) {
+    if (resuming && (status != 206 || !response->range.valid ||
+                     response->range.first != range_start || response->range.total <= skip_until ||
+                     uint64_t(content_length) != response->range.last - range_start + 1)) {
+        SetUi("Error", "Cannot resume audio position");
+        release_client();
+        return false;
+    }
+#if !CONFIG_QDTECH_TAB5_NATIVE_UI
+    if (playing_custom_url_ && !resuming && content_length > 0 && content_length < 256 * 1024) {
         ESP_LOGW(TAG, "music url rejected as short preview len=%d station=%s", content_length,
                  station_name.c_str());
         custom_url_fatal_error_ = true;
@@ -1928,6 +2038,8 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         return false;
     }
 
+#endif
+
     ESP_LOGI(TAG, "stream open station=%s url_index=%d status=%d len=%d url=%s",
              station_name.c_str(), url_index, status, content_length, url.c_str());
     if (playing_custom_url_) {
@@ -1939,8 +2051,8 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
 
     HMP3Decoder decoder = MP3InitDecoder();
     auto* read_buffer = static_cast<uint8_t*>(heap_caps_malloc(kReadBufferSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    auto* pcm_buffer = static_cast<int16_t*>(heap_caps_malloc(kPcmMaxSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    auto* mono_buffer = static_cast<int16_t*>(heap_caps_malloc(kPcmMaxSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    auto* pcm_buffer = static_cast<int16_t*>(
+        heap_caps_malloc(kPcmMaxSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     auto* output_buffer = static_cast<int16_t*>(heap_caps_malloc(kPcmOutputMaxSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     // Pointers must be unique heap blocks: a smashed/double free here asserts
     // ("free() target pointer is outside heap areas") and reboots the device.
@@ -1950,7 +2062,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
             p = nullptr;
         }
     };
-    if (!decoder || !read_buffer || !pcm_buffer || !mono_buffer || !output_buffer) {
+    if (!decoder || !read_buffer || !pcm_buffer || !output_buffer) {
         ESP_LOGE(TAG, "decoder alloc failed");
         SetUi("Error", "No decoder memory");
         if (decoder) {
@@ -1959,7 +2071,6 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         }
         safe_free(read_buffer);
         safe_free(pcm_buffer);
-        safe_free(mono_buffer);
         safe_free(output_buffer);
         release_client();
         return false;
@@ -1969,8 +2080,10 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     auto* reader = new (std::nothrow) StreamReader();
     if (reader) {
         reader->client = client;
+        reader->response = std::move(response);
         reader->custom_url = playing_custom_url_;
-        reader->content_length = content_length;
+        reader->content_length = resuming ? int(reader->response->range.total) : content_length;
+        reader->total = range_start;
         reader->empty_limit = playing_custom_url_ ? kCustomUrlEmptyReadLimit : kRadioEmptyReadLimit;
         reader->station_name = station_name;
         reader->url_index = url_index;
@@ -2029,6 +2142,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
             }
             reader_running = false;
         }
+        response = std::move(reader->response);
         DestroyStreamReader(reader, reader_task);
         reader = nullptr;
         const int64_t elapsed_ms = (esp_timer_get_time() - stop_start_us) / 1000;
@@ -2044,14 +2158,14 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         decoder = nullptr;
         safe_free(read_buffer);
         safe_free(pcm_buffer);
-        safe_free(mono_buffer);
         safe_free(output_buffer);
         release_client();
         return false;
     }
 
     uint8_t* read_ptr = read_buffer;
-    playback_clock_.Begin(url, stream_generation);
+    playback_clock_.Begin(url, stream_generation, base_ms);
+    uint64_t decoder_received = range_start;
     int bytes_left = 0;
     int decoded_frames = 0;
     int64_t last_progress_log_us = 0;
@@ -2081,6 +2195,10 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
             stream_generation != stream_generation_.load(std::memory_order_relaxed)) {
             break;
         }
+        if (user_paused_) {
+            SetUi("Paused", "Position saved");
+            break;
+        }
         if (ShouldYieldAudio()) {
             SetUi("Paused", "XiaoZhi is using audio");
             ESP_LOGI(TAG, "radio yielded audio focus station=%s", station_name.c_str());
@@ -2101,7 +2219,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         const int initial_target = playing_custom_url_ ? 6 * 1024 : kInitialReadTargetBytes;
         const int target_bytes = decoded_frames == 0 ? initial_target : steady_target;
         while (bytes_left < target_bytes && bytes_left < kReadBufferSize && play_requested_ &&
-               !stop_requested_ &&
+               !stop_requested_ && !user_paused_ &&
                stream_generation == stream_generation_.load(std::memory_order_relaxed)) {
             // The network task fills the ring independently. Waiting for its
             // next burst while we already hold complete MP3 frames can drain
@@ -2112,6 +2230,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
                                                     kReadBufferSize - bytes_left, refill_wait);
             if (got > 0) {
                 bytes_left += static_cast<int>(got);
+                decoder_received += got;
                 continue;
             }
             const int reader_state = reader->state.load();
@@ -2138,11 +2257,13 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
                 break;
         }
         total_bytes = reader->total.load();
-        if (stream_generation != stream_generation_.load(std::memory_order_relaxed)) {
+        if (stream_generation != stream_generation_.load(std::memory_order_relaxed) ||
+            user_paused_) {
             break;
         }
         if (stream_completed) {
             if (playing_custom_url_) {
+                resume_.valid = false;
                 FinishCustomUrlIfCurrent(stream_generation, true, "Music ended");
             }
             break;
@@ -2211,10 +2332,33 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         decode_errors = 0;
         MP3FrameInfo frame_info = {};
         MP3GetLastFrameInfo(decoder, &frame_info);
-        WritePcm(pcm_buffer, frame_info.outputSamps, frame_info.nChans, frame_info.samprate,
-                 mono_buffer, kPcmMaxSamples, output_buffer, kPcmOutputMaxSamples,
-                 stream_generation);
+        if (resuming && decoder_received - uint64_t(bytes_left) <= skip_until)
+            continue;  // refill MP3 bit reservoir without replaying already heard frames
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+        if (frame_info.bitrate != 96000 || frame_info.samprate != 44100 || frame_info.nChans != 2) {
+            custom_url_fatal_error_ = playing_custom_url_;
+            stream_failed = true;
+            SetUi("Error", "Audio service format mismatch");
+            break;
+        }
+#endif
+        if (!WritePcm(pcm_buffer, frame_info.outputSamps, frame_info.nChans, frame_info.samprate,
+                      output_buffer, kPcmOutputMaxSamples, stream_generation)) {
+            stream_failed = true;
+            SetUi("Reconnecting", "Audio output retry");
+            break;
+        }
+        if (playing_custom_url_)
+            resume_.Capture(url, stream_generation, decoder_received - uint64_t(bytes_left),
+                            playback_clock_.Read(url, stream_generation).milliseconds);
         if (decoded_frames == 0) {
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+            {
+                std::lock_guard<std::mutex> lock(status_mutex_);
+                published_station_bitrate_ = 96;
+                published_station_codec_ = "MP3";
+            }
+#endif
             if (station_index_ >= 0 && station_index_ < static_cast<int>(last_success_url_.size())) {
                 last_success_url_[station_index_] = static_cast<int8_t>(url_index);
             }
@@ -2253,7 +2397,6 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     }
     safe_free(read_buffer);
     safe_free(pcm_buffer);
-    safe_free(mono_buffer);
     safe_free(output_buffer);
     if (reader_stopped) {
         release_client();
@@ -2262,7 +2405,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     // next URL. Releasing here re-enables the mic and reconfigures the shared
     // full-duplex I2S, which can leave TX disabled ("channel has not been
     // enabled yet") so later frames log "playing" with no sound.
-    if (!play_requested_.load(std::memory_order_relaxed) ||
+    if (!play_requested_.load(std::memory_order_relaxed) || user_paused_ ||
         stop_requested_.load(std::memory_order_relaxed))
         ReleaseExternalAudioIfNotReplacing();
     return decoded_frames > 0 && play_requested_ && !stop_requested_ && !stream_failed && !stream_completed &&
@@ -2276,14 +2419,14 @@ bool RadioService::IsXiaozhiAudioState() const {
 }
 
 bool RadioService::IsCustomUrlSpeakingGraceActive() const {
-    if (!playing_custom_url_ || !play_requested_.load(std::memory_order_relaxed)) {
+    if (user_paused_ || !playing_custom_url_ || !play_requested_.load(std::memory_order_relaxed)) {
         return false;
     }
     return static_cast<int32_t>(custom_url_speaking_grace_until_ - xTaskGetTickCount()) > 0;
 }
 
 bool RadioService::IsAutonomousCustomUrlSpeaking(int previous_state, int current_state) const {
-    if (!playing_custom_url_ || !play_requested_.load(std::memory_order_relaxed) ||
+    if (user_paused_ || !playing_custom_url_ || !play_requested_.load(std::memory_order_relaxed) ||
         current_state != kDeviceStateSpeaking) {
         return false;
     }
@@ -2297,8 +2440,7 @@ bool RadioService::ShouldYieldAudio() const {
     if (app_state == kDeviceStateSpeaking && IsCustomUrlSpeakingGraceActive()) {
         return false;
     }
-    if (app_state == kDeviceStateSpeaking &&
-        playing_custom_url_ &&
+    if (app_state == kDeviceStateSpeaking && playing_custom_url_ && !user_paused_ &&
         play_requested_.load(std::memory_order_relaxed) &&
         !audio_focus_blocked_.load(std::memory_order_relaxed)) {
         return false;
@@ -2375,8 +2517,8 @@ void RadioService::NextStation(int delta) {
 
 bool RadioService::FinishCustomUrlIfCurrent(uint32_t stream_generation, bool completed,
                                             const char* detail) {
-    // Every replacement and user control advances stream_generation_ while
-    // holding submission_mutex_. Keep terminal state and its UI event in that
+    // Source replacement and Stop advance stream_generation_ while holding
+    // submission_mutex_. Keep terminal state and its UI event in that
     // same critical section so an old stream cannot mark a newer song ended
     // or unavailable after a replacement has been submitted.
     std::lock_guard<std::mutex> submission_lock(submission_mutex_);
@@ -2386,6 +2528,7 @@ bool RadioService::FinishCustomUrlIfCurrent(uint32_t stream_generation, bool com
         return false;
 
     custom_url_stream_completed_ = completed;
+    user_paused_ = false;
     music_playback_state_.store(completed ? 2 : 3, std::memory_order_relaxed);
     play_requested_ = false;
     stop_requested_ = true;
@@ -2419,61 +2562,25 @@ void RadioService::SetUi(const char* state, const char* detail) {
 #endif
 }
 
-void RadioService::WritePcm(const int16_t* pcm, int samples, int channels, int sample_rate,
-                            int16_t* mono_buffer, int mono_capacity, int16_t* output_buffer,
-                            int output_capacity, uint32_t stream_generation) {
-    if (!pcm || !mono_buffer || !output_buffer || samples <= 0 || channels <= 0 || sample_rate <= 0) {
-        return;
-    }
-
-    int frames = channels == 2 ? samples / 2 : samples;
-    if (frames <= 0 || frames > mono_capacity) {
-        ESP_LOGW(TAG, "pcm frame capacity exceeded frames=%d capacity=%d", frames, mono_capacity);
-        return;
-    }
-
-    if (channels == 2) {
-        for (int i = 0; i < frames; ++i) {
-            mono_buffer[i] = Clamp16(((int)pcm[i * 2] + (int)pcm[i * 2 + 1]) / 2);
-        }
-    } else {
-        memcpy(mono_buffer, pcm, frames * sizeof(int16_t));
-    }
-
-    auto* codec = Board::GetInstance().GetAudioCodec();
-    const int out_rate = codec->output_sample_rate();
-    int out_frames = frames;
-    if (sample_rate == out_rate) {
-        memcpy(output_buffer, mono_buffer, frames * sizeof(int16_t));
-    } else {
-        out_frames = std::max(1, frames * out_rate / sample_rate);
-        if (out_frames > output_capacity) {
-            ESP_LOGW(TAG, "pcm output capacity exceeded frames=%d capacity=%d", out_frames, output_capacity);
-            return;
-        }
-        for (int i = 0; i < out_frames; ++i) {
-            int64_t src_pos_q16 = (int64_t)i * sample_rate * 65536 / out_rate;
-            int src_index = src_pos_q16 >> 16;
-            int frac = src_pos_q16 & 0xffff;
-            if (src_index >= frames - 1) {
-                output_buffer[i] = mono_buffer[frames - 1];
-            } else {
-                int a = mono_buffer[src_index];
-                int b = mono_buffer[src_index + 1];
-                output_buffer[i] = Clamp16((a * (65536 - frac) + b * frac) >> 16);
-            }
-        }
-    }
-
-    ApplyAudioLeveler(output_buffer, out_frames);
-    if (!codec->output_enabled()) {
+bool RadioService::WritePcm(const int16_t* pcm, int samples, int channels, int sample_rate,
+                            int16_t* output_buffer, int output_capacity,
+                            uint32_t stream_generation) {
+    auto* codec = static_cast<Tab5AudioCodec*>(Board::GetInstance().GetAudioCodec());
+    const int rate = codec->output_sample_rate();
+    const int frames =
+        tab5_audio_stream::ResampleStereo(pcm, samples, channels, sample_rate, rate, output_buffer,
+                                          output_capacity, &resample_phase_);
+    if (!frames)
+        return false;
+    // One linked gain keeps the original stereo balance and phase relationship.
+    ApplyAudioLeveler(output_buffer, frames * 2);
+    if (!codec->output_enabled())
         codec->EnableOutput(true);
-    }
-    codec->OutputData(output_buffer, out_frames);
-    playback_clock_.Advance(out_frames, out_rate, stream_generation);
-    // Radio bypasses AudioOutputTask; keep the power manager from treating
-    // the speaker as idle and closing it mid-stream.
-    Application::GetInstance().GetAudioService().NoteOutputActivity();
+    const int written = codec->OutputStereoFrames(output_buffer, frames);
+    playback_clock_.Advance(written, rate, stream_generation);
+    if (written)
+        Application::GetInstance().GetAudioService().NoteOutputActivity();
+    return written == frames;
 }
 
 void RadioService::ResetAudioLeveler() {

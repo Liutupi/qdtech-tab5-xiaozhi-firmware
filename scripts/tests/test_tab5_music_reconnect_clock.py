@@ -1,4 +1,4 @@
-"""Run the real Tab5 lyric clock methods through a coalesced stream retry."""
+"""Run the real Tab5 lyric clock methods through a Range resume using the real audio-output clock."""
 
 from pathlib import Path
 import shutil
@@ -23,6 +23,8 @@ def harness(source: str) -> str:
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include "tab5_playback_clock.h"
 #include <string>
 #include "tab5_lrc.h"
 #include "tab5_radio_status_mailbox.h"
@@ -44,9 +46,8 @@ public:
     std::string music_artist_ = "歌手";
     tab5_lrc::Document music_lyrics_;
     int music_line_index_ = -2;
-    int64_t music_elapsed_ms_ = 0;
-    int64_t music_resume_ms_ = 0;
-    uint32_t music_stream_open_sequence_ = 0;
+    std::string music_source_url_ = "https://relay/audio.mp3";
+    std::function<tab5_playback::Position(std::string_view)> music_position_;
     bool music_playing_ = false;
     bool music_active_ = true;
     bool music_seen_station_ = false;
@@ -60,14 +61,16 @@ public:
 
 int main() {
     DisplayHarness display;
+    tab5_playback::Clock clock;
+    clock.Begin(display.music_source_url_, 7);
+    display.music_position_ = [&](std::string_view url) { return clock.Read(url, 7); };
     if (!tab5_lrc::Parse("[00:00.00]开头\n[00:08.00]后段\n", display.music_lyrics_))
         return 1;
     tab5_radio_status::LatestMailbox mailbox;
     tab5_radio_status::Snapshot status;
     auto consume = [&]() {
         if (!mailbox.Take(status)) return false;
-        display.UpdateMusicPlaybackStateLocked(status.station.data(), status.state.data(),
-                                               status.stream_open_sequence);
+        display.UpdateMusicPlaybackStateLocked(status.station.data(), status.state.data());
         display.RefreshMusicLyrics();
         return true;
     };
@@ -77,9 +80,13 @@ int main() {
     mailbox.Post("同一首歌 - 歌手", "Buffering", "fill");
     mailbox.Post("同一首歌 - 歌手", "Playing", "first frame");
     if (!consume() || !display.music_playing_ || display.app.current != "开头") return 2;
+    // Waiting and UI delays do not count as audible playback.
     now_us += 9000000;
     display.RefreshMusicLyrics();
-    if (display.app.current != "后段") return 3;
+    if (display.app.current != "开头") return 3;
+    clock.Advance(9*24000, 24000, 7);
+    display.RefreshMusicLyrics();
+    if (display.app.current != "后段") return 10;
 
     // A normal pause/resume keeps the position when no new HTTP stream opened.
     mailbox.Post("同一首歌 - 歌手", "Paused", "voice");
@@ -88,23 +95,26 @@ int main() {
     mailbox.Post("同一首歌 - 歌手", "Playing", "resume");
     if (!consume() || display.app.current != "后段") return 5;
 
-    // The reader fails; retry GET starts again from byte zero. Connecting and
-    // Buffering may both be lost to latest-state coalescing before first frame.
+    // Range creates another HTTP connection while keeping the saved output time.
     mailbox.Post("同一首歌 - 歌手", "Reconnecting", "read failed");
     if (!consume()) return 6;
-    mailbox.Post("同一首歌 - 歌手", "Connecting", "retry open");
-    mailbox.Post("同一首歌 - 歌手", "Buffering", "retry fill");
-    mailbox.Post("同一首歌 - 歌手", "Playing", "retry first frame");
-    if (!consume() || !display.music_playing_ || display.app.current != "开头" ||
-        display.music_elapsed_ms_ != 0 || display.music_stream_open_sequence_ != 2) return 7;
-    now_us += 9000000;
+    clock.Begin(display.music_source_url_, 7, 9000);
+    mailbox.Post("同一首歌 - 歌手", "Connecting", "range open");
+    mailbox.Post("同一首歌 - 歌手", "Buffering", "preroll");
+    mailbox.Post("同一首歌 - 歌手", "Playing", "next frame");
+    if (!consume() || !display.music_playing_ || display.app.current != "后段") return 7;
+    clock.Advance(24000,24000,7);
+    now_us += 20000000;
     display.RefreshMusicLyrics();
     if (display.app.current != "后段") return 8;
-
-    // More status updates in the same stream must not rewind the song again.
-    mailbox.Post("同一首歌 - 歌手", "Buffering", "temporary gap");
-    mailbox.Post("同一首歌 - 歌手", "Playing", "same stream");
-    if (!consume() || display.app.current != "后段" || display.music_elapsed_ms_ != 0) return 9;
+    // A genuinely new track starts at zero; an old decoder cannot advance it.
+    clock.Begin(display.music_source_url_, 8);
+    clock.Advance(24000,24000,7);
+    display.RefreshMusicLyrics();
+    if (display.app.current != "后段") return 9; // mismatched generation ignored
+    display.music_position_ = [&](std::string_view url) { return clock.Read(url, 8); };
+    display.RefreshMusicLyrics();
+    if (display.app.current != "开头") return 11;
     return 0;
 }
 '''
@@ -112,9 +122,9 @@ int main() {
 
 class Tab5MusicReconnectClockTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("c++"), "C++ host compiler required")
-    def test_restart_rewinds_lyrics_even_when_connecting_is_coalesced(self):
+    def test_range_resume_keeps_audio_position_even_when_status_is_coalesced(self):
         source = DISPLAY.read_text()
-        self.assertIn("radio_status_current_.stream_open_sequence", source)
+        self.assertIn("music_position_(music_source_url_)", source)
         with tempfile.TemporaryDirectory() as directory:
             cpp = Path(directory) / "music_reconnect_clock.cc"
             binary = Path(directory) / "music_reconnect_clock"

@@ -34,6 +34,7 @@ public:
         std::function<nabo_song_favorites::Change(const nabo_song_favorites::Track&)>
             toggle_favorite;
         std::function<void()> stop;
+        std::function<void()> pause_resume;
         std::function<tab5_playback::Position(std::string_view)> playback_position;
         std::function<std::shared_ptr<LvglFont>()> text_font;  // full CJK font, may be null
     };
@@ -45,7 +46,8 @@ public:
     bool IsVisible() const;
     void SetEpisodes(tab5_podcast::SharedEpisodes episodes);
     void SetRefreshResult(bool ok, uint32_t poll_count);
-    void SetPlayback(bool playing, const char* now_playing);
+    void SetPlayback(bool playing, const char* now_playing, bool paused = false,
+                     bool requested = false);
     // Song title/artist and current lyric (or status) line while a track plays.
     void SetNowPlaying(const char* title, const char* artist, const char* line);
     void SetSongTrial(bool trial) {
@@ -120,6 +122,8 @@ private:
     int selected_id_ = 0;
     bool list_dirty_ = true;
     bool playing_ = false;
+    bool requested_ = false;
+    bool paused_ = false;
     bool song_trial_ = false;
     enum class PlaybackKind { None, Podcast, Songs, Favorites };
     PlaybackKind playback_kind_ = PlaybackKind::None;

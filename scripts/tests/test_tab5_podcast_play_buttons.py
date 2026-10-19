@@ -40,12 +40,13 @@ struct Tab5PodcastPage {
     std::function<bool(const std::string&,const std::string&)> play_url;
     std::function<bool(int,int,int)> play_track;
     std::function<void()> stop;
+    std::function<void()> pause_resume;
     std::function<void()> refresh;
   } callbacks_;
   enum class PlaybackKind {None, Podcast, Songs, Favorites};
   PlaybackKind playback_kind_=PlaybackKind::None;
   int playback_episode_id_=0, selected_id_=3, pane_=0;
-  bool playing_=false;
+  bool playing_=false, paused_=false, requested_=false;
   tab5_podcast::SharedEpisodes episodes_;
   lv_obj_t podcast_label, songs_label;
   lv_obj_t *play_label_=&podcast_label, *songs_label_=&songs_label;
@@ -76,7 +77,7 @@ int main() {
     assert(url=="https://relay.example/episode.mp3" && title=="本期节目");++urls;return true;};
   page.callbacks_.play_track=[&](int id,int i,int count){
     assert(id==3 && count==2);++tracks;index=i;return true;};
-  page.callbacks_.stop=[&]{++stops;};
+  page.callbacks_.pause_resume=[&]{++stops;};
   int refreshes=0;
   page.callbacks_.refresh=[&]{++refreshes;};
   page.SetRefreshResult(true,5);
@@ -102,10 +103,18 @@ int main() {
   page.episodes_=updated;
   page.PlaySelected();assert(urls==1 && tracks==1);
   page.playing_=true;page.UpdatePlayLabels();
-  assert(page.podcast_label.text=="停止播客" && page.songs_label.text=="播放推荐歌曲");
+  assert(page.podcast_label.text=="暂停播客" && page.songs_label.text=="播放推荐歌曲");
   page.PlaySelected();assert(stops==1 && urls==1);
+  page.playing_=false;page.requested_=true;page.paused_=true;page.UpdatePlayLabels();
+  assert(page.podcast_label.text=="继续播客");
+  page.PlaySelected();assert(stops==2 && urls==1);
+  page.paused_=false;page.UpdatePlayLabels();
+  // A second tap while a Range reconnect is still buffering toggles pause;
+  // it must not submit a new play_url that would start at the beginning.
+  page.PlaySelected();assert(stops==3 && urls==1);
+  stops=1;page.playing_=true;page.requested_=false;
   page.PlaySongs();assert(stops==1 && tracks==2 && index==0);
-  assert(page.podcast_label.text=="播放播客" && page.songs_label.text=="停止推荐歌曲");
+  assert(page.podcast_label.text=="播放播客" && page.songs_label.text=="暂停推荐歌曲");
   page.PlaySongs();assert(stops==2 && tracks==2);
   page.PlaySelected();assert(urls==2 && tracks==2 && stops==2);
   page.PlayTrack(1);assert(tracks==3 && index==1);

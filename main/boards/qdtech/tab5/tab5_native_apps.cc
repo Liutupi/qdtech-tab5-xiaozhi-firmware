@@ -272,6 +272,7 @@ void Tab5NativeApps::OpenPodcast() {
             return favorites ? favorites->Toggle(song) : nabo_song_favorites::Change::Unavailable;
         };
         callbacks.stop = [this] { Schedule(actions_.radio_stop); };
+        callbacks.pause_resume = [this] { Schedule(actions_.radio_play_pause); };
         callbacks.playback_position = [this](std::string_view url) {
             return actions_.podcast_position ? actions_.podcast_position(url)
                                              : tab5_playback::Position{};
@@ -283,7 +284,8 @@ void Tab5NativeApps::OpenPodcast() {
         podcast_page_->SetRefreshResult(snapshot.podcast_ok, snapshot.poll_count);
     }
     Show(nullptr);
-    podcast_page_->SetPlayback(radio_playing_, radio_station_name_.c_str());
+    podcast_page_->SetPlayback(radio_playing_, radio_station_name_.c_str(), radio_paused_,
+                               actions_.radio_play_requested && actions_.radio_play_requested());
     podcast_page_->Show();
     podcast_page_->SetSongTrial(podcast_song_trial_);
     podcast_page_->SetNowPlaying(podcast_now_title_.c_str(), podcast_now_artist_.c_str(),

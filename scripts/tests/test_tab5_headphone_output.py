@@ -78,6 +78,7 @@ struct Tab5AudioCodec : AudioCodec {
     std::array<int16_t, 512> stereo_output_{};
     void ReopenOutputLocked();
     int Write(const int16_t*, int);
+    int OutputStereoFrames(const int16_t*, int);
 };
 ''' + reopen + write + r'''
 int main() {
@@ -114,6 +115,24 @@ int main() {
     assert(reopens == before + 1 && codec.write_failures_ == 0);
     codec.Write(pcm, 3);
     assert((written == std::vector<int16_t>{-32768,-32768,0,0,32767,32767}));
+    // Stereo playback must preserve asymmetric samples across 256-frame chunks.
+    for (int frames : {1, 255, 256, 257, 1152}) {
+        std::vector<int16_t> stereo(frames * 2);
+        for (int i = 0; i < frames; ++i) { stereo[2*i] = i * 11; stereo[2*i+1] = -30000 + i; }
+        const auto original = stereo;
+        written.clear();
+        assert(codec.OutputStereoFrames(stereo.data(), frames) == frames);
+        assert(written == original && stereo == original);
+    }
+    assert(codec.OutputStereoFrames(nullptr, 1) == 0);
+    assert(codec.OutputStereoFrames(pcm, 0) == 0);
+    written.clear();
+    failed_writes = 4;
+    const int stereo_before = reopens;
+    for (int i = 0; i < 4; ++i) assert(codec.OutputStereoFrames(pcm, 1) == 0);
+    assert(reopens == stereo_before + 1 && written.empty());
+    assert(codec.OutputStereoFrames(pcm, 1) == 1);
+    assert((written == std::vector<int16_t>{-32768,0}));
     failed_opens = 1;
     codec.ReopenOutputLocked();
     assert(!codec.output_enabled_ && codec.input_enabled_);

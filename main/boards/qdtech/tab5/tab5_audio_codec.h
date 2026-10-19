@@ -22,7 +22,7 @@ private:
     unsigned write_failures_ = 0;
     std::mutex codec_mutex_;
     std::atomic<bool> external_playback_{false};
-    // Callers supply mono PCM; the ES8388 must receive both I2S slots.
+    // Voice callers supply mono PCM; the ES8388 must receive both I2S slots.
     std::array<int16_t, 512> stereo_output_{};
 
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din);
@@ -45,6 +45,8 @@ public:
     }
     // Force a TX device reopen after duplex I2S reconfiguration.
     void ReopenOutput();
+    // Media path: frames of interleaved L/R, preserved without downmixing.
+    int OutputStereoFrames(const int16_t* data, int frames);
 };
 
 #endif // _TAB5_AUDIO_CODEC_H

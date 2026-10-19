@@ -154,10 +154,19 @@ void Tab5PodcastPage::Build() {
     list_ = ScrollColumn(root_, kColX, kContentY, kColW, kContentH, 10);
     favorites_list_ = ScrollColumn(root_, kColX, kContentY, kColW, kContentH, 8);
     Box(root_, kColX, 586, kColW, 1, 0x30394b, 0x30394b, 0);
-    status_ =
-        Text(root_, "选一期节目，和 Nabo 一起听。", &qd_font_cjk_28, kMuted, kColX, 594, kColW);
+    status_ = Text(root_, "选一期节目，和 Nabo 一起听。", &qd_font_cjk_28, kMuted, kColX, 594,
+                   kColW - 128);
     lv_obj_set_height(status_, 38);
     lv_label_set_long_mode(status_, LV_LABEL_LONG_DOT);
+    button(
+        root_, kColX + kColW - 112, 590, 112, 40, kChip, "停止", kMuted,
+        [](lv_event_t* event) {
+            auto* page = static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event));
+            if (page->callbacks_.stop)
+                page->callbacks_.stop();
+            page->SetStatus("已停止播放", kMuted);
+        },
+        this);
 
     play_label_ = button(
         root_, kColX, 638, 320, 58, kAmber, "播放播客", kPage,
@@ -597,11 +606,11 @@ void Tab5PodcastPage::SetStatus(const char* text, uint32_t color) {
 }
 
 void Tab5PodcastPage::PlaySelected() {
-    if (playing_ && playback_kind_ == PlaybackKind::Podcast &&
+    if ((requested_ || playing_ || paused_) && playback_kind_ == PlaybackKind::Podcast &&
         playback_episode_id_ == selected_id_) {
-        if (callbacks_.stop)
-            callbacks_.stop();
-        SetStatus("已停止播放", kMuted);
+        if (callbacks_.pause_resume)
+            callbacks_.pause_resume();
+        SetStatus(paused_ ? "正在继续播客…" : "播客已暂停，可继续播放", kMuted);
         return;
     }
     const auto& episodes = List();
@@ -624,35 +633,37 @@ void Tab5PodcastPage::PlaySelected() {
 }
 
 void Tab5PodcastPage::PlaySongs() {
-    if (playing_ && playback_kind_ == PlaybackKind::Favorites) {
-        if (callbacks_.stop)
-            callbacks_.stop();
-        SetStatus("已停止播放", kMuted);
+    if ((requested_ || playing_ || paused_) && playback_kind_ == PlaybackKind::Favorites) {
+        if (callbacks_.pause_resume)
+            callbacks_.pause_resume();
+        SetStatus(paused_ ? "正在继续歌曲…" : "歌曲已暂停，可继续播放", kMuted);
         return;
     }
     if (pane_ == 2) {
         PlayFavorite(0);
         return;
     }
-    if (playing_ && playback_kind_ == PlaybackKind::Songs && playback_episode_id_ == selected_id_) {
-        if (callbacks_.stop)
-            callbacks_.stop();
-        SetStatus("已停止播放", kMuted);
+    if ((requested_ || playing_ || paused_) && playback_kind_ == PlaybackKind::Songs &&
+        playback_episode_id_ == selected_id_) {
+        if (callbacks_.pause_resume)
+            callbacks_.pause_resume();
+        SetStatus(paused_ ? "正在继续歌曲…" : "歌曲已暂停，可继续播放", kMuted);
         return;
     }
     PlayTrack(0);  // Retain the NAS full-song lookup and ordered playlist.
 }
 
 void Tab5PodcastPage::UpdatePlayLabels() {
-    const bool active = playing_ && playback_episode_id_ == selected_id_;
-    lv_label_set_text(play_label_,
-                      active && playback_kind_ == PlaybackKind::Podcast ? "停止播客" : "播放播客");
-    const bool favorite = playback_kind_ == PlaybackKind::Favorites && playing_;
-    lv_label_set_text(songs_label_, favorite     ? "停止收藏歌曲"
+    const bool active = (requested_ || playing_ || paused_) && playback_episode_id_ == selected_id_;
+    const bool podcast = active && playback_kind_ == PlaybackKind::Podcast;
+    lv_label_set_text(play_label_, podcast ? (paused_ ? "继续播客" : "暂停播客") : "播放播客");
+    const bool favorite =
+        playback_kind_ == PlaybackKind::Favorites && (requested_ || playing_ || paused_);
+    const bool songs = active && playback_kind_ == PlaybackKind::Songs;
+    lv_label_set_text(songs_label_, favorite     ? (paused_ ? "继续收藏歌曲" : "暂停收藏歌曲")
+                                    : songs      ? (paused_ ? "继续推荐歌曲" : "暂停推荐歌曲")
                                     : pane_ == 2 ? "播放收藏歌曲"
-                                    : active && playback_kind_ == PlaybackKind::Songs
-                                        ? "停止推荐歌曲"
-                                        : "播放推荐歌曲");
+                                                 : "播放推荐歌曲");
     UpdateTransport();
     UpdateHero();
 }
@@ -682,9 +693,10 @@ void Tab5PodcastPage::PlayTrack(size_t index) {
 void Tab5PodcastPage::UpdateTransport() {
     const bool songs =
         playback_kind_ == PlaybackKind::Songs || playback_kind_ == PlaybackKind::Favorites;
-    const bool active = playing_ && (playback_kind_ == PlaybackKind::Favorites ||
-                                     playback_episode_id_ == selected_id_);
-    const int mode = int(songs) | (active ? 2 : 0);
+    const bool active =
+        (requested_ || playing_ || paused_) &&
+        (playback_kind_ == PlaybackKind::Favorites || playback_episode_id_ == selected_id_);
+    const int mode = int(songs) | (active ? 2 : 0) | (paused_ ? 4 : 0);
     if (mode == transport_mode_)
         return;
     transport_mode_ = mode;
@@ -703,8 +715,8 @@ void Tab5PodcastPage::UpdateTransport() {
     lv_obj_set_style_text_color(play_icon_, lv_color_hex(songs ? kText : kPage), 0);
     lv_obj_set_style_text_color(songs_label_, lv_color_hex(songs ? kPage : kText), 0);
     lv_obj_set_style_text_color(songs_icon_, lv_color_hex(songs ? kPage : kText), 0);
-    lv_label_set_text(play_icon_, active && !songs ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY);
-    lv_label_set_text(songs_icon_, active && songs ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY);
+    lv_label_set_text(play_icon_, active && !songs && !paused_ ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    lv_label_set_text(songs_icon_, active && songs && !paused_ ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
 }
 
 void Tab5PodcastPage::UpdateHero() {
@@ -767,15 +779,22 @@ void Tab5PodcastPage::HighlightNowPlaying() {
     }
 }
 
-void Tab5PodcastPage::SetPlayback(bool playing, const char* now_playing) {
+void Tab5PodcastPage::SetPlayback(bool playing, const char* now_playing, bool paused,
+                                  bool requested) {
     const std::string now = now_playing ? now_playing : "";
-    if (playing == playing_ && now == now_playing_)
+    if (playing == playing_ && paused == paused_ && requested == requested_ && now == now_playing_)
         return;
     playing_ = playing;
+    paused_ = paused;
+    requested_ = requested;
     now_playing_ = now;
     UpdatePlayLabels();
     HighlightNowPlaying();
-    if (playing && !now.empty()) {
+    if (paused_) {
+        SetStatus("已暂停，可从原位置继续播放", kMuted);
+    } else if (requested && !playing) {
+        SetStatus("正在准备音源，可暂停或停止", kMuted);
+    } else if (playing && !now.empty()) {
         const char* prefix = playback_kind_ == PlaybackKind::Podcast     ? "播客播放中 · "
                              : playback_kind_ == PlaybackKind::Favorites ? "收藏歌曲播放中 · "
                              : playback_kind_ == PlaybackKind::Songs     ? "推荐歌曲播放中 · "
@@ -803,7 +822,7 @@ void Tab5PodcastPage::UpdateTranscript() {
     if (cue_rows_.empty())
         return;
     int next = -1;
-    if (playing_ && playback_kind_ == PlaybackKind::Podcast &&
+    if ((requested_ || playing_ || paused_) && playback_kind_ == PlaybackKind::Podcast &&
         playback_episode_id_ == selected_id_ && callbacks_.playback_position) {
         const auto& episodes = List();
         auto it = std::find_if(episodes.begin(), episodes.end(),

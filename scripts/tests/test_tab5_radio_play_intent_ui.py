@@ -53,6 +53,7 @@ class Tab5NativeApps {
 public:
     struct Actions {
         std::function<bool()> radio_play_requested;
+        std::function<bool()> radio_is_paused;
         std::function<int()> current_station;
     } actions_;
     lv_obj_t station_label, state_label, meta_label, play_label;
@@ -63,7 +64,7 @@ public:
     // Muse 电台 page is created lazily; these harnesses never open it.
     struct PodcastStub {
         void Tick() {}
-        void SetPlayback(bool, const char*) {}
+        void SetPlayback(bool, const char*, bool, bool) {}
         template <typename T> void SetEpisodes(const T&) {}
     };
     PodcastStub* podcast_page_ = nullptr;
@@ -76,7 +77,7 @@ public:
     void SetMusicLyricLine(const char*) {}
     std::string current_station_name_;
     std::string radio_station_name_;
-    bool radio_playing_ = false;
+    bool radio_playing_ = false, radio_paused_ = false;
     int station_refreshes = 0;
     static void SetLabelTextIfChanged(lv_obj_t* label, const char* text) {
         if (label && label->text != text) label->text = text;
@@ -126,6 +127,11 @@ int main() {
     if (!check(true, "歌曲乙", "Playing", "暂停", true, "播放中")) return 11;
     if (!check(false, "歌曲乙", "Stopped", "播放", false, "已停止")) return 12;
     if (ui.station_refreshes != 2) return 13;
+    board.radio_service_.play_requested_.store(true);
+    ui.actions_.radio_is_paused=[] {return true;};
+    ui.SetRadioState("歌曲乙", "Paused", "saved");
+    if (ui.play_label.text != "播放" || !ui.radio_paused_ || ui.radio_playing_) return 16;
+    ui.actions_.radio_is_paused=[] {return false;};
     // Before RadioService is available, status rendering retains its fallback.
     ui.actions_.radio_play_requested = {};
     ui.SetRadioState("歌曲乙", "Playing", "metadata");
