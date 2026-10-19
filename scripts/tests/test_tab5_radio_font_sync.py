@@ -92,7 +92,7 @@ public:
     lv_font_t* station_font_ = nullptr;
     bool radio_song_ = true;
     const lv_font_t* lyric_font_ = nullptr;
-    struct StageStub { int opened = 0; void Open(unsigned) { ++opened; } };
+    struct StageStub { int opened = 0; void Open(unsigned) { ++opened; } void Attach(lv_obj_t*,int,int) {} };
     std::unique_ptr<StageStub> radio_stage_ = std::make_unique<StageStub>();
     int station_font_loads = 0;
     void LoadStationFont() { ++station_font_loads; }

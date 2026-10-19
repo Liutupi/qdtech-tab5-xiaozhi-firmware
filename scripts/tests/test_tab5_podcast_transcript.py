@@ -16,7 +16,7 @@ class PodcastTranscriptTests(unittest.TestCase):
     def test_actual_audio_progress_reconnect_stale_cues_and_manual_scroll(self):
         source = (BOARD / 'tab5_podcast_page.cc').read_text()
         start = source.index('void Tab5PodcastPage::UpdateTranscript()')
-        handler = source[start:source.index('\nvoid Tab5PodcastPage::DrawWave', start)]
+        handler = source[start:source.index('\nnabo_radio::Mood Tab5PodcastPage::StudioMood', start)]
         harness = r'''
 #include <algorithm>
 #include <cassert>
@@ -35,14 +35,14 @@ lv_obj_t* scroll_target=nullptr;
 void lv_obj_update_layout(lv_obj_t*) {}
 int lv_obj_get_y(lv_obj_t* row) {scroll_target=row;return 0;}
 void lv_obj_scroll_to_y(lv_obj_t*,int,int) {++scroll_target->scrolls;}
-constexpr unsigned kBody=1,kPink=2,LV_OPA_TRANSP=0,LV_OPA_COVER=255,LV_ANIM_ON=1;
+constexpr unsigned kBody=1,kAmber=2,LV_OPA_TRANSP=0,LV_OPA_COVER=255,LV_ANIM_ON=1;
 struct Tab5PodcastPage {
  struct Callbacks {std::function<tab5_playback::Position(std::string_view)> playback_position;} callbacks_;
  enum class PlaybackKind {None,Podcast,Songs};
  PlaybackKind playback_kind_=PlaybackKind::Podcast;
  bool playing_=true,manual_scroll_=false,transcript_scroll_pending_=false;
  unsigned manual_scroll_started_=0;
- int active_cue_=-1,playback_episode_id_=4,selected_id_=4;
+ int active_cue_=-1,playback_episode_id_=4,selected_id_=4,pane_=0;
  std::vector<lv_obj_t*> cue_rows_;
  lv_obj_t* script_box_=nullptr;
  tab5_podcast::EpisodeList episodes_;
@@ -87,7 +87,7 @@ int main() {
  lv_obj_t first,second_row;page.cue_rows_={&first,&second_row};
  unsigned generation=5;
  page.callbacks_.playback_position=[&](auto url){return clock.Read(url,generation);};
- page.UpdateTranscript();assert(page.active_cue_==0 && first.color==kPink && first.scrolls==1);
+ page.UpdateTranscript();assert(page.active_cue_==0 && first.color==kAmber && first.scrolls==1);
  // Buffering does not output PCM: wall time alone must not move text.
  now+=20000;page.UpdateTranscript();assert(page.active_cue_==0 && first.scrolls==1);
  page.manual_scroll_=true;page.manual_scroll_started_=now;
@@ -95,6 +95,10 @@ int main() {
  assert(page.active_cue_==1 && second_row.scrolls==0 && first.color==kBody);
  now+=7999;page.UpdateTranscript();assert(second_row.scrolls==0);
  ++now;page.UpdateTranscript();assert(second_row.scrolls==1);
+ // Hidden transcript updates highlights but waits to scroll until its tab opens.
+ page.pane_=1;clock.Begin("https://relay/audio.mp3",5);page.UpdateTranscript();
+ assert(page.active_cue_==0 && first.scrolls==1);
+ page.pane_=0;page.UpdateTranscript();assert(first.scrolls==2);
  clock.Begin("https://relay/audio.mp3",5);page.UpdateTranscript();assert(page.active_cue_==0);
  generation=6;page.UpdateTranscript();assert(page.active_cue_==-1 && first.color==kBody);
  generation=5;page.playback_kind_=Tab5PodcastPage::PlaybackKind::Songs;

@@ -10,15 +10,19 @@
 LV_FONT_DECLARE(qd_font_lxgw_28);
 LV_FONT_DECLARE(qd_font_lxgw_36);
 LV_FONT_DECLARE(qd_font_cjk_28);
+LV_FONT_DECLARE(qd_font_lyric_40);
 
 namespace {
-constexpr uint32_t kPage = 0x0d1b2b, kPanel = 0x142d43, kPanelBorder = 0x35627d;
-constexpr uint32_t kViolet = 0xa99bff, kPink = 0xf59ab5, kText = 0xf5f9fd, kMuted = 0x9bb7ca;
-constexpr uint32_t kBody = 0xd6e4ee;
+constexpr uint32_t kPage = 0x080b12, kPanel = 0x131a28, kChip = 0x1a2131;
+constexpr uint32_t kAmber = 0xf7b955, kPressed = 0x273149, kText = 0xf5efe4;
+constexpr uint32_t kMuted = 0x8b93a5, kBody = 0xc8cbd3, kError = 0xff6f91;
+constexpr int kColX = 616, kColW = 640, kRowW = 616;
+constexpr int kContentY = 350, kContentH = 226;
 
 lv_obj_t* Box(lv_obj_t* parent, int x, int y, int w, int h, uint32_t fill, uint32_t border,
               int radius) {
     auto* o = lv_obj_create(parent);
+    lv_obj_remove_style_all(o);
     lv_obj_set_pos(o, x, y);
     lv_obj_set_size(o, w, h);
     lv_obj_set_style_radius(o, radius, 0);
@@ -45,6 +49,7 @@ lv_obj_t* Text(lv_obj_t* parent, const char* text, const lv_font_t* font, uint32
 
 lv_obj_t* ScrollColumn(lv_obj_t* parent, int x, int y, int w, int h, int gap) {
     auto* o = lv_obj_create(parent);
+    lv_obj_remove_style_all(o);
     lv_obj_set_pos(o, x, y);
     lv_obj_set_size(o, w, h);
     lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
@@ -54,136 +59,126 @@ lv_obj_t* ScrollColumn(lv_obj_t* parent, int x, int y, int w, int h, int gap) {
     lv_obj_set_flex_flow(o, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(o, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(o, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(o, lv_color_hex(kMuted), LV_PART_SCROLLBAR);
+    lv_obj_set_style_width(o, 4, LV_PART_SCROLLBAR);
     return o;
 }
 }  // namespace
 
 Tab5PodcastPage::Tab5PodcastPage(lv_obj_t* parent, Callbacks callbacks)
     : callbacks_(std::move(callbacks)) {
+    body_font_ = qd_font_cjk_28;
+    large_font_ = qd_font_lyric_40;
     root_ = Box(parent, 0, 0, 1280, 720, kPage, kPage, 0);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
-    for (int i = 0; i < kBars; ++i) {
-        heights_[i] = 6;
-        // Violet → pink across the panel, matching the card accent.
-        colors_[i] = lv_color_mix(lv_color_hex(kPink), lv_color_hex(kViolet), i * 255 / (kBars - 1));
-    }
     Build();
 }
 
 void Tab5PodcastPage::Build() {
-    Text(root_, "NABO 电台", &qd_font_lxgw_36, kText, 52, 27, 600);
-    summary_ = Text(root_, "每日一期 · 来自 Muse", &qd_font_cjk_28, kMuted, 54, 76, 724);
+    Text(root_, "NABO 电台", &qd_font_lxgw_36, kAmber, 24, 6, 200);
+    summary_ = Text(root_, "每日一期 · 来自 Muse", &qd_font_cjk_28, kMuted, 240, 12, 624);
     lv_label_set_long_mode(summary_, LV_LABEL_LONG_DOT);
-    lv_obj_set_height(summary_, 36);
-    auto* back = lv_button_create(root_);
-    lv_obj_set_pos(back, 1016, 34);
-    lv_obj_set_size(back, 216, 60);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x254c66), 0);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x39718b), LV_STATE_PRESSED);
-    tab5_ui::AddPressFeel(back);
-    lv_obj_set_style_radius(back, 18, 0);
-    lv_obj_set_style_shadow_width(back, 0, 0);
-    auto* back_label = Text(back, "返回应用", &qd_font_lxgw_28, kText, 0, 0, 216);
-    lv_obj_center(back_label);
-    lv_obj_set_style_text_align(back_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_add_event_cb(
-        back,
-        [](lv_event_t* e) {
-            auto* self = static_cast<Tab5PodcastPage*>(lv_event_get_user_data(e));
-            if (self->callbacks_.back)
-                self->callbacks_.back();
+    lv_obj_set_height(summary_, 40);
+
+    auto button = [](lv_obj_t* parent, int x, int y, int w, int h, uint32_t fill, const char* text,
+                     uint32_t color, lv_event_cb_t callback, void* data) {
+        auto* pad = Box(parent, x, y, w, h, fill, fill, h / 2);
+        lv_obj_add_flag(pad, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(pad, lv_color_hex(fill == kAmber ? 0xffd690 : kPressed),
+                                  LV_STATE_PRESSED);
+        tab5_ui::AddPressFeel(pad);
+        auto* label = Text(pad, text, &qd_font_cjk_28, color, 0, 0, w);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(label);
+        lv_obj_add_event_cb(pad, callback, LV_EVENT_CLICKED, data);
+        return label;
+    };
+    button(
+        root_, 1088, 8, 168, 50, kChip, "返回应用", kText,
+        [](lv_event_t* event) {
+            auto* page = static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event));
+            if (page->callbacks_.back)
+                page->callbacks_.back();
         },
-        LV_EVENT_CLICKED, this);
+        this);
+    refresh_label_ = button(
+        root_, 888, 8, 184, 50, kChip, "刷新节目", kText,
+        [](lv_event_t* event) {
+            static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event))->Refresh();
+        },
+        this);
 
-    auto* refresh = lv_button_create(root_);
-    lv_obj_set_pos(refresh, 788, 34);
-    lv_obj_set_size(refresh, 208, 60);
-    lv_obj_set_style_bg_color(refresh, lv_color_hex(0x3a2f78), 0);
-    lv_obj_set_style_bg_color(refresh, lv_color_hex(0x5a4fb0), LV_STATE_PRESSED);
-    tab5_ui::AddPressFeel(refresh);
-    lv_obj_set_style_radius(refresh, 18, 0);
-    lv_obj_set_style_shadow_width(refresh, 0, 0);
-    refresh_label_ = Text(refresh, "刷新节目", &qd_font_cjk_28, kText, 0, 0, 208);
-    lv_obj_center(refresh_label_);
-    lv_obj_set_style_text_align(refresh_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_add_event_cb(
-        refresh,
-        [](lv_event_t* e) { static_cast<Tab5PodcastPage*>(lv_event_get_user_data(e))->Refresh(); },
-        LV_EVENT_CLICKED, this);
-
-    // Episode list.
-    auto* left = Box(root_, 48, 128, 360, 560, kPanel, kPanelBorder, 27);
-    Text(left, "往期节目", &qd_font_cjk_28, kMuted, 24, 18, 300);
-    list_ = ScrollColumn(left, 14, 64, 332, 482, 10);
-
-    // Player card: soft violet-to-navy gradient.
-    auto* card = Box(root_, 428, 128, 804, 560, 0x1d1f4a, 0x5a4fb0, 27);
-    lv_obj_set_style_bg_grad_color(card, lv_color_hex(kPanel), 0);
-    lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_VER, 0);
-
-    badge_ = Box(card, 32, 24, 148, 38, 0x3a2f78, 0x3a2f78, 19);
-    badge_label_ = Text(badge_, "本期节目", &qd_font_cjk_28, 0xd9d2ff, 0, 0, 148);
-    lv_obj_set_style_text_align(badge_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(badge_label_, LV_ALIGN_CENTER, 0, 0);
-
-    title_ = Text(card, "还没有节目", &qd_font_cjk_28, kText, 32, 74, 484);
-    lv_label_set_long_mode(title_, LV_LABEL_LONG_DOT);
-    lv_obj_set_height(title_, 46);
-    meta_ = Text(card, "", &qd_font_cjk_28, kMuted, 32, 120, 484);
+    // One studio view and reader are shared with FM by Tab5NativeApps.
+    episode_label_ = Text(root_, "每日音乐 · 本期节目", &qd_font_cjk_28, kMuted, kColX, 76, 440);
+    lv_obj_set_height(episode_label_, 38);
+    lv_label_set_long_mode(episode_label_, LV_LABEL_LONG_DOT);
+    button(
+        root_, 1080, 68, 176, 50, kPage, "往期节目 >", kMuted,
+        [](lv_event_t* event) {
+            static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event))->SelectPane(2);
+        },
+        this);
+    meta_ = Text(root_, "Nabo 的每日音乐来信", &qd_font_cjk_28, kMuted, kColX, 132, kColW);
     lv_label_set_long_mode(meta_, LV_LABEL_LONG_DOT);
     lv_obj_set_height(meta_, 36);
+    // Long lyrics wrap at 40 px and can be scrolled vertically. No marquee
+    // timer, scaled layer or second framebuffer competes with the studio.
+    hero_ = ScrollColumn(root_, kColX, 176, kColW, 84, 0);
+    title_ = Text(hero_, "今天，听 Nabo 说说", &large_font_, kText, 0, 0, kRowW);
+    lv_obj_set_style_text_line_space(title_, 2, 0);
+    Box(root_, kColX, 270, kColW, 1, 0x30394b, 0x30394b, 0);
 
-    auto* play = lv_button_create(card);
-    lv_obj_set_pos(play, 532, 32);
-    lv_obj_set_size(play, 240, 58);
-    lv_obj_set_style_radius(play, 29, 0);
-    lv_obj_set_style_bg_color(play, lv_color_hex(kPink), 0);
-    lv_obj_set_style_bg_grad_color(play, lv_color_hex(kViolet), 0);
-    lv_obj_set_style_bg_grad_dir(play, LV_GRAD_DIR_HOR, 0);
-    lv_obj_set_style_bg_color(play, lv_color_hex(0xd77d9a), LV_STATE_PRESSED);
-    tab5_ui::AddPressFeel(play);
-    lv_obj_set_style_shadow_width(play, 0, 0);
-    play_label_ = Text(play, "播放播客", &qd_font_lxgw_28, 0x1a1033, 0, 0, 240);
-    lv_obj_set_style_text_align(play_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(play_label_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_event_cb(
-        play,
-        [](lv_event_t* e) {
-            static_cast<Tab5PodcastPage*>(lv_event_get_user_data(e))->PlaySelected();
+    const char* tabs[] = {"节目文稿", "推荐歌单", "往期节目"};
+    for (int i = 0; i < 3; ++i) {
+        // History opens from the date row; the third tab appears only while
+        // that archive is selected, keeping the reading surface quiet.
+        pane_labels_[i] = button(
+            root_, kColX + i * 210, 278, 200, 48, kPage, tabs[i], kMuted,
+            [](lv_event_t* event) {
+                auto* page = static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event));
+                for (int pane = 0; pane < 3; ++pane)
+                    if (lv_event_get_current_target(event) == page->pane_buttons_[pane]) {
+                        page->SelectPane(pane);
+                        break;
+                    }
+            },
+            this);
+        pane_buttons_[i] = lv_obj_get_parent(pane_labels_[i]);
+        lv_obj_set_style_radius(pane_buttons_[i], 0, 0);
+        lv_obj_set_style_border_side(pane_buttons_[i], LV_BORDER_SIDE_BOTTOM, 0);
+    }
+    Box(root_, kColX, 326, kColW, 1, 0x30394b, 0x30394b, 0);
+    script_heading_ = pane_labels_[0];
+    script_box_ = ScrollColumn(root_, kColX, kContentY, kColW, kContentH, 8);
+    tracks_ = ScrollColumn(root_, kColX, kContentY, kColW, kContentH, 8);
+    list_ = ScrollColumn(root_, kColX, kContentY, kColW, kContentH, 10);
+    Box(root_, kColX, 586, kColW, 1, 0x30394b, 0x30394b, 0);
+    status_ =
+        Text(root_, "选一期节目，和 Nabo 一起听。", &qd_font_cjk_28, kMuted, kColX, 594, kColW);
+    lv_obj_set_height(status_, 38);
+    lv_label_set_long_mode(status_, LV_LABEL_LONG_DOT);
+
+    play_label_ = button(
+        root_, kColX, 638, 320, 58, kAmber, "播放播客", kPage,
+        [](lv_event_t* event) {
+            static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event))->PlaySelected();
         },
-        LV_EVENT_CLICKED, this);
-
-    auto* songs = lv_button_create(card);
-    lv_obj_set_pos(songs, 532, 102);
-    lv_obj_set_size(songs, 240, 58);
-    lv_obj_set_style_radius(songs, 29, 0);
-    lv_obj_set_style_bg_color(songs, lv_color_hex(0x3a2f78), 0);
-    lv_obj_set_style_bg_color(songs, lv_color_hex(0x5a4fb0), LV_STATE_PRESSED);
-    tab5_ui::AddPressFeel(songs);
-    lv_obj_set_style_shadow_width(songs, 0, 0);
-    songs_label_ = Text(songs, "播放推荐歌曲", &qd_font_lxgw_28, kText, 0, 0, 240);
-    lv_obj_set_style_text_align(songs_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(songs_label_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_event_cb(
-        songs,
-        [](lv_event_t* e) {
-            static_cast<Tab5PodcastPage*>(lv_event_get_user_data(e))->PlaySongs();
+        this);
+    songs_label_ = button(
+        root_, kColX + 336, 638, 304, 58, kChip, "播放推荐歌曲", kText,
+        [](lv_event_t* event) {
+            static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event))->PlaySongs();
         },
-        LV_EVENT_CLICKED, this);
+        this);
+    play_button_ = lv_obj_get_parent(play_label_);
+    songs_button_ = lv_obj_get_parent(songs_label_);
+    play_icon_ = Text(play_button_, LV_SYMBOL_PLAY, &lv_font_montserrat_20, kPage, 25, 18, 24);
+    songs_icon_ = Text(songs_button_, LV_SYMBOL_PLAY, &lv_font_montserrat_20, kText, 25, 18, 24);
+    for (auto* label : {play_label_, songs_label_}) {
+        lv_obj_set_width(label, 244);
+        lv_obj_align(label, LV_ALIGN_CENTER, 18, 0);
+    }
 
-    auto* wave_panel = Box(card, 32, 166, 740, 104, 0x0c1530, 0x2f2a66, 22);
-    wave_ = lv_obj_create(wave_panel);
-    lv_obj_set_pos(wave_, 14, 8);
-    lv_obj_set_size(wave_, 712, 88);
-    lv_obj_set_style_bg_opa(wave_, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(wave_, 0, 0);
-    lv_obj_set_style_pad_all(wave_, 0, 0);
-    lv_obj_remove_flag(wave_, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_remove_flag(wave_, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(wave_, DrawWave, LV_EVENT_DRAW_MAIN, this);
-
-    script_heading_ = Text(card, "节目文案", &qd_font_lxgw_28, kViolet, 32, 286, 436);
-    script_box_ = ScrollColumn(card, 32, 326, 436, 214, 0);
     lv_obj_add_event_cb(
         script_box_,
         [](lv_event_t* event) {
@@ -195,16 +190,30 @@ void Tab5PodcastPage::Build() {
             page->manual_scroll_started_ = lv_tick_get();
         },
         LV_EVENT_ALL, this);
-    script_ = Text(script_box_, "", &qd_font_cjk_28, kBody, 0, 0, 420);
-    lv_obj_set_style_text_line_space(script_, 8, 0);
-
-    Text(card, "歌单 · 点按播放", &qd_font_cjk_28, kPink, 492, 286, 280);
-    tracks_ = ScrollColumn(card, 488, 326, 288, 214, 6);
-
-    status_ = Text(root_, "", &qd_font_cjk_28, kMuted, 428, 690, 804);
-    lv_label_set_long_mode(status_, LV_LABEL_LONG_DOT);
-    lv_obj_set_height(status_, 30);
     RenderList();
+    SelectPane(0);
+}
+
+void Tab5PodcastPage::SelectPane(int pane) {
+    if (pane < 0 || pane >= 3)
+        return;
+    pane_ = pane;
+    lv_obj_t* columns[] = {script_box_, tracks_, list_};
+    for (int i = 0; i < 3; ++i) {
+        if (i == pane)
+            lv_obj_remove_flag(columns[i], LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(columns[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_border_width(pane_buttons_[i], i == pane ? 3 : 0, 0);
+        lv_obj_set_style_border_color(pane_buttons_[i], lv_color_hex(kAmber), 0);
+        lv_obj_set_style_text_color(pane_labels_[i], lv_color_hex(i == pane ? kAmber : kMuted), 0);
+        if (i == 2 && pane != 2)
+            lv_obj_add_flag(pane_buttons_[i], LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_remove_flag(pane_buttons_[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (pane == 0 && active_cue_ >= 0)
+        transcript_scroll_pending_ = true;
 }
 
 void Tab5PodcastPage::Show() {
@@ -234,7 +243,7 @@ void Tab5PodcastPage::SetRefreshResult(bool ok, uint32_t poll_count) {
     lv_label_set_text(refresh_label_, ok ? "刷新完成" : "刷新失败");
     if (!playing_)
         SetStatus(ok ? "已获取最新节目" : "刷新失败，保留上次内容，可点按重试",
-                  ok ? kMuted : kPink);
+                  ok ? kMuted : kError);
 }
 
 void Tab5PodcastPage::Hide() { lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN); }
@@ -251,6 +260,10 @@ void Tab5PodcastPage::BindFont() {
     auto previous = std::move(font_owner_);
     font_owner_ = std::move(owner);
     font_ = font;
+    body_font_.fallback = font;
+    large_font_.fallback = &body_font_;
+    lv_obj_set_style_text_font(status_, &body_font_, 0);
+    lv_obj_set_style_text_font(meta_, &body_font_, 0);
     list_dirty_ = true;
     RenderList();
 }
@@ -284,20 +297,20 @@ void Tab5PodcastPage::SetEpisodes(tab5_podcast::SharedEpisodes episodes) {
 
 void Tab5PodcastPage::RenderList() {
     list_dirty_ = false;
-    const lv_font_t* font = font_ ? font_ : &qd_font_cjk_28;
+    const lv_font_t* font = &body_font_;
     lv_obj_clean(list_);
     episode_tags_.clear();
     char summary[96];
     const auto& episodes = List();
     if (episodes.empty())
-        std::snprintf(summary, sizeof(summary), "每日一期 · 来自 Muse · 还没有节目");
+        std::snprintf(summary, sizeof(summary), "每日音乐 · 来自 Muse");
     else
-        std::snprintf(summary, sizeof(summary), "每日一期 · 来自 Muse · 共 %u 期 · 最新 %s",
-                      unsigned(episodes.size()), ShortDate(episodes.front().time).c_str());
+        std::snprintf(summary, sizeof(summary), "每日音乐 · Muse · 共 %u 期",
+                      unsigned(episodes.size()));
     lv_label_set_text(summary_, summary);
     if (episodes.empty()) {
         auto* hint = Text(list_, "Muse 发布每日音乐电台后会出现在这里。", &qd_font_cjk_28, kMuted,
-                          0, 0, 320);
+                          0, 0, kRowW);
         (void)hint;
         RenderEpisode();
         return;
@@ -309,19 +322,20 @@ void Tab5PodcastPage::RenderList() {
         const auto& e = episodes[i];
         const bool selected = e.id == selected_id_;
         auto* row = lv_obj_create(list_);
-        lv_obj_set_size(row, 318, 96);
+        lv_obj_set_size(row, kRowW, 100);
         lv_obj_set_style_radius(row, 18, 0);
-        lv_obj_set_style_bg_color(row, lv_color_hex(selected ? 0x2a2550 : 0x10263a), 0);
-        lv_obj_set_style_bg_color(row, lv_color_hex(0x2f3a63), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(row, lv_color_hex(selected ? 0x302719 : kPanel), 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(kPressed), LV_STATE_PRESSED);
         tab5_ui::AddPressFeel(row);
-        lv_obj_set_style_border_color(row, lv_color_hex(selected ? kViolet : 0x2a4a62), 0);
+        lv_obj_set_style_border_color(row, lv_color_hex(selected ? kAmber : kPanel), 0);
         lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
         lv_obj_set_style_pad_all(row, 0, 0);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
         auto* date = Text(row, ShortDate(e.time).c_str(), &qd_font_cjk_28,
-                          selected ? kViolet : 0x7f9bb0, 18, 8, 290);
-        auto* name = Text(row, tab5_podcast::DisplayText(e.title).c_str(), font, kText, 18, 46, 290);
+                          selected ? kAmber : kMuted, 18, 8, kRowW - 36);
+        auto* name =
+            Text(row, tab5_podcast::DisplayText(e.title).c_str(), font, kText, 18, 46, kRowW - 36);
         lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
         lv_obj_set_height(name, 40);
         for (auto* l : {date, name})
@@ -331,10 +345,14 @@ void Tab5PodcastPage::RenderList() {
             row,
             [](lv_event_t* ev) {
                 auto* tag = static_cast<Tag*>(lv_event_get_user_data(ev));
-                if (tag->page->selected_id_ == tag->value)
+                if (tag->page->selected_id_ == tag->value) {
+                    tag->page->SelectPane(0);
                     return;
-                tag->page->selected_id_ = tag->value;
-                tag->page->RenderList();
+                }
+                auto* page = tag->page;
+                page->selected_id_ = tag->value;
+                page->RenderList();
+                page->SelectPane(0);
             },
             LV_EVENT_CLICKED, episode_tags_.back().get());
     }
@@ -343,7 +361,7 @@ void Tab5PodcastPage::RenderList() {
 
 void Tab5PodcastPage::RenderEpisode() {
     UpdatePlayLabels();
-    const lv_font_t* font = font_ ? font_ : &qd_font_cjk_28;
+    const lv_font_t* font = &body_font_;
     lv_obj_clean(tracks_);
     track_tags_.clear();
     track_rows_.clear();
@@ -352,39 +370,47 @@ void Tab5PodcastPage::RenderEpisode() {
     active_cue_ = -1;
     manual_scroll_ = false;
     transcript_scroll_pending_ = false;
-    script_ = Text(script_box_, "", font, kBody, 0, 0, 420);
+    script_ = Text(script_box_, "", font, kBody, 0, 0, kRowW);
     lv_obj_set_style_text_line_space(script_, 8, 0);
-    lv_label_set_text(script_heading_, "节目文案");
+    lv_label_set_text(script_heading_, "节目文稿");
     const auto& episodes = List();
     auto it = std::find_if(episodes.begin(), episodes.end(),
                            [this](const auto& e) { return e.id == selected_id_; });
     if (it == episodes.end()) {
-        lv_label_set_text(title_, "还没有节目");
-        lv_label_set_text(meta_, "等待 Muse 发布今天的音乐电台");
-        lv_label_set_text(script_, "");
+        episode_title_ = "今天，听 Nabo 说说";
+        episode_detail_ = "等待 Muse 发布今天的音乐电台";
+        lv_label_set_text(episode_label_, "每日音乐 · 本期节目");
+        lv_label_set_text(pane_labels_[1], "推荐歌单");
+        lv_label_set_text(script_,
+                          "每日节目发布后，文稿和推荐歌单会出现在这里。\n可以点右上角刷新节目。");
+        UpdateHero();
         return;
     }
     const auto& e = *it;
-    lv_obj_set_style_text_font(title_, font, 0);
-    lv_label_set_text(title_, tab5_podcast::DisplayText(e.title).c_str());
+    episode_title_ = tab5_podcast::DisplayText(e.title);
+    const std::string date = ShortDate(e.time) + " · 本期节目";
+    lv_label_set_text(episode_label_, date.c_str());
     char meta[160];
-    std::snprintf(meta, sizeof(meta), "%s · %u 首%s%s", ShortDate(e.time).c_str(),
-                  unsigned(e.tracks.size()), e.from.empty() ? "" : " · ",
-                  tab5_podcast::DisplayText(e.from).c_str());
-    lv_label_set_text(meta_, meta);
+    std::snprintf(meta, sizeof(meta), "%u 首推荐%s%s", unsigned(e.tracks.size()),
+                  e.from.empty() ? "" : " · ", tab5_podcast::DisplayText(e.from).c_str());
+    episode_detail_ = meta;
+    char songs[64];
+    std::snprintf(songs, sizeof(songs), "推荐歌单 · %u首", unsigned(e.tracks.size()));
+    lv_label_set_text(pane_labels_[1], songs);
+    UpdateHero();
     lv_obj_set_style_text_font(script_, font, 0);
     const std::string script = tab5_podcast::DisplayText(e.script);
     lv_label_set_text(script_, script.empty() ? "本期没有文案。" : script.c_str());
     if (!e.cues.empty()) {
         lv_obj_add_flag(script_, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(script_heading_, "节目文案 · 跟随播放");
+        lv_label_set_text(script_heading_, "节目文稿");
         for (const auto& cue : e.cues) {
             const std::string spoken =
                 (cue.music ? "音乐 · " : "") + tab5_podcast::DisplayText(cue.text);
-            auto* row = Text(script_box_, spoken.c_str(), font, kBody, 0, 0, 420);
+            auto* row = Text(script_box_, spoken.c_str(), font, kBody, 0, 0, kRowW);
             lv_obj_set_style_text_line_space(row, 8, 0);
             lv_obj_set_style_pad_ver(row, 6, 0);
-            lv_obj_set_style_bg_color(row, lv_color_hex(0x2a2550), 0);
+            lv_obj_set_style_bg_color(row, lv_color_hex(0x302719), 0);
             lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
             lv_obj_add_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
             cue_rows_.push_back(row);
@@ -393,14 +419,14 @@ void Tab5PodcastPage::RenderEpisode() {
     lv_obj_scroll_to_y(script_box_, 0, LV_ANIM_OFF);
 
     if (e.tracks.empty())
-        Text(tracks_, "本期没有歌单。", &qd_font_cjk_28, kMuted, 0, 0, 270);
+        Text(tracks_, "本期没有歌单。", &qd_font_cjk_28, kMuted, 0, 0, kRowW);
     for (size_t i = 0; i < e.tracks.size(); ++i) {
         const auto& t = e.tracks[i];
         auto* row = lv_obj_create(tracks_);
-        lv_obj_set_size(row, 272, 76);
+        lv_obj_set_size(row, kRowW, 84);
         lv_obj_set_style_radius(row, 14, 0);
-        lv_obj_set_style_bg_color(row, lv_color_hex(0x10263a), 0);
-        lv_obj_set_style_bg_color(row, lv_color_hex(0x3a2f78), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(row, lv_color_hex(kPanel), 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(kPressed), LV_STATE_PRESSED);
         tab5_ui::AddPressFeel(row);
         lv_obj_set_style_border_width(row, 0, 0);
         lv_obj_set_style_pad_all(row, 0, 0);
@@ -408,12 +434,13 @@ void Tab5PodcastPage::RenderEpisode() {
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
         char number[12];
         std::snprintf(number, sizeof(number), "%02u", unsigned(i + 1));
-        auto* num = Text(row, number, &qd_font_cjk_28, kViolet, 10, 18, 40);
-        auto* name = Text(row, tab5_podcast::DisplayText(t.title).c_str(), font, kText, 54, 2, 210);
+        auto* num = Text(row, number, &qd_font_cjk_28, kAmber, 10, 18, 40);
+        auto* name =
+            Text(row, tab5_podcast::DisplayText(t.title).c_str(), font, kText, 64, 4, kRowW - 82);
         lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
         lv_obj_set_height(name, 38);
-        auto* artist = Text(row, tab5_podcast::DisplayText(t.artist).c_str(), &qd_font_cjk_28,
-                            0x7f9bb0, 54, 38, 210);
+        auto* artist = Text(row, tab5_podcast::DisplayText(t.artist).c_str(), font, kMuted, 64, 42,
+                            kRowW - 82);
         lv_label_set_long_mode(artist, LV_LABEL_LONG_DOT);
         lv_obj_set_height(artist, 34);
         for (auto* l : {num, name, artist})
@@ -458,7 +485,7 @@ void Tab5PodcastPage::PlaySelected() {
             playback_episode_id_ = it->id;
             UpdatePlayLabels();
         }
-        SetStatus(ok ? "正在连接播客音频…" : "播客音频暂时无法播放", ok ? kViolet : kPink);
+        SetStatus(ok ? "正在连接播客音频…" : "播客音频暂时无法播放", ok ? kAmber : kError);
         return;
     }
     SetStatus("本期原声播客尚未上传，可单独播放推荐歌曲", kMuted);
@@ -481,6 +508,8 @@ void Tab5PodcastPage::UpdatePlayLabels() {
     lv_label_set_text(songs_label_, active && playback_kind_ == PlaybackKind::Songs
                                         ? "停止推荐歌曲"
                                         : "播放推荐歌曲");
+    UpdateTransport();
+    UpdateHero();
 }
 
 void Tab5PodcastPage::PlayTrack(size_t index) {
@@ -494,26 +523,72 @@ void Tab5PodcastPage::PlayTrack(size_t index) {
     if (ok) {
         playback_kind_ = PlaybackKind::Songs;
         playback_episode_id_ = it->id;
+        now_title_.clear();
+        now_artist_.clear();
+        now_line_.clear();
         UpdatePlayLabels();
     }
     const std::string text = ok ? "正在从网易云获取《" + tab5_podcast::DisplayText(t.title) +
                                       "》，之后按歌单顺序播放…"
                                 : std::string("暂时无法播放，稍后再试");
-    SetStatus(text.c_str(), ok ? kViolet : kPink);
+    SetStatus(text.c_str(), ok ? kAmber : kError);
+}
+
+void Tab5PodcastPage::UpdateTransport() {
+    const bool songs = playback_kind_ == PlaybackKind::Songs;
+    const bool active = playing_ && playback_episode_id_ == selected_id_;
+    const int mode = int(songs) | (active ? 2 : 0);
+    if (mode == transport_mode_)
+        return;
+    transport_mode_ = mode;
+    auto* primary = songs ? songs_button_ : play_button_;
+    auto* secondary = songs ? play_button_ : songs_button_;
+    lv_obj_set_pos(primary, kColX, 638);
+    lv_obj_set_width(primary, 320);
+    lv_obj_set_pos(secondary, kColX + 336, 638);
+    lv_obj_set_width(secondary, 304);
+    for (auto* button : {primary, secondary}) {
+        lv_obj_set_style_bg_color(button, lv_color_hex(button == primary ? kAmber : kChip), 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(button == primary ? 0xffd690 : kPressed),
+                                  LV_STATE_PRESSED);
+    }
+    lv_obj_set_style_text_color(play_label_, lv_color_hex(songs ? kText : kPage), 0);
+    lv_obj_set_style_text_color(play_icon_, lv_color_hex(songs ? kText : kPage), 0);
+    lv_obj_set_style_text_color(songs_label_, lv_color_hex(songs ? kPage : kText), 0);
+    lv_obj_set_style_text_color(songs_icon_, lv_color_hex(songs ? kPage : kText), 0);
+    lv_label_set_text(play_icon_, active && !songs ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY);
+    lv_label_set_text(songs_icon_, active && songs ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY);
+}
+
+void Tab5PodcastPage::UpdateHero() {
+    const bool song = playback_kind_ != PlaybackKind::Podcast && !now_title_.empty();
+    if (hero_mode_ != int(song)) {
+        hero_mode_ = int(song);
+        lv_obj_set_style_text_color(title_, lv_color_hex(song ? kAmber : kText), 0);
+    }
+    std::string heading = song ? (now_line_.empty() ? "等待歌词" : now_line_) : episode_title_;
+    if (heading.empty())
+        heading = "今天，听 Nabo 说说";
+    std::string meta = song ? now_title_ : episode_detail_;
+    if (song && !now_artist_.empty())
+        meta += " · " + now_artist_;
+    if (heading != lv_label_get_text(title_)) {
+        lv_label_set_text(title_, heading.c_str());
+        lv_obj_scroll_to_y(hero_, 0, LV_ANIM_OFF);
+    }
+    if (meta != lv_label_get_text(meta_))
+        lv_label_set_text(meta_, meta.c_str());
 }
 
 void Tab5PodcastPage::SetNowPlaying(const char* title, const char* artist, const char* line) {
-    const std::string t = title ? title : "";
-    std::string text = "正在播放：" + tab5_podcast::DisplayText(t);
-    if (artist && *artist)
-        text += " · " + tab5_podcast::DisplayText(artist);
-    if (line && *line && t != line)
-        text += "  " + tab5_podcast::DisplayText(line);
-    SetStatus(text.c_str(), kPink);
-    if (t != now_title_) {
-        now_title_ = t;
+    const std::string next_title = tab5_podcast::DisplayText(title ? title : "");
+    const bool changed = next_title != now_title_;
+    now_title_ = next_title;
+    now_artist_ = tab5_podcast::DisplayText(artist ? artist : "");
+    now_line_ = tab5_podcast::DisplayText(line ? line : "");
+    UpdateHero();
+    if (changed)
         HighlightNowPlaying();
-    }
 }
 
 // Marks the selected episode's row whose title matches the song now playing.
@@ -525,8 +600,8 @@ void Tab5PodcastPage::HighlightNowPlaying() {
         const bool on = playing_ && it != episodes.end() && i < it->tracks.size() &&
                         !now_title_.empty() &&
                         std::string_view(it->tracks[i].title) == now_title_;
-        lv_obj_set_style_bg_color(track_rows_[i], lv_color_hex(on ? 0x3a2f78 : 0x10263a), 0);
-        lv_obj_set_style_border_color(track_rows_[i], lv_color_hex(kPink), 0);
+        lv_obj_set_style_bg_color(track_rows_[i], lv_color_hex(on ? 0x302719 : kPanel), 0);
+        lv_obj_set_style_border_color(track_rows_[i], lv_color_hex(kAmber), 0);
         lv_obj_set_style_border_width(track_rows_[i], on ? 2 : 0, 0);
         if (on)
             lv_obj_scroll_to_view(track_rows_[i], LV_ANIM_ON);
@@ -540,12 +615,13 @@ void Tab5PodcastPage::SetPlayback(bool playing, const char* now_playing) {
     playing_ = playing;
     now_playing_ = now;
     UpdatePlayLabels();
-    lv_label_set_text(badge_label_, playing ? "正在播放" : "本期节目");
-    lv_obj_set_style_bg_color(badge_, lv_color_hex(playing ? 0x6a3a6e : 0x3a2f78), 0);
     HighlightNowPlaying();
     if (playing && !now.empty()) {
-        const std::string text = "正在播放：" + tab5_podcast::DisplayText(now);
-        SetStatus(text.c_str(), kPink);
+        const char* prefix = playback_kind_ == PlaybackKind::Podcast ? "播客播放中 · "
+                             : playback_kind_ == PlaybackKind::Songs ? "推荐歌曲播放中 · "
+                                                                     : "正在播放 · ";
+        const std::string text = prefix + tab5_podcast::DisplayText(now);
+        SetStatus(text.c_str(), kAmber);
     }
 }
 
@@ -556,31 +632,10 @@ void Tab5PodcastPage::Tick() {
         refreshing_ = false;
         lv_label_set_text(refresh_label_, "刷新失败");
         if (!playing_)
-            SetStatus("刷新超时，可点按重试", kPink);
+            SetStatus("刷新超时，可点按重试", kError);
     }
     BindFont();
     UpdateTranscript();
-    if ((++phase_ & 1U) != 0)
-        return;  // ~12 redraws/s of one bounded area
-    const int level = playing_ && callbacks_.level ? std::clamp(callbacks_.level(), 0, 100) : 0;
-    bool changed = false;
-    for (int i = 0; i < kBars; ++i) {
-        int target;
-        if (playing_) {
-            // Two travelling ripples scaled by the real output level.
-            const int a = 40 - std::abs((i * 11 + int(phase_) * 6) % 80 - 40);
-            const int b = 24 - std::abs((i * 7 + int(phase_) * 9 + 31) % 48 - 24);
-            target = std::clamp(12 + level * (a + b + 10) / 70, 8, 84);
-        } else {
-            // Idle: a slow breathing wave so the panel still feels alive.
-            target = 8 + (14 - std::abs((i * 3 + int(phase_)) % 28 - 14)) / 2;
-        }
-        const int next = (int(heights_[i]) * 2 + target + 1) / 3;
-        changed |= next != heights_[i];
-        heights_[i] = static_cast<uint8_t>(next);
-    }
-    if (changed)
-        lv_obj_invalidate(wave_);
 }
 
 void Tab5PodcastPage::UpdateTranscript() {
@@ -606,13 +661,13 @@ void Tab5PodcastPage::UpdateTranscript() {
         active_cue_ = next;
         transcript_scroll_pending_ = next >= 0;
         if (next >= 0 && size_t(next) < cue_rows_.size()) {
-            lv_obj_set_style_text_color(cue_rows_[next], lv_color_hex(kPink), 0);
+            lv_obj_set_style_text_color(cue_rows_[next], lv_color_hex(kAmber), 0);
             lv_obj_set_style_bg_opa(cue_rows_[next], LV_OPA_COVER, 0);
         }
     }
     if (manual_scroll_ && uint32_t(lv_tick_get() - manual_scroll_started_) >= 8000)
         manual_scroll_ = false;
-    if (!manual_scroll_ && transcript_scroll_pending_ && active_cue_ >= 0 &&
+    if (pane_ == 0 && !manual_scroll_ && transcript_scroll_pending_ && active_cue_ >= 0 &&
         size_t(active_cue_) < cue_rows_.size()) {
         // A Muse segment can be a whole paragraph taller than the viewport.
         // Show its beginning, rather than scrolling to its last wrapped line.
@@ -622,27 +677,17 @@ void Tab5PodcastPage::UpdateTranscript() {
     }
 }
 
-void Tab5PodcastPage::DrawWave(lv_event_t* event) {
-    auto* self = static_cast<Tab5PodcastPage*>(lv_event_get_user_data(event));
-    auto* object = static_cast<lv_obj_t*>(lv_event_get_current_target(event));
-    auto* layer = lv_event_get_layer(event);
-    if (!self || !object || !layer)
-        return;
-    lv_area_t bounds;
-    lv_obj_get_coords(object, &bounds);
-    lv_draw_rect_dsc_t bar;
-    lv_draw_rect_dsc_init(&bar);
-    bar.radius = LV_RADIUS_CIRCLE;
-    bar.border_width = 0;
-    bar.bg_opa = self->playing_ ? LV_OPA_COVER : LV_OPA_50;
-    const int mid = lv_obj_get_height(object) / 2;
-    const int pitch = lv_obj_get_width(object) / kBars;
-    for (int i = 0; i < kBars; ++i) {
-        const int h = self->heights_[i];
-        const int x = bounds.x1 + i * pitch + 2;
-        const int y = bounds.y1 + mid - h / 2;
-        bar.bg_color = self->colors_[i];
-        lv_area_t area{x, y, x + pitch - 5, y + h - 1};
-        lv_draw_rect(layer, &bar, &area);
+nabo_radio::Mood Tab5PodcastPage::StudioMood(const char* state) const {
+    nabo_radio::Mood mood;
+    mood.link = nabo_radio::LinkFromState(state);
+    mood.music = playback_kind_ == PlaybackKind::Songs;
+    if (playback_kind_ == PlaybackKind::Podcast && playback_episode_id_ == selected_id_ &&
+        active_cue_ >= 0) {
+        const auto& episodes = List();
+        auto episode = std::find_if(episodes.begin(), episodes.end(),
+                                    [this](const auto& item) { return item.id == selected_id_; });
+        if (episode != episodes.end() && size_t(active_cue_) < episode->cues.size())
+            mood.music = episode->cues[active_cue_].music;
     }
+    return mood;
 }

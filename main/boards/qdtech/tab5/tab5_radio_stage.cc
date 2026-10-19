@@ -667,6 +667,12 @@ Tab5RadioStage::Tab5RadioStage(lv_obj_t* parent, int x, int y) {
     lv_display_add_event_cb(lv_display_get_default(), RenderReady, LV_EVENT_RENDER_READY, this);
 }
 
+void Tab5RadioStage::Attach(lv_obj_t* parent, int x, int y) {
+    if (lv_obj_get_parent(root_) != parent)
+        lv_obj_set_parent(root_, parent);
+    lv_obj_set_pos(root_, x, y);
+}
+
 void Tab5RadioStage::SetActive(bool active) {
     if (active && !reader_)
         reader_ = Tab5RadioStageReader::Get();

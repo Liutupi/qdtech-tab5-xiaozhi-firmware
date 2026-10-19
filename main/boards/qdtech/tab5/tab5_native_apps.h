@@ -150,6 +150,7 @@ private:
     // Created on first open; episodes and playback state are kept here meanwhile.
     std::unique_ptr<Tab5PodcastPage> podcast_page_;
     tab5_podcast::SharedEpisodes podcast_episodes_;
+    std::string podcast_now_title_, podcast_now_artist_, podcast_now_line_;
     std::string radio_station_name_;
     lv_obj_t* podcast_entry_detail_ = nullptr;
     lv_obj_t* podcast_entry_label_ = nullptr;

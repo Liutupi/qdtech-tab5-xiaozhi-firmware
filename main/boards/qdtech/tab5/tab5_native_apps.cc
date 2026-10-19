@@ -259,7 +259,6 @@ void Tab5NativeApps::OpenPodcast() {
             return actions_.podcast_play ? actions_.podcast_play(episode, index, count) : false;
         };
         callbacks.stop = [this] { Schedule(actions_.radio_stop); };
-        callbacks.level = [this] { return actions_.radio_level ? actions_.radio_level() : 0; };
         callbacks.playback_position = [this](std::string_view url) {
             return actions_.podcast_position ? actions_.podcast_position(url)
                                              : tab5_playback::Position{};
@@ -273,6 +272,13 @@ void Tab5NativeApps::OpenPodcast() {
     Show(nullptr);
     podcast_page_->SetPlayback(radio_playing_, radio_station_name_.c_str());
     podcast_page_->Show();
+    podcast_page_->SetNowPlaying(podcast_now_title_.c_str(), podcast_now_artist_.c_str(),
+                                 podcast_now_line_.c_str());
+    if (radio_stage_) {
+        radio_stage_->Attach(podcast_page_->object(), 24, 68);
+        radio_stage_->SetKnob(0);
+        radio_stage_->Open(lv_tick_get());
+    }
     AnimateEnter(podcast_page_->object());
     Schedule(actions_.muse_refresh);
 }
@@ -389,8 +395,12 @@ bool Tab5NativeApps::IsPodcastVisible() const {
 
 void Tab5NativeApps::SetPodcastNowPlaying(const char* title, const char* artist,
                                           const char* line) {
+    podcast_now_title_ = title ? title : "";
+    podcast_now_artist_ = artist ? artist : "";
+    podcast_now_line_ = line ? line : "";
     if (podcast_page_)
-        podcast_page_->SetNowPlaying(title, artist, line);
+        podcast_page_->SetNowPlaying(podcast_now_title_.c_str(), podcast_now_artist_.c_str(),
+                                     podcast_now_line_.c_str());
 }
 
 bool Tab5NativeApps::IsSettingsVisible() const {

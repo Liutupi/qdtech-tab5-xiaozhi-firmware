@@ -921,6 +921,7 @@ file(GLOB BOARD_SOURCES
 list(FILTER BOARD_SOURCES EXCLUDE REGEX "/nabo_portrait_matte\\.c$")
 list(FILTER BOARD_SOURCES EXCLUDE REGEX "/nabo_sd_static\\.c$")
 list(FILTER BOARD_SOURCES EXCLUDE REGEX "/nabo_think_torso_raw\\.c$")
+list(FILTER BOARD_SOURCES EXCLUDE REGEX "/qd_font_lyric_40\\.c$")
 if(CONFIG_QDTECH_TAB5_NATIVE_UI)
     # The native interface uses the board hardware and XiaoZhi core, without
     # compiling the fixed-size desktop, its apps, or their image assets.
@@ -930,6 +931,7 @@ if(CONFIG_QDTECH_TAB5_NATIVE_UI)
     list(APPEND BOARD_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_lxgw_28.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_cjk_28.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_lyric_40.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_lxgw_36.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/qd_font_clock_72.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/qdtech/tab5/nabo_assets.c

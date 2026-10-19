@@ -33,7 +33,7 @@ class PodcastPlayButtonsTests(unittest.TestCase):
 #include "tab5_podcast_model.h"
 struct lv_obj_t { std::string text; };
 void lv_label_set_text(lv_obj_t* obj, const char* text) { obj->text = text; }
-constexpr unsigned kMuted=1, kPink=2, kViolet=3;
+constexpr unsigned kMuted=1, kError=2, kAmber=3;
 unsigned lv_tick_get() { return 100; }
 struct Tab5PodcastPage {
   struct Callbacks {
@@ -53,7 +53,9 @@ struct Tab5PodcastPage {
   lv_obj_t* refresh_label_=&refresh_label;
   bool refreshing_=false;
   unsigned last_poll_count_=0,refresh_started_=0;
-  std::string status;
+  std::string status, now_title_, now_artist_, now_line_;
+  void UpdateTransport() {}
+  void UpdateHero() {}
   const tab5_podcast::EpisodeList& List() const {return *episodes_;}
   void SetStatus(const char* text,unsigned) {status=text;}
   void Refresh(); void SetRefreshResult(bool,unsigned);

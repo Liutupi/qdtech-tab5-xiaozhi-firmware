@@ -17,6 +17,8 @@ public:
     static constexpr int kWidth = 568, kHeight = 628;
 
     Tab5RadioStage(lv_obj_t* parent, int x, int y);
+    // The FM and daily-program pages share this view, reader and borrowed pool.
+    void Attach(lv_obj_t* parent, int x, int y);
     // Writes an opaque RGB565 frame for a screen area straight to the panel; false
     // falls back to LVGL. Same contract as Tab5SdScene::DirectBlit.
     using DirectBlit = bool (*)(void* context, const lv_area_t& area, const uint8_t* pixels);

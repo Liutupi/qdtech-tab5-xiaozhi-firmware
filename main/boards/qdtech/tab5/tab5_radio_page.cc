@@ -266,8 +266,10 @@ void Tab5NativeApps::OpenRadio(bool start_playback) {
     Show(radio_page_);
     if (!was_visible) {
         RefreshStations();
-        if (radio_stage_)
+        if (radio_stage_) {
+            radio_stage_->Attach(radio_page_, 24, 68);
             radio_stage_->Open(lv_tick_get());
+        }
     }
     if (start_playback)
         Schedule(actions_.start_radio);
@@ -346,6 +348,9 @@ void Tab5NativeApps::SetMusicLyricLine(const char* line) {
 
 void Tab5NativeApps::SetMusicLyricsWindow(const char* title, const char* artist, const char*,
                                           const char* current, const char*) {
+    // Both timed LRC and untimed music updates reach the daily-program hero.
+    // Retain the latest line while hidden so reopening starts with current text.
+    SetPodcastNowPlaying(title, artist, current);
     if (IsRadioVisible())
         SyncRadioTextFont();
     if (title && *title) {
@@ -373,6 +378,7 @@ void Tab5NativeApps::SetVoiceStatus(const char* text, bool active) {
 }
 
 void Tab5NativeApps::ClearMusicLyrics() {
+    SetPodcastNowPlaying(nullptr, nullptr, nullptr);
     radio_song_ = false;
     if (radio_dial_)
         lv_obj_set_style_opa(radio_dial_, LV_OPA_COVER, 0);
@@ -634,17 +640,23 @@ nabo_radio::Mood Tab5NativeApps::RadioMood() const {
 
 void Tab5NativeApps::TickRadio() {
     const bool visible = IsRadioVisible();
-    if (radio_stage_ && visible != radio_stage_active_) {
-        radio_stage_active_ = visible;
-        radio_stage_->SetActive(visible);
-        if (!visible) {
-            tune_due_ms_ = 0;
-            tune_index_ = -1;
-            dial_dragging_ = false;
-        }
+    const bool podcast_visible = IsPodcastVisible();
+    const bool stage_visible = visible || podcast_visible;
+    if (radio_stage_ && stage_visible != radio_stage_active_) {
+        radio_stage_active_ = stage_visible;
+        radio_stage_->SetActive(stage_visible);
     }
-    if (!visible)
+    if (!visible) {
+        tune_due_ms_ = 0;
+        tune_index_ = -1;
+        dial_dragging_ = false;
+        if (podcast_visible && radio_stage_) {
+            const int level = actions_.radio_level ? actions_.radio_level() : 0;
+            radio_stage_->Tick(lv_tick_get(), podcast_page_->StudioMood(radio_link_state_.c_str()),
+                               level);
+        }
         return;
+    }
     const uint32_t now = lv_tick_get();
     if (tune_due_ms_ && !dial_dragging_ && int32_t(now - tune_due_ms_) >= 0) {
         tune_due_ms_ = 0;
