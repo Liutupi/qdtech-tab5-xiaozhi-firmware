@@ -1,8 +1,11 @@
 # 小智桌面固件：QDTech S3 → M5Stack Tab5 移植
 
-这是面向 M5Stack Tab5 的开发中固件。`qdtech-tab5-native` 变体直接按 1280 × 720 绘制 Nabo 主界面、时分秒翻页时钟与应用页；支持配网、亮度、音量、网络电台、音乐歌词、ICU 计算器和人体感应。原 `qdtech-tab5` 变体保留旧桌面。当前公开版本为 [v1.0.15](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.15)；各功能的实机验证程度见 [移植状态](PORTING_STATUS.md) 和 [交接本](HANDOFF.md)。
+这是面向 M5Stack Tab5 的开发中固件。`qdtech-tab5-native` 变体直接按 1280 × 720 绘制 Nabo 主界面、时分秒翻页时钟与应用页；支持配网、亮度、音量、网络电台、音乐歌词、ICU 计算器和人体感应。原 `qdtech-tab5` 变体保留旧桌面。当前公开版本为 [v1.0.16](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.16)；各功能的实机验证程度见 [移植状态](PORTING_STATUS.md) 和 [交接本](HANDOFF.md)。
 
 v1.0.15 修复 3.5mm 耳机口只有一侧出声，以及插入耳机后扬声器仍播放的问题。已用绿联 CM403 和蓝牙耳机实测双耳出声、插入关闭外放、拔出恢复外放。左右耳播放相同内容；原有音乐解码中的单声道混音保持不变。已有兼容设备只需更新主程序，SD 动画与升级程序无需重装。
+
+
+v1.0.16 重排 NABO 网络电台与每日节目页，复用同一套录音室动画；网络电台支持 1,079 台及地区/类型波段，每日节目页新增可重启保留的歌曲收藏与 48 px 歌词。用户已确认画面、声音、动画、收藏保存及点播正常。新版录音室和台表位于 SD `tab5/nabo/radio-v1/`，配套完整 SD 包见本版 Release；在线升级只更新主程序，尚未安装此目录的设备需要另行复制。收藏点播依赖 NAS 已部署的 `/song` 接口，见[板级说明](main/boards/qdtech/tab5/README.md)。
 
 ## 固件与在线升级
 
