@@ -1,11 +1,14 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "lvgl.h"
 #include "tab5_nabo_push.h"
+
+class Tab5NaboAvatar;
 
 // 每日推送 page: 今日运势 (nine module tabs), 今日学习, 今日待办 and 往日回顾 for the
 // one-way NABO pushes kept by tab5_nabo::Store. Every view is rebuilt from the current
@@ -19,6 +22,7 @@ public:
     };
 
     Tab5NaboPushPage(lv_obj_t* parent, Callbacks callbacks);
+    ~Tab5NaboPushPage();
     lv_obj_t* object() const { return root_; }
     void Show();
     void Hide();
@@ -73,6 +77,7 @@ private:
     lv_obj_t* badge_label_ = nullptr;
     lv_obj_t* rail_ = nullptr;
     lv_obj_t* avatar_caption_ = nullptr;  // under the small NABO below the boards
+    std::unique_ptr<Tab5NaboAvatar> avatar_;
     lv_obj_t* area_ = nullptr;
     tab5_nabo::SharedData data_;
     uint32_t rendered_version_ = 0;

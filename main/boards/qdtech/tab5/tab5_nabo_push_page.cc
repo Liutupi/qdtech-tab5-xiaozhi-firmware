@@ -7,10 +7,10 @@
 #include <algorithm>
 #include <cstdio>
 
+#include "tab5_nabo_avatar.h"
 #include "tab5_nabo_ui.h"
 
 LV_FONT_DECLARE(qd_font_cjk_28);
-LV_IMAGE_DECLARE(nabo_push_avatar);
 
 using namespace tab5_nabo;
 using namespace tab5_nabo_ui;
@@ -50,6 +50,8 @@ Tab5NaboPushPage::Tab5NaboPushPage(lv_obj_t* parent, Callbacks callbacks)
     Build();
 }
 
+Tab5NaboPushPage::~Tab5NaboPushPage() = default;
+
 const lv_font_t* Tab5NaboPushPage::Text() const {
     const lv_font_t* font = callbacks_.text_font ? callbacks_.text_font() : nullptr;
     return font ? font : &qd_font_cjk_28;
@@ -73,25 +75,10 @@ void Tab5NaboPushPage::Build() {
     Button(root_, "返回", Text(), 1152, 20, 96, 48, kChip, kText, OnBack, this);
     rail_ = Panel(root_, 24, 96, 208, 400, kBg, 0);
 
-    // A small NABO under the boards, breathing gently; the caption follows the newest push.
+    // Real SD animation in place; the caption follows the newest unread push.
     auto* avatar_card = Panel(root_, 24, 504, 208, 208, kCard, 18);
-    lv_obj_add_flag(avatar_card, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-    auto* avatar = lv_image_create(avatar_card);
-    lv_image_set_src(avatar, &nabo_push_avatar);
-    lv_obj_set_pos(avatar, 37, -6);
-    lv_anim_t breath;
-    lv_anim_init(&breath);
-    lv_anim_set_var(&breath, avatar);
-    lv_anim_set_values(&breath, 0, -6);
-    lv_anim_set_duration(&breath, 1800);
-    lv_anim_set_reverse_duration(&breath, 1800);
-    lv_anim_set_repeat_count(&breath, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_path_cb(&breath, lv_anim_path_ease_in_out);
-    lv_anim_set_exec_cb(&breath, [](void* obj, int32_t value) {
-        lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(obj), value, 0);
-    });
-    lv_anim_start(&breath);
-    avatar_caption_ = Label(avatar_card, "", &qd_font_cjk_28, kSoft, 0, 168, 208);
+    avatar_ = std::make_unique<Tab5NaboAvatar>(avatar_card);
+    avatar_caption_ = Label(avatar_card, "", &qd_font_cjk_28, kSoft, 0, 174, 208);
     lv_obj_set_style_text_align(avatar_caption_, LV_TEXT_ALIGN_CENTER, 0);
     area_ = Panel(root_, 244, 96, 1024, 624, kBg, 0);
 }
@@ -102,11 +89,15 @@ void Tab5NaboPushPage::Show() {
         callbacks_.refresh();
     rendered_version_ = 0;
     Render();
+    avatar_->Start();
 }
 
-void Tab5NaboPushPage::Hide() { lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN); }
+void Tab5NaboPushPage::Hide() {
+    avatar_->Stop();
+    lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
+}
 
-bool Tab5NaboPushPage::IsVisible() const { return !lv_obj_has_flag(root_, LV_OBJ_FLAG_HIDDEN); }
+bool Tab5NaboPushPage::IsVisible() const { return lv_obj_is_visible(root_); }
 
 void Tab5NaboPushPage::ShowBoard(Board board) {
     board_ = board;
@@ -393,6 +384,7 @@ void Tab5NaboPushPage::UpdateAvatar() {
                        : mood == "thinking" ? "一起想一想"
                                             : "有新的推送";
     lv_label_set_text(avatar_caption_, text);
+    avatar_->SetMood(mood);
 }
 
 // ---- events -------------------------------------------------------------
