@@ -257,7 +257,7 @@ curl -sS -X POST "$NABO_RELAY/nabo/$NABO_TOKEN/push" \
 - 部署步骤：
   1. 备份 `/data`。
   2. 把 `nabo_routes.js`、`enable_nabo.js` 放到 `/data`（和 `relay.js` 同一目录）。
-  3. 运行 `node /data/enable_nabo.js`。它会先做语法检查，再在 `http.createServer` 入口插入一行，原文件另存为 `relay.js.bak-nabo-<时间>`；已经装过就不会再改。
+  3. 运行 `node /data/enable_nabo.js`。它会先做语法检查，再把钩子插成请求入口的第一行（排在 stream96 和电台用的 `handleNabo` 之前），原文件另存为 `relay.js.bak-nabo-<时间>`；已经装过就不会再改。排在最前是安全的：新模块只接 token 对得上的 `POST /nabo/<token>/push` 和 `GET /nabo/<token>/inbox`，其余请求（包括 `nabo_ext.js` 的 `/nabo/health`、`/nabo/episodes`、`/nabo/audio`、`/nabo/episode`、`/nabo/push`）原样放行。这里的 token 是 `/data/token.txt`（中转站 token），不是电台扩展的 `/data/nabo_token.txt`。
   4. 只重启 `node /data/relay.js`（由原有 supervisor 拉起），不要动 cloudflared。
   5. 用第 5 节的 curl 验证。
 - 中转站已经校验：长度上限；`source`、`priority`、`mood` 只接受上面列出的值；运势的 `body` 必须能解析成 JSON 对象；单个请求不超过 16 KB；最多保留 30 天或 500 条。日志只记 `id`、`source`、`rev` 和字节数，不记正文和 token。

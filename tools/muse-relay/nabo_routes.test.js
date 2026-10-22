@@ -178,29 +178,35 @@ test('the push log never contains the token or the body text', async () => {
   });
 });
 
-test('enable_nabo installs once into the deployed relay', () => {
+// The deployed relay (2026-10-22): stream96 → try-wrapped handleNabo → home → audio.
+function deployedRelay(dir) {
+  for (const name of ['relay.js', 'nabo_routes.js', 'home_routes.js', 'audio_routes.js', 'audio_uploads.js', 'transcript_routes.js'])
+    fs.copyFileSync(path.join(__dirname, name), path.join(dir, name));
+  const file = path.join(dir, 'relay.js');
+  execFileSync(process.execPath, [path.join(__dirname, 'enable_home.js'), file]);
+  const anchor = 'const server = http.createServer(async (req, res) => {';
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(anchor,
+    'const handleStream96 = async () => false;\nconst handleNabo = async () => false;\n' + anchor +
+    '\n  if (await handleStream96(req, res)) return;' +
+    '\n  try { if (await handleNabo(req, res)) return; } catch (e) { console.error(e); }'));
+  return file;
+}
+
+test('enable_nabo installs first, ahead of the existing Nabo extension, exactly once', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nabo-enable-'));
   try {
-    for (const name of ['relay.js', 'nabo_routes.js', 'home_routes.js', 'audio_routes.js', 'audio_uploads.js', 'transcript_routes.js'])
-      fs.copyFileSync(path.join(__dirname, name), path.join(dir, name));
-    const home = () => execFileSync(process.execPath, [path.join(__dirname, 'enable_home.js'), path.join(dir, 'relay.js')]).toString();
-    const run = () => execFileSync(process.execPath, [path.join(__dirname, 'enable_nabo.js'), path.join(dir, 'relay.js')]).toString();
-    assert.match(home(), /installed/);
-    // Stand-in for the older Nabo extension that publishes the daily radio.
-    const anchor = 'const server = http.createServer(async (req, res) => {';
-    const file = path.join(dir, 'relay.js');
-    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(anchor,
-      `const handleNaboRadio = async () => false;\n${anchor}\n  if (await handleNaboRadio(req, res)) return;`));
-    assert.match(run(), /installed after 3 existing hook/);
+    const file = deployedRelay(dir);
+    const run = () => execFileSync(process.execPath, [path.join(__dirname, 'enable_nabo.js'), file]).toString();
+    assert.match(run(), /installed as the first request hook/);
     assert.match(run(), /already present/);
     const relay = fs.readFileSync(file, 'utf8');
     assert.strictEqual(relay.split('handleNaboPush(req, res)').length, 2);
-    assert.strictEqual(relay.split('handleTab5Home(req, res)').length, 2);
-    const at = name => relay.indexOf(`if (await ${name}(req, res)) return;`);
-    for (const earlier of ['handleNaboRadio', 'handleTab5Home', 'handleMuseAudio'])
-      assert.ok(at(earlier) >= 0 && at(earlier) < at('handleNaboPush'), earlier);
-    assert.ok(at('handleNaboPush') < relay.indexOf("const url = new URL(req.url, 'http://localhost');",
-      relay.indexOf(anchor)));
+    const at = text => relay.indexOf(text);
+    const ours = at('if (await handleNaboPush(req, res)) return;');
+    for (const later of ['await handleStream96(req, res)', 'try { if (await handleNabo(req, res))',
+      'await handleTab5Home(req, res)', 'await handleMuseAudio(req, res)'])
+      assert.ok(ours > 0 && ours < at(later), later);
+    assert.ok(at('const handleNaboPush') < at('const server = http.createServer'));
     execFileSync(process.execPath, ['--check', file]);
     assert.ok(fs.readdirSync(dir).some(name => name.startsWith('relay.js.bak-nabo-')));
   } finally {
@@ -208,20 +214,72 @@ test('enable_nabo installs once into the deployed relay', () => {
   }
 });
 
-test('enable_nabo refuses a request handler it does not recognise', () => {
+test('enable_nabo leaves a relay it does not recognise untouched', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nabo-refuse-'));
   try {
-    for (const name of ['relay.js', 'nabo_routes.js', 'audio_routes.js', 'audio_uploads.js', 'transcript_routes.js'])
-      fs.copyFileSync(path.join(__dirname, name), path.join(dir, name));
-    const file = path.join(dir, 'relay.js');
-    const anchor = 'const server = http.createServer(async (req, res) => {';
-    const before = fs.readFileSync(file, 'utf8').replace(anchor, `${anchor}\n  if (req.url.startsWith('/nabo/')) return;`);
+    const file = deployedRelay(dir);
+    const before = fs.readFileSync(file, 'utf8').replace('const server = http.createServer(async (req, res) => {',
+      'const server = http.createServer(async function (req, res) {');
     fs.writeFileSync(file, before);
-    assert.throws(() => execFileSync(process.execPath, [path.join(__dirname, 'enable_nabo.js'), file],
-      { stdio: 'pipe' }));
+    assert.throws(() => execFileSync(process.execPath, [path.join(__dirname, 'enable_nabo.js'), file], { stdio: 'pipe' }));
     assert.strictEqual(fs.readFileSync(file, 'utf8'), before);
     assert.ok(!fs.readdirSync(dir).some(name => name.startsWith('relay.js.bak-nabo-')));
   } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Behaves like the deployed nabo_ext.js: every /nabo request without its Bearer token is
+// answered 401, its five routes need the token, anything else under /nabo is 404.
+function fakeNaboExt(bearer) {
+  const routes = ['GET /nabo/health', 'GET /nabo/episodes', 'POST /nabo/audio', 'POST /nabo/episode', 'POST /nabo/push'];
+  return (req, res) => {
+    const url = new URL(req.url, 'http://localhost');
+    if (!url.pathname.startsWith('/nabo')) return false;
+    const reply = (status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); return true; };
+    if (req.headers.authorization !== `Bearer ${bearer}`) return reply(401, { ext: 'unauthorized' });
+    const route = `${req.method} ${url.pathname}`;
+    return routes.includes(route) ? reply(200, { ext: route }) : reply(404, { ext: 'not_found' });
+  };
+}
+
+test('in front of nabo_ext: only our two routes are ours, the radio routes still reach nabo_ext', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nabo-order-'));
+  const BEARER = 'nabo-ext-token-different-from-relay';
+  const ours = createNaboRoutes({ dataDir: dir, token: TOKEN, now: () => NOW, log: () => {} });
+  const ext = fakeNaboExt(BEARER);
+  const server = http.createServer(async (req, res) => {
+    if (await ours(req, res)) return;
+    try { if (await ext(req, res)) return; } catch {}
+    res.writeHead(418); res.end();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const root = `http://127.0.0.1:${server.address().port}`;
+  const call = (method, pathname, body, bearer) => fetch(root + pathname, {
+    method, headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  try {
+    let r = await call('POST', `/nabo/${TOKEN}/push`, { id: 'o1', source: 'nabo/todo', title: '09:30 测试' });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual((await r.json()).rev, 1);
+    r = await call('GET', `/nabo/${TOKEN}/inbox?since=0`);
+    assert.deepStrictEqual((await r.json()).items.map(i => i.id), ['o1']);
+    for (const [method, pathname] of [['GET', '/nabo/health'], ['GET', '/nabo/episodes'], ['POST', '/nabo/audio'],
+      ['POST', '/nabo/episode'], ['POST', '/nabo/push']]) {
+      r = await call(method, pathname, method === 'POST' ? { title: 'radio' } : undefined, BEARER);
+      assert.strictEqual(r.status, 200, `${method} ${pathname}`);
+      assert.strictEqual((await r.json()).ext, `${method} ${pathname}`);
+    }
+    r = await call('POST', '/nabo/push', { title: 'radio' });
+    assert.strictEqual(r.status, 401);
+    r = await call('POST', '/nabo/wrong-token/push', { id: 'x', source: 'nabo/todo', title: 'x' });
+    assert.strictEqual(r.status, 401);
+    r = await call('POST', `/nabo/${BEARER}/push`, { id: 'x', source: 'nabo/todo', title: 'x' }, BEARER);
+    assert.strictEqual(r.status, 404);
+    assert.strictEqual((await (await call('GET', `/nabo/${TOKEN}/inbox?since=0`)).json()).latest_rev, 1);
+  } finally {
+    server.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
