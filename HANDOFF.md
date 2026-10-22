@@ -440,3 +440,15 @@ NABO FM 与每日节目页统一录音室，1,079 台 SD 台表、歌曲收藏�
 当前精确镜像 `2be76b9b4c2bf6b6d512085f28633cd7f72a25b75892ab150ebef4540ee795aa`，factory 0x20000，12,550,400 字节；SDK 6.1。约 8 分钟观察覆盖 3 次 Range 恢复，无新 panic/断言/看门狗。仅有内置扬声器，外接左右分离听音和语音收尾未验，用户要求留后续调试；弱网及长期测试也待补。本版不实现双音箱配对/同步，设备适配现有 24 kHz I2S 时钟。
 
 升级前先部署 `tools/muse-relay/STREAM96_DEPLOY.md` 的 NAS 接口并配置 Muse；完整 SD 包新增 radio-v1 动画、字库及 catalog，在线升级不会复制 SD。保留私人内容与 favorite-songs.bin。当前工作树仍为 `claude/nabo-fm-studio`，不要使用停在 v1.0.6 的本地 main。详见 `NABO_FM_HANDOFF.md` 顶部与 `docs/tab5-v1.0.16-validation.json`，旧过程记录中的“候选/未发布”以这些最终记录为准。
+
+## v1.0.18（2026-10-23）：每日推送、主页提醒与真实小 NABO 动画
+
+本版整合 feat/nabo-push：运势九模块、学习、待办和本地往日回顾，按 rev 增量同步并保存 30 天本地历史及标记。主页每日卡片显示提醒并跳到对应板块；推送页左下角色改播真实 SD 动作，退出时归还主页帧池。用户已确认提醒/跳转正确，以及动画合适、返回正常。小图实测约 10–12 fps，素材本身为 25 fps。
+
+升级检查地址修正到本 Tab5 仓库；原地址实际是另一个 S3 仓库，返回 v1.8.23。v1.0.17 及更早版此次通过 USB 仅写 0x20000，安装 v1.0.18 后设置页才能从正确仓库检查后续更新。完整 SD 包与 v1.0.17 逐字节相同，既有 2026-10-21-v2 动作库无需重装；升级程序仍为 1.2.2。
+
+203 项宿主测试、33 项中转站测试全部通过，无跳过；6 个真实动作包共 714 帧通过解析、解码和缩小合成及 ASan/UBSan 检查。ESP-IDF 6.1 原生变体规范构建成功。正式主程序 12,286,816 B，factory 剩余 296,096 B；SHA-256 f3e187d0bf4e90dfc41ef2a12a4f79d26c53b0d92267e254958030e9e1fa985f，ELF SHA-256 c5eb5a828d97cf3397f363595021d34c27d5352ac5c390fefbdbebdb09df8b32，编译源码 ed99d1a750e3511672ba3ef8c90a3512651dafe6。核对 MAC、私有备份后只写 factory，写后哈希和正式版本/ELF 标识通过，120.3 秒启动观察无新 panic、断言、看门狗或 brownout。
+
+按用户要求先发布。主页白天插播、去重/10 分钟间隔、对话/音乐/睡眠抑制、早间运势及独立非定时高优先级推送仍待实机补验；高优先级提示音、LAN-only 无 token 推送未实现，无 SD 不持久保存历史。完整边界见 docs/tab5-v1.0.18-validation.json。发布页：https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.18。
+
+开发副本 /Users/tupi/tab5-nabo-push。刷前完整 Flash、NVS、BIN/ELF 和日志私有保存于 /Volumes/liutupi/tab5-private-backups/release-v1.0.18-20261022/，不得上传；外接卷的未提交 HANDOFF.md 和 scripts/push_tab5_daily.mjs 未改动。
