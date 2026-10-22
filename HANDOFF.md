@@ -6,7 +6,7 @@
 
 基线包含用户此前已选的 26 个装饰动作与原有 4 个状态片段，本轮保持其源文件及 SD 内容。201 项宿主测试已验证通过，SDK 6.1 原生版构建成功。同功能修复版已仅写 factory `0x20000` 并通过 hash；串口记录 162.5 秒连续播放及 39 行歌词，无新的 panic/重启，用户回复“正常了”。本轮日志未独立捕捉切歌/暂停/停止，不扩大验收结论。
 
-正式版本号镜像、启动结果、哈希及剩余测试范围统一记在 [v1.0.17 验证记录](docs/tab5-v1.0.17-validation.json)。完整原机 Flash、NVS、串口原始日志只在私有备份保存，不得上传；公开发布仅使用干净构建产物与去除本机路径的 SD 资源清单。升级程序仍为 1.2.2，在线升级只安装主程序，新增动作需另行合并 SD 包。
+正式 v1.0.17 已仅写 factory 并通过写后 hash，启动 ELF `afdff60e4` 与构建匹配；120.2 秒启动观察正常，进入 idle，无新故障。主程序 12,551,296 字节，factory 余 31,616 字节，SHA-256 `f4def7161268e5c1489ba085b9304528afa4760599e006616e31a7d08ff2237a`；编译源码 `85311a4`。完整哈希及剩余测试范围统一记在 [v1.0.17 验证记录](docs/tab5-v1.0.17-validation.json)。完整原机 Flash、NVS、串口原始日志只在私有备份保存，不得上传；公开发布仅使用干净构建产物与去除本机路径的 SD 资源清单。升级程序仍为 1.2.2，在线升级只安装主程序，新增动作需另行合并 SD 包。
 
 日期：2026-09-24。目标：把 [原 QDTech S3 小智固件](https://github.com/Liutupi/qdtech-s3-touch-lcd-3.5-xiaozhi-firmware)移植到 M5Stack Tab5，并优先做好屏幕清晰度、触摸响应、小智形象和相机。**当前仍为阶段版本。** 用户否定了旧桌面双线性放大全屏的体验，现另建原生分辨率主界面，实机视觉和触摸效果待验收。接手时继续处理 [屏幕适配 Issue #1](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/issues/1)、[文字/时间 Issue #2](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/issues/2) 与 [PORTING_STATUS.md](PORTING_STATUS.md) 的 P0。
 

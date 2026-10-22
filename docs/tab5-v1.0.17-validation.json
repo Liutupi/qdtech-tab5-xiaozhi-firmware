@@ -33,7 +33,7 @@
       "stop"
     ]
   },
-  "formal_release_device_boot_verified": false,
+  "formal_release_device_boot_verified": true,
   "selected_action_count": 26,
   "state_clip_count": 4,
   "sd_changes": "Preserve original 18 packs and append 12 previously selected actions. E02R1 remains deferred.",
@@ -41,5 +41,22 @@
     "Long-duration and weak-network testing pending",
     "No new external stereo listening or complete wake/VAD/AEC acceptance in this repair",
     "Existing GitHub all-board CI preparation failures remain separate from local validation"
-  ]
+  ],
+  "formal_release": {
+    "version": "1.0.17",
+    "app_sha256": "f4def7161268e5c1489ba085b9304528afa4760599e006616e31a7d08ff2237a",
+    "app_bytes": 12551296,
+    "factory_free_bytes": 31616,
+    "elf_sha256": "afdff60e4e0e13dd45d14ce0c6fce25b8a7dfcccc2d2330c82d7768d6fcdf64e",
+    "compiled_source_commit": "85311a4ff12975554539c1d0568df42f02b282b0",
+    "boot_observation": {
+      "version_verified": true,
+      "elf_verified": true,
+      "idle_seen": true,
+      "flash_hash_verified": true,
+      "unexpected_fault": false,
+      "observation_seconds": 120.2,
+      "method": "Only factory app flashed; NVS/SD/updater retained. Formal version changes metadata relative to the user-accepted repair."
+    }
+  }
 }
