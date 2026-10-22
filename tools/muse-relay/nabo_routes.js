@@ -65,14 +65,13 @@ function createNaboRoutes({ dataDir, token, now = Date.now, log = console.log })
     return new Promise((resolve, reject) => {
       let size = 0;
       const chunks = [];
+      // Past the limit, keep draining (not destroying) so the client reliably reads the 413.
       req.on('data', chunk => {
         size += chunk.length;
-        if (size > MAX_REQUEST_BYTES) {
-          reject(new PushError(413, 'too_large'));
-          req.destroy();
-        } else chunks.push(chunk);
+        if (size <= MAX_REQUEST_BYTES) chunks.push(chunk);
       });
-      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('end', () => size > MAX_REQUEST_BYTES ? reject(new PushError(413, 'too_large'))
+        : resolve(Buffer.concat(chunks).toString('utf8')));
       req.on('error', reject);
     });
   }
@@ -170,27 +169,29 @@ function createNaboRoutes({ dataDir, token, now = Date.now, log = console.log })
       more: changed.length > page.length, items: out };
   }
 
+  // Claims exactly two routes. Everything else under /nabo/ (another token, another
+  // sub-path or method) falls through untouched: an older Nabo extension on the same
+  // relay publishes the daily radio there.
   async function handle(req, res) {
     const url = new URL(req.url, 'http://localhost');
     const parts = url.pathname.split('/').filter(Boolean);
-    if (parts[0] !== 'nabo') return false;
-    if (!tokenOk(parts[1])) return send(res, 404, { ok: false, error: 'not_found' });
+    if (parts[0] !== 'nabo' || parts.length !== 3) return false;
+    const isInbox = parts[2] === 'inbox' && req.method === 'GET';
+    const isPush = parts[2] === 'push' && req.method === 'POST';
+    if ((!isInbox && !isPush) || !tokenOk(parts[1])) return false;
     try {
-      if (parts[2] === 'inbox' && parts.length === 3 && req.method === 'GET') {
+      if (isInbox) {
         prune();
         return send(res, 200, inbox(url));
       }
-      if (parts[2] === 'push' && parts.length === 3 && req.method === 'POST') {
-        let body;
-        const raw = await readBody(req);
-        try {
-          body = JSON.parse(raw);
-        } catch {
-          throw new PushError(400, 'bad_json');
-        }
-        return send(res, 200, { ok: true, ...push(body) });
+      let body;
+      const raw = await readBody(req);
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        throw new PushError(400, 'bad_json');
       }
-      return send(res, 404, { ok: false, error: 'not_found' });
+      return send(res, 200, { ok: true, ...push(body) });
     } catch (error) {
       if (error instanceof PushError) return send(res, error.status, { ok: false, error: error.code });
       log('nabo route error:', error && error.message);
