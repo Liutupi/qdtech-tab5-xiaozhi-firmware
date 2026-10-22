@@ -28,6 +28,8 @@ public:
     enum Board { kFortune, kStudy, kTodo, kReview };
     // Opens straight on one board (home reminder card taps land here).
     void ShowBoard(Board board);
+    // Chooses the board the next Show() opens on.
+    void SelectBoard(Board board) { board_ = board; }
 
 private:
     void Build();
@@ -39,6 +41,7 @@ private:
     void RenderTodo(lv_obj_t* area);
     void RenderReview(lv_obj_t* area);
     void MarkVisibleRead();
+    void UpdateAvatar();
     const lv_font_t* Text() const;
 
     // Small builders shared by the views.
@@ -69,6 +72,7 @@ private:
     lv_obj_t* badge_ = nullptr;
     lv_obj_t* badge_label_ = nullptr;
     lv_obj_t* rail_ = nullptr;
+    lv_obj_t* avatar_caption_ = nullptr;  // under the small NABO below the boards
     lv_obj_t* area_ = nullptr;
     tab5_nabo::SharedData data_;
     uint32_t rendered_version_ = 0;

@@ -24,6 +24,24 @@ static_assert(kClipCount <= 32, "Clip failure masks have 32 bits");
 // Decorative clips cannot delay a reply or change the application's state.
 class ActionLibrary {
 public:
+    // Asks for one clip by id (e.g. a 每日推送 reminder). It starts at the next neutral
+    // idle boundary, ahead of the random pick and its cooldowns; whatever blocks idle
+    // actions (voice, music, sleep, apps) also holds it, and it lapses after a minute.
+    bool Request(const char* id, uint64_t now) {
+        for (unsigned i = 0; i < kActions.size(); ++i) {
+            const char* a = kActions[i].id;
+            const char* b = id;
+            while (*a && *a == *b)
+                ++a, ++b;
+            if (*a == 0 && *b == 0) {
+                requested_ = int(i);
+                requested_until_ = now + 60000;
+                return true;
+            }
+        }
+        return false;
+    }
+
     Selection Apply(uint64_t now, Selection base, SceneInput input, uint32_t failed, bool enabled) {
         const bool entered_listening = input.listening && !listening_;
         const bool entered_work = input.working && !working_;
@@ -68,6 +86,17 @@ public:
             Schedule(now);
         }
         const unsigned frame = unsigned((now - idle_since_) / 40) % 113;
+        if (requested_ >= 0 && frame == 0) {
+            const int wanted = requested_;
+            requested_ = -1;
+            if (now <= requested_until_ && !(failed & (1u << (wanted + 4)))) {
+                active_ = last_ = wanted;
+                context_ = 0;
+                since_ = now;
+                used_[wanted] = now ? now : 1;
+                return {active_ + 4, 0};
+            }
+        }
         // Start at the neutral boundary, rather than jumping out of a blink.
         if (now >= next_ && frame == 0) {
             unsigned weight = 0;
@@ -117,7 +146,8 @@ private:
     std::array<uint64_t, kActions.size()> used_{};
     uint64_t since_ = 0, next_ = 0, idle_since_ = 0;
     uint32_t random_ = 0x4e41424f;
-    int active_ = -1, last_ = -1;
+    int active_ = -1, last_ = -1, requested_ = -1;
+    uint64_t requested_until_ = 0;
     unsigned context_ = 0;
     bool initialized_ = false, listening_ = false, working_ = false, idle_ = false;
 };

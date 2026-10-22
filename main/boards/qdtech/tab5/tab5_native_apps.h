@@ -101,6 +101,8 @@ public:
     // Called with the display lock held.
     void SetHomeStatus(const tab5_home::Status& status);
     void OpenMuse();
+    // 每日推送 straight on one board (the home reminder card); board as Tab5NaboPushPage::Board.
+    void OpenMuseBoard(int board);
     void OpenPodcast();
     // Called with the display lock held.
     void SetMuseInbox(const tab5_muse::Snapshot& snapshot);

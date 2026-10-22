@@ -166,6 +166,11 @@ void Tab5NativeApps::AnimateEnter(lv_obj_t* page) {
 
 void Tab5NativeApps::OpenApps() { Show(home_page_); }
 
+void Tab5NativeApps::OpenMuseBoard(int board) {
+    nabo_page_->SelectBoard(Tab5NaboPushPage::Board(board));
+    OpenMuse();
+}
+
 void Tab5NativeApps::OpenMuse() {
     Show(muse_page_);
     // Every label is rebuilt now, so the theme font may change underneath it here; the

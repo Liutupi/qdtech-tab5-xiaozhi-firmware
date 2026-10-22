@@ -53,6 +53,7 @@
 #include "src/misc/cache/instance/lv_image_cache.h"
 #include "tab5_clinical_pearls.h"
 #include "tab5_daily_content.h"
+#include "tab5_nabo_remind.h"
 #include "tab5_frame_profile.h"
 #include "tab5_home_animation.h"
 #include "tab5_lrc.h"
@@ -275,6 +276,12 @@ class QdtechTab5Display : public MipiLcdDisplay {
     unsigned next_page_tick_ = 0;
     int daily_date_key_ = -1;
     unsigned daily_page_ = 0;
+    // NABO 每日推送 reminder shown in place of the daily carousel (tab5_nabo_remind.h).
+    tab5_nabo::Reminder nabo_reminder_;
+    tab5_nabo::KeySet nabo_dismissed_, nabo_animated_;
+    std::string nabo_reminder_day_;
+    unsigned nabo_reminder_tick_ = 0;
+    uint64_t nabo_last_action_ms_ = 0;
     uint64_t daily_page_revision_ = 0;
     unsigned digest_count_ = 0;
     std::string digest_text_;
@@ -832,6 +839,10 @@ class QdtechTab5Display : public MipiLcdDisplay {
         next_page_tick_ = tick_ + (daily_page_ >= 6 ? 300 : 160);
         if (!daily_title_label_ || !daily_body_label_)
             return;
+        if (nabo_reminder_.active) {
+            ShowNaboReminderCard();
+            return;
+        }
         // Give each carousel topic its own quiet accent. This changes only on
         // page turns, so the card gains hierarchy without a recurring redraw.
         static constexpr uint32_t kAccent[kDailyPages] = {
@@ -873,6 +884,61 @@ class QdtechTab5Display : public MipiLcdDisplay {
         }
         if (page_changed)
             frame_cause_gate_.MarkOnce(tab5_frame::kDailyPage, lv_tick_get());
+    }
+
+    // The card keeps one reminder while it applies; the carousel resumes afterwards.
+    void ShowNaboReminderCard() {
+        constexpr uint32_t kOrange = 0xF5A04A;
+        if (daily_accent_)
+            lv_obj_set_style_bg_color(daily_accent_, lv_color_hex(kOrange), 0);
+        lv_obj_set_style_text_color(daily_title_label_, lv_color_hex(kOrange), 0);
+        SetLabelTextIfChanged(daily_title_label_, nabo_reminder_.title.c_str());
+        SetLabelTextIfChanged(daily_body_label_, nabo_reminder_.body.c_str());
+        for (auto* dot : daily_dots_)
+            SetVisible(dot, false);
+        daily_mirror_gate_.Cancel();
+    }
+
+    // Once a second on the home screen: pick the reminder, show it on the daily card and
+    // ask the window scene for its action once (not at night, while talking, playing music
+    // or asleep, and at least ten minutes after the previous one).
+    void UpdateNaboReminder() {
+        if (tick_ - nabo_reminder_tick_ < 20 || !daily_title_label_)
+            return;
+        nabo_reminder_tick_ = tick_;
+        tab5_nabo::LocalClock clock;
+        const time_t now = time(nullptr);
+        struct tm local {};
+        if (localtime_r(&now, &local) && local.tm_year >= 125) {
+            char day[16];
+            std::strftime(day, sizeof(day), "%Y-%m-%d", &local);
+            clock = {day, local.tm_hour * 60 + local.tm_min, local.tm_wday};
+        }
+        if (clock.today != nabo_reminder_day_) {
+            nabo_reminder_day_ = clock.today;
+            nabo_dismissed_ = {};
+            nabo_animated_ = {};
+        }
+        const auto data = tab5_nabo::Store::GetInstance().Get();
+        auto next = data ? tab5_nabo::PickReminder(*data, clock, nabo_dismissed_) : tab5_nabo::Reminder{};
+        const bool changed = next.active != nabo_reminder_.active || next.title != nabo_reminder_.title ||
+                             next.body != nabo_reminder_.body;
+        const bool ended = nabo_reminder_.active && !next.active;
+        nabo_reminder_ = std::move(next);
+        if (changed)
+            ShowDailyPage(ended ? NextDailyPage() : daily_page_);
+#ifdef CONFIG_QDTECH_TAB5_SD_SCENE
+        const uint64_t ms = AnimationTimeMs();
+        if (nabo_reminder_.active && sd_scene_ && !nabo_animated_.count(nabo_reminder_.key) &&
+            !tab5_nabo::QuietHours(clock.minutes) && !active_ && !speaking_ && !music_active_ &&
+            !sleeping_ && (!nabo_last_action_ms_ || ms - nabo_last_action_ms_ >= 10 * 60 * 1000) &&
+            sd_scene_->RequestAction(nabo_reminder_.action, ms)) {
+            nabo_animated_.insert(nabo_reminder_.key);
+            nabo_last_action_ms_ = ms;
+            ESP_LOGI("Tab5Native", "nabo reminder %s action %s", nabo_reminder_.key.c_str(),
+                     nabo_reminder_.action);
+        }
+#endif
     }
 
     void ApplyDailyMirrorAfterCardRender() {
@@ -1587,6 +1653,7 @@ class QdtechTab5Display : public MipiLcdDisplay {
             RecordTickTime(tick_started_us);
             return;
         }
+        UpdateNaboReminder();
         if (returning_home || daily_mirror_retry_on_home_)
             ShowDailyPage(daily_page_);
         if (tick_ >= next_page_tick_)
@@ -1968,6 +2035,12 @@ public:
             daily_card,
             [](lv_event_t* event) {
                 auto* self = static_cast<QdtechTab5Display*>(lv_event_get_user_data(event));
+                if (self->nabo_reminder_.active && self->apps_) {
+                    // A tap answers this reminder: open its board and let the next one show.
+                    self->nabo_dismissed_.insert(self->nabo_reminder_.key);
+                    self->apps_->OpenMuseBoard(self->nabo_reminder_.board);
+                    return;
+                }
                 self->ShowDailyPage(self->NextDailyPage());
             },
             LV_EVENT_CLICKED, this);

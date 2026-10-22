@@ -39,6 +39,8 @@ public:
     using DirectBlit = bool (*)(void* context, const lv_area_t& area, const uint8_t* pixels);
     void SetDirectBlit(DirectBlit blit, void* context);
     bool Tick(uint64_t now, Input input);
+    // One lively-v1 action by id at the next idle boundary (see ActionLibrary::Request).
+    bool RequestAction(const char* id, uint64_t now) { return actions_.Request(id, now); }
     void RenderReady();
     void Detach();
     lv_obj_t* TouchTarget() const { return root_; }

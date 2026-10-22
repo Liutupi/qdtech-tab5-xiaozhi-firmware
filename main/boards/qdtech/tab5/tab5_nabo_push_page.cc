@@ -10,6 +10,7 @@
 #include "tab5_nabo_ui.h"
 
 LV_FONT_DECLARE(qd_font_cjk_28);
+LV_IMAGE_DECLARE(nabo_push_avatar);
 
 using namespace tab5_nabo;
 using namespace tab5_nabo_ui;
@@ -70,7 +71,28 @@ void Tab5NaboPushPage::Build() {
     lv_obj_set_style_border_color(read_all, Hex(kOrange), 0);
     lv_obj_set_style_border_width(read_all, 2, 0);
     Button(root_, "返回", Text(), 1152, 20, 96, 48, kChip, kText, OnBack, this);
-    rail_ = Panel(root_, 24, 96, 208, 616, kBg, 0);
+    rail_ = Panel(root_, 24, 96, 208, 400, kBg, 0);
+
+    // A small NABO under the boards, breathing gently; the caption follows the newest push.
+    auto* avatar_card = Panel(root_, 24, 504, 208, 208, kCard, 18);
+    lv_obj_add_flag(avatar_card, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    auto* avatar = lv_image_create(avatar_card);
+    lv_image_set_src(avatar, &nabo_push_avatar);
+    lv_obj_set_pos(avatar, 37, -6);
+    lv_anim_t breath;
+    lv_anim_init(&breath);
+    lv_anim_set_var(&breath, avatar);
+    lv_anim_set_values(&breath, 0, -6);
+    lv_anim_set_duration(&breath, 1800);
+    lv_anim_set_reverse_duration(&breath, 1800);
+    lv_anim_set_repeat_count(&breath, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&breath, lv_anim_path_ease_in_out);
+    lv_anim_set_exec_cb(&breath, [](void* obj, int32_t value) {
+        lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(obj), value, 0);
+    });
+    lv_anim_start(&breath);
+    avatar_caption_ = Label(avatar_card, "", &qd_font_cjk_28, kSoft, 0, 168, 208);
+    lv_obj_set_style_text_align(avatar_caption_, LV_TEXT_ALIGN_CENTER, 0);
     area_ = Panel(root_, 244, 96, 1024, 624, kBg, 0);
 }
 
@@ -145,6 +167,7 @@ void Tab5NaboPushPage::Render() {
     SetHidden(badge_, unread == 0);
 
     RenderRail();
+    UpdateAvatar();
     lv_obj_clean(area_);
     keys_.clear();
     switch (board_) {
@@ -349,6 +372,27 @@ void Tab5NaboPushPage::RenderReview(lv_obj_t* area) {
               : current->undone.empty() ? "全部完成"
                                         : "没完成：\n· " + Join(current->undone, "\n· "),
         kSoft, 0, 0, 512);
+}
+
+void Tab5NaboPushPage::UpdateAvatar() {
+    const Item* newest = nullptr;
+    bool any = false;
+    for (const auto& item : data_->items) {
+        if (item.Day() != today_ || item.kind() == Kind::Other)
+            continue;
+        any = true;
+        if (!data_->marks.read.count(item.id) && (!newest || item.rev > newest->rev))
+            newest = &item;
+    }
+    const std::string mood = newest ? newest->mood : "";
+    const char* text = !any                 ? "等 Nabo 推送"
+                       : !newest            ? "今天都看完了"
+                       : mood == "alert"    ? "有一条要紧的"
+                       : mood == "rain"     ? "今天有雨"
+                       : mood == "happy"    ? "有个好消息"
+                       : mood == "thinking" ? "一起想一想"
+                                            : "有新的推送";
+    lv_label_set_text(avatar_caption_, text);
 }
 
 // ---- events -------------------------------------------------------------

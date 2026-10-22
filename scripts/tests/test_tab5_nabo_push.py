@@ -113,6 +113,71 @@ int main() {
 '''
 
 
+REMIND = r'''
+#include "tab5_nabo_remind.h"
+#include <cassert>
+#include <cstdio>
+#include <string>
+using namespace tab5_nabo;
+
+static void Push(const std::string& items) {
+    bool more = false;
+    Store::GetInstance().ApplyInbox("{\"rev\":99,\"latest_rev\":99,\"items\":[" + items + "]}", &more);
+}
+
+int main() {
+    auto& store = Store::GetInstance();
+    store.ResetForTest();
+    const std::string d = "2026-10-25";  // a Sunday
+    Push(R"({"id":"f","ts":"2026-10-25T07:00:00+08:00","source":"nabo/fortune","title":"运势","rev":1,"body":"{\"score\":4,\"summary\":\"稳中有进\",\"yi\":[\"整理文献\"]}"},)"
+         R"({"id":"t1","ts":"2026-10-25T07:01:00+08:00","source":"nabo/todo","title":"09:30 交 PPT","rev":2},)"
+         R"({"id":"t2","ts":"2026-10-25T07:02:00+08:00","source":"nabo/todo","title":"没有时间的事","rev":3},)"
+         R"({"id":"s1","ts":"2026-10-25T08:00:00+08:00","source":"nabo/study/word","title":"今日单词","rev":4},)"
+         R"({"id":"old","ts":"2026-10-24T08:00:00+08:00","source":"nabo/study/point","title":"昨天","rev":5})");
+    KeySet dismissed;
+    auto at = [&](int h, int m) { return LocalClock{d, h * 60 + m, 0}; };
+
+    assert(!PickReminder(*store.Get(), LocalClock{"", 600, 0}, dismissed).active);  // clock unset
+    Reminder r = PickReminder(*store.Get(), at(7, 30), dismissed);
+    assert(r.active && r.board == 0 && r.title == "今日运势 · 4/5" && r.body == "稳中有进 · 宜整理文献");
+    assert(std::string(r.action) == "E06" && r.key == "fortune:" + d);
+    r = PickReminder(*store.Get(), at(9, 15), dismissed);   // to-do in 15 min beats the fortune
+    assert(r.board == 2 && r.title == "待办 · 15 分钟后开始" && r.body == "09:30 交 PPT");
+    assert(std::string(r.action) == "A07");
+    assert(PickReminder(*store.Get(), at(9, 14), dismissed).board == 0);  // 16 min: not yet
+    r = PickReminder(*store.Get(), at(10, 0), dismissed);
+    assert(r.board == 2 && r.title == "待办 · 已过 30 分钟");
+    assert(PickReminder(*store.Get(), at(10, 31), dismissed).board == 0);  // over an hour late
+    store.SetMark(Mark::Done, "t1", true);
+    assert(PickReminder(*store.Get(), at(9, 20), dismissed).board == 0);
+    dismissed.insert("fortune:" + d);
+    assert(!PickReminder(*store.Get(), at(9, 20), dismissed).active);
+    store.SetMark(Mark::Read, "f", true);
+    dismissed.erase("fortune:" + d);
+    assert(!PickReminder(*store.Get(), at(9, 20), dismissed).active);  // read: done
+
+    r = PickReminder(*store.Get(), at(20, 5), dismissed);
+    assert(r.active && r.board == 1 && r.title == "今日学习 · 1 条没学" && r.body == "今日单词");
+    store.SetMark(Mark::Learned, "s1", true);
+    r = PickReminder(*store.Get(), at(21, 30), dismissed);  // Sunday night with a past day
+    assert(r.active && r.board == 3 && std::string(r.action) == "A05");
+    assert(!PickReminder(*store.Get(), LocalClock{d, 21 * 60 + 30, 1}, dismissed).active);  // Monday
+
+    // An unread high-priority push comes before the fortune and uses its mood.
+    Push(R"({"id":"h","ts":"2026-10-25T08:10:00+08:00","source":"nabo/study/paper","priority":"high","mood":"rain","title":"要紧的文献","rev":6})");
+    r = PickReminder(*store.Get(), at(8, 30), dismissed);
+    assert(r.active && r.board == 1 && r.title == "重要推送" && r.body == "要紧的文献");
+    assert(std::string(r.action) == "E10");
+    dismissed.insert(r.key);
+    assert(!PickReminder(*store.Get(), at(8, 30), dismissed).active);
+    assert(QuietHours(23 * 60) && QuietHours(6 * 60 + 59) && !QuietHours(7 * 60));
+    assert(std::string(MoodAction("")) == "P02" && std::string(MoodAction("happy")) == "E06");
+    std::puts("remind ok");
+    return 0;
+}
+'''
+
+
 @unittest.skipUnless(shutil.which("c++") and shutil.which("cc") and (CJSON / "cJSON.c").exists(),
                      "Host compilers and cJSON required")
 class NaboPushStoreTests(unittest.TestCase):
@@ -126,6 +191,17 @@ class NaboPushStoreTests(unittest.TestCase):
                             str(temp / "cjson.o"), "-o", str(temp / "smoke")], check=True)
             result = subprocess.run([str(temp / "smoke")], check=True, capture_output=True, text=True)
             self.assertIn("nabo push ok", result.stdout)
+
+    def test_home_reminder_priority_and_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temp = Path(tmp)
+            (temp / "remind.cc").write_text(REMIND)
+            subprocess.run(["cc", "-c", str(CJSON / "cJSON.c"), "-o", str(temp / "cjson.o")], check=True)
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-I", str(BOARD),
+                            "-I", str(CJSON), str(BOARD / "tab5_nabo_push.cc"), str(BOARD / "tab5_nabo_remind.cc"),
+                            str(temp / "remind.cc"), str(temp / "cjson.o"), "-o", str(temp / "remind")], check=True)
+            result = subprocess.run([str(temp / "remind")], check=True, capture_output=True, text=True)
+            self.assertIn("remind ok", result.stdout)
 
 
 if __name__ == "__main__":
