@@ -34,6 +34,16 @@ constexpr int kPollSeconds = 60;
 constexpr int kMusicPollMs = 4000;
 constexpr int kFirstPollDelayMs = 20000;  // let Wi-Fi and the XiaoZhi session settle first
 
+// A second episode snapshot overlaps the response, cJSON tree and cached snapshot.
+// Music's decoder/ring already consumes most of this space. Keep polling music
+// commands, but defer the large inbox/podcast refresh until playback is idle.
+bool CanRefreshPodcasts(size_t working_bytes = 768 * 1024,
+                        size_t largest_bytes = 2 * kMaxPodcastBytes) {
+    return !Application::GetInstance().IsExternalAudioActive() &&
+           heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >= working_bytes &&
+           heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) >= largest_bytes;
+}
+
 std::string HttpGetDirect(const std::string& url, int* status_out, size_t max_bytes,
                           int timeout_ms) {
     *status_out = 0;
@@ -532,6 +542,7 @@ void Inbox::Run() {
     // costs ~3 s of TLS setup, so counting music polls stretched it to ~5 min.
     int64_t last_poll_us = 0;
     bool refresh = true;
+    bool poll_due = true;
     while (true) {
         // A pending track lookup (user tapped play) goes first; it is not a reason
         // to re-poll the inbox.
@@ -545,10 +556,12 @@ void Inbox::Run() {
         }
         ServeTrackRequest();
         const int64_t now = esp_timer_get_time();
-        if (requested || (refresh && !track_wake) ||
-            now - last_poll_us >= int64_t(kPollSeconds) * 1000000) {
+        poll_due = poll_due || requested || (refresh && !track_wake) ||
+                   now - last_poll_us >= int64_t(kPollSeconds) * 1000000;
+        if (poll_due && CanRefreshPodcasts()) {
             Poll();
             last_poll_us = esp_timer_get_time();
+            poll_due = false;
         }
         PollMusic();
         refresh = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kMusicPollMs)) > 0;
@@ -613,9 +626,16 @@ bool Inbox::PollMusic() {
 }
 
 bool Inbox::FetchPodcasts(const std::string& endpoint, tab5_podcast::EpisodeList* out) {
+    if (!CanRefreshPodcasts())
+        return false;
     int status = 0;
-    const std::string body =
+    std::string body =
         HttpGet(endpoint + "?limit=" + std::to_string(kPodcastLimit), &status, kMaxPodcastBytes);
+    // Playback may have started while HTTP was in flight. Do not parse/copy the
+    // large feed into the playback working set in that case.
+    if (!CanRefreshPodcasts())
+        return false;
+    const size_t body_bytes = body.size();
     std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
         body.empty() ? nullptr : cJSON_ParseWithLength(body.data(), body.size()), cJSON_Delete);
     auto* list = root ? cJSON_GetObjectItem(root.get(), "episodes") : nullptr;
@@ -623,29 +643,47 @@ bool Inbox::FetchPodcasts(const std::string& endpoint, tab5_podcast::EpisodeList
         ESP_LOGW(TAG, "podcast fetch failed (http %d, %u bytes)", status, unsigned(body.size()));
         return false;
     }
+    // cJSON owns its strings. Release the response before allocating the new
+    // model, and retain headroom for bounded vectors, strings and other tasks.
+    std::string().swap(body);
+    if (!CanRefreshPodcasts(2 * body_bytes + 256 * 1024, body_bytes + 1)) {
+        ESP_LOGW(TAG, "podcast refresh deferred: playback or low PSRAM");
+        return false;
+    }
+    const auto text = [](cJSON* object, const char* key) -> std::string_view {
+        const auto* value = cJSON_GetObjectItem(object, key);
+        return cJSON_IsString(value) && value->valuestring ? value->valuestring : "";
+    };
+    out->reserve(kPodcastLimit);
     cJSON* item = nullptr;
     cJSON_ArrayForEach (item, list) {
+        // A command can arrive on another task even after the response was read.
+        if (Application::GetInstance().IsExternalAudioActive())
+            return false;
         auto* id = cJSON_GetObjectItem(item, "id");
         if (!cJSON_IsNumber(id) || out->size() >= size_t(kPodcastLimit))
             continue;
         tab5_podcast::Episode e;
         e.id = id->valueint;
-        e.title = tab5_podcast::ToStr(JsonString(item, "title"));
-        e.script = tab5_podcast::ToStr(JsonString(item, "script"));
-        e.from = tab5_podcast::ToStr(JsonString(item, "from"));
-        e.time = tab5_podcast::ToStr(JsonString(item, "time"));
-        e.audio_url = tab5_podcast::ToStr(JsonString(item, "audio_url"));
+        e.title = tab5_podcast::ToStr(text(item, "title"));
+        e.script = tab5_podcast::ToStr(text(item, "script"));
+        e.from = tab5_podcast::ToStr(text(item, "from"));
+        e.time = tab5_podcast::ToStr(text(item, "time"));
+        e.audio_url = tab5_podcast::ToStr(text(item, "audio_url"));
         if (!e.audio_url.empty() && e.audio_url.rfind("https://", 0) != 0 &&
             e.audio_url.rfind("http://", 0) != 0)
             e.audio_url.clear();
         e.cues = tab5_podcast::ParseTranscript(item, e.audio_url);
         auto* tracks = cJSON_GetObjectItem(item, "tracks");
+        if (cJSON_IsArray(tracks))
+            e.tracks.reserve(
+                std::min(size_t(cJSON_GetArraySize(tracks)), tab5_podcast::kMaxTracks));
         cJSON* t = nullptr;
         cJSON_ArrayForEach (t, tracks) {
             if (e.tracks.size() >= tab5_podcast::kMaxTracks)
                 break;
-            tab5_podcast::Track track{tab5_podcast::ToStr(JsonString(t, "title")),
-                                      tab5_podcast::ToStr(JsonString(t, "artist"))};
+            tab5_podcast::Track track{tab5_podcast::ToStr(text(t, "title")),
+                                      tab5_podcast::ToStr(text(t, "artist"))};
             if (!track.title.empty())
                 e.tracks.push_back(std::move(track));
         }
