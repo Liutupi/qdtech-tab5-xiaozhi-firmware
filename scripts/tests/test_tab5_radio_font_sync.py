@@ -27,14 +27,10 @@ class RadioFontSyncTests(unittest.TestCase):
         open_muse = source[source.index("void Tab5NativeApps::OpenMuse()"):
                            source.index("void Tab5NativeApps::OpenSettings()")]
         tick = source[source.index("void Tab5NativeApps::Tick() {"):
-                      source.index("    if (IsVisible() && muse_page_", source.index(
+                      source.index("    // If the emulator could not publish", source.index(
                           "void Tab5NativeApps::Tick() {"))] + "}\n"
         sync = radio[radio.index("void Tab5NativeApps::SyncRadioTextFont()"):
                      radio.index("void Tab5NativeApps::SetMusicLyric(")]
-        muse_begin = source.index("void Tab5NativeApps::RenderMuseList(")
-        muse_prefix = source[muse_begin:source.index(
-            "    if (snapshot.messages.empty())", muse_begin)]
-        muse_prefix = muse_prefix.replace("{\n", "{\n    (void)snapshot;\n", 1) + "}\n"
         harness = r'''
 #include <cstring>
 #include <functional>
@@ -73,6 +69,12 @@ void lv_obj_clean(lv_obj_t*) {
 namespace tab5_muse {
 struct Snapshot { unsigned latest_id = 0; unsigned seen_id = 0; };
 }
+namespace tab5_nabo {
+struct Store {
+    static Store& GetInstance() { static Store store; return store; }
+    int Get() { return 0; }
+};
+}
 struct FakeTheme {
     std::shared_ptr<FakeFont> selected;
     std::shared_ptr<FakeFont> GetTextFont() const { return selected; }
@@ -97,10 +99,15 @@ public:
     int station_font_loads = 0;
     void LoadStationFont() { ++station_font_loads; }
     std::shared_ptr<LvglFont> music_font_owner_;
-    const lv_font_t* muse_rendered_font_ = nullptr;
-    std::shared_ptr<LvglFont> muse_font_owner_;
-    lv_obj_t list;
-    lv_obj_t* muse_list_ = &list;
+    std::shared_ptr<LvglFont> nabo_font_owner_;
+    int nabo_shown = 0;
+    struct NaboPageStub {
+        Tab5NativeApps* ui;
+        void SetData(int) {}
+        void Show();
+    };
+    std::unique_ptr<NaboPageStub> nabo_page_ = std::make_unique<NaboPageStub>(NaboPageStub{this});
+    void UpdateNaboEntry() {}
     lv_obj_t muse_page;
     lv_obj_t* muse_page_ = &muse_page;
     lv_obj_t* muse_entry_label_ = nullptr;
@@ -137,7 +144,6 @@ public:
     bool IsRadioVisible() const { return radio_visible; }
     void Show(lv_obj_t* page) {
         if (page == muse_page_) {
-            if (muse_rendered_font_ != expected_font) __builtin_trap();
             ++shown;
             return;
         }
@@ -155,12 +161,18 @@ public:
         ++lyric_layouts;
     }
     void SyncRadioTextFont();
-    void RenderMuseList(const tab5_muse::Snapshot& snapshot);
     void OpenMuse();
     void OpenRadio(bool start_playback = true);
     void Tick();
 };
-''' + sync + tick + open_radio + open_muse + muse_prefix + r'''
+// The page rebuilds every label in Show(): the new theme font must be in place and the
+// previous one still alive for the labels being deleted.
+void Tab5NativeApps::NaboPageStub::Show() {
+    if (!ui->nabo_font_owner_ || ui->nabo_font_owner_->font() != ui->expected_font) __builtin_trap();
+    if (check_old_muse_font && old_muse_font.expired()) __builtin_trap();
+    ++ui->nabo_shown;
+}
+''' + sync + tick + open_radio + open_muse + r'''
 int main() {
     Tab5NativeApps ui;
     ui.lyric.text = "醒来看看";
@@ -213,7 +225,7 @@ int main() {
     Tab5NativeApps inbox;
     inbox.expected_font = &muse_font;
     inbox.OpenMuse();
-    if (inbox.shown != 1 || inbox.muse_rendered_font_ != &muse_font) return 8;
+    if (inbox.shown != 1 || inbox.nabo_shown != 1 || inbox.nabo_font_owner_->font() != &muse_font) return 8;
     std::weak_ptr<FakeFont> old_inbox_font = theme.selected;
     theme.selected = std::make_shared<FakeFont>();
     theme.selected->selected = &fourth_font;
@@ -223,8 +235,8 @@ int main() {
     check_old_muse_font = true;
     inbox.OpenMuse();
     check_old_muse_font = false;
-    if (!old_inbox_font.expired() || inbox.muse_rendered_font_ != &fourth_font ||
-        inbox.shown != 2) return 10;
+    if (!old_inbox_font.expired() || inbox.nabo_font_owner_->font() != &fourth_font ||
+        inbox.shown != 2 || inbox.nabo_shown != 2) return 10;
     return 0;
 }
 '''

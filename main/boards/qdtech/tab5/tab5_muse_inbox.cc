@@ -1,4 +1,5 @@
 #include "tab5_muse_inbox.h"
+#include "tab5_nabo_push.h"
 #include "nabo_song_favorites.h"
 #include "tab5_net_gate.h"
 #include "tab5_podcast_transcript.h"
@@ -625,6 +626,33 @@ bool Inbox::PollMusic() {
     return true;
 }
 
+// Same relay and token as the tunnel inbox: https://<host>/inbox/<token> becomes
+// https://<host>/nabo/<token>/inbox. A LAN-only setup has no token, so it has no pushes.
+void Inbox::PollNabo(const std::string& url) {
+    auto& store = tab5_nabo::Store::GetInstance();
+    store.Load();
+    store.Prune(tab5_nabo::Today());
+    const auto path = url.find("/inbox/");
+    if (path == std::string::npos)
+        return;
+    const std::string endpoint =
+        url.substr(0, path) + "/nabo/" + url.substr(path + 7) + "/inbox?limit=40&since=";
+    bool more = true;
+    for (int page = 0; more && page < 5; ++page) {
+        int status = 0;
+        const std::string body =
+            HttpGet(endpoint + std::to_string(store.Since()), &status, 160 * 1024, 8000);
+        const bool ok = status == 200 && !body.empty();
+        store.SetOnline(ok);
+        if (!ok) {
+            ESP_LOGW(TAG, "nabo push poll failed (http %d)", status);
+            return;
+        }
+        if (store.ApplyInbox(body, &more))
+            ESP_LOGI(TAG, "nabo push synced to rev %d", store.Since());
+    }
+}
+
 bool Inbox::FetchPodcasts(const std::string& endpoint, tab5_podcast::EpisodeList* out) {
     if (!CanRefreshPodcasts())
         return false;
@@ -746,6 +774,8 @@ bool Inbox::Poll() {
             podcast_endpoint.replace(path, 6, "/podcast");
         podcast_fetched = FetchPodcasts(podcast_endpoint, fetched_episodes.get());
     }
+
+    PollNabo(url);
 
     Snapshot copy;
     bool changed = false;

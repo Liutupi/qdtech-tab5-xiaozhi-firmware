@@ -60,6 +60,8 @@ public:
    *out=feed;return true;
  }
  bool Discover() {return false;}
+ int nabo_polls=0;
+ void PollNabo(const std::string&) {++nabo_polls;}
  bool Poll();
 };
 ''' + poll + r'''

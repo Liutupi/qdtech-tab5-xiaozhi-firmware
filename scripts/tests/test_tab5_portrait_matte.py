@@ -97,6 +97,15 @@ class Tab5PortraitMatteTest(unittest.TestCase):
                 self.assertIn("&nabo_sleep", result.stdout)
             else:
                 self.assertNotIn("&nabo_portrait_matte", result.stdout)
+        # With the SD window scene the legacy sleep art is not referenced at all.
+        images = display.split("portrait_ = lv_image_create(emoji_box_);", 1)[1].split(
+            "lv_obj_add_flag(sleep_, LV_OBJ_FLAG_HIDDEN);", 1)[0]
+        self.assertIn("lv_image_set_src(sleep_, &nabo_sleep);", images)
+        scene = subprocess.run(["cc", "-E", "-P", "-x", "c++", "-DCONFIG_QDTECH_TAB5_SD_SCENE=1",
+                                "-DCONFIG_QDTECH_TAB5_PORTRAIT_MATTE_EXPERIMENT=1", "-"],
+                               input=images, capture_output=True, text=True, check=True).stdout
+        self.assertIn("lv_image_set_src(sleep_, &nabo_portrait_matte);", scene)
+        self.assertNotIn("&nabo_sleep", scene)
 
     def test_configure_checks_size_and_hash(self):
         cmake = (ROOT / "main/CMakeLists.txt").read_text()

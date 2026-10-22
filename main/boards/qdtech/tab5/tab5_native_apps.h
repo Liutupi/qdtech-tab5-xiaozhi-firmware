@@ -14,6 +14,7 @@
 #include "tab5_ir_remote_page.h"
 #include "tab5_md_launcher.h"
 #include "tab5_muse_inbox.h"
+#include "tab5_nabo_push_page.h"
 #include "tab5_podcast_page.h"
 #include "tab5_radio_stage.h"
 
@@ -139,16 +140,13 @@ private:
     lv_obj_t* radio_page_ = nullptr;
     lv_obj_t* game_page_ = nullptr;
     lv_obj_t* muse_page_ = nullptr;
-    lv_obj_t* muse_list_ = nullptr;
-    lv_obj_t* muse_status_ = nullptr;
-    lv_obj_t* muse_url_ = nullptr;
     lv_obj_t* muse_entry_label_ = nullptr;
-    tab5_muse::Snapshot muse_snapshot_;
-    bool muse_list_dirty_ = false;
-    const lv_font_t* muse_rendered_font_ = nullptr;
-    std::shared_ptr<LvglFont> muse_font_owner_;
+    // NABO 每日推送, inside muse_page_. Its pushed text uses the theme's full CJK font; the
+    // owner is swapped only while the page is about to rebuild every label.
+    std::unique_ptr<Tab5NaboPushPage> nabo_page_;
+    std::shared_ptr<LvglFont> nabo_font_owner_;
     void BuildMuse();
-    void RenderMuseList(const tab5_muse::Snapshot& snapshot);
+    void UpdateNaboEntry();
     std::unique_ptr<Tab5IcuPage> icu_page_;
     std::unique_ptr<Tab5IrRemotePage> ir_page_;
     std::unique_ptr<Tab5HomePage> mijia_page_;

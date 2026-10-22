@@ -105,6 +105,8 @@ private:
     bool PollMusic();
     void ServeTrackRequest();
     bool FetchPodcasts(const std::string& endpoint, tab5_podcast::EpisodeList* out);
+    // NABO 每日推送 (/nabo/<token>/inbox beside the tunnel inbox) into tab5_nabo::Store.
+    void PollNabo(const std::string& url);
     bool Discover();
     int failures_ = 0;
     std::string topic_;

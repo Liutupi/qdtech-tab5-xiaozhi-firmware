@@ -1854,9 +1854,13 @@ public:
             lv_image_set_src(portrait_, &nabo_portrait_matte);
             lv_obj_set_pos(portrait_, 39, 0);  // 434x558 visible region, no scaling.
         } else {
-            ESP_LOGE("Tab5Portrait", "Precomposed portrait invalid; using built-in sleep art");
+            ESP_LOGE("Tab5Portrait", "Precomposed portrait invalid");
+#ifndef CONFIG_QDTECH_TAB5_SD_SCENE
+            // Fall back to the built-in sleep art; SD-scene builds leave NABO to the window
+            // scene and do not carry that 375 KB image.
             lv_image_set_src(portrait_, &nabo_sleep);
             lv_obj_set_pos(portrait_, 15, 167);
+#endif
         }
 #else
         lv_image_set_src(portrait_, &nabo_portrait);
@@ -1904,8 +1908,16 @@ public:
         wave_head_ = WavePart(wave_, &nabo_wave_head, rig.head);
 
         sleep_ = lv_image_create(emoji_box_);
+#if defined(CONFIG_QDTECH_TAB5_SD_SCENE) && defined(CONFIG_QDTECH_TAB5_PORTRAIT_MATTE_EXPERIMENT)
+        // The window scene owns sleep. Without the SD card the compiled portrait stands in,
+        // which keeps the 375 KB legacy sleep art out of this build.
+        if (portrait_matte_valid_)
+            lv_image_set_src(sleep_, &nabo_portrait_matte);
+        lv_obj_set_pos(sleep_, 39, 0);
+#else
         lv_image_set_src(sleep_, &nabo_sleep);
         lv_obj_set_pos(sleep_, 15, 167);
+#endif
         lv_obj_add_flag(sleep_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(sleep_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(

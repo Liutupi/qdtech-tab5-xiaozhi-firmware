@@ -24,20 +24,6 @@ LV_FONT_DECLARE(qd_font_lxgw_36);
 LV_FONT_DECLARE(qd_font_cjk_28);
 
 namespace {
-bool SameMuseList(const tab5_muse::Snapshot& a, const tab5_muse::Snapshot& b) {
-    if (a.latest_id != b.latest_id || a.seen_id != b.seen_id ||
-        a.messages.size() != b.messages.size())
-        return false;
-    for (size_t i = 0; i < a.messages.size(); ++i) {
-        const auto& left = a.messages[i];
-        const auto& right = b.messages[i];
-        if (left.id != right.id || left.title != right.title || left.body != right.body ||
-            left.from != right.from || left.time != right.time)
-            return false;
-    }
-    return true;
-}
-
 std::shared_ptr<LvglFont> MusicTextFontOwner() {
     auto* theme = LvglThemeManager::GetInstance().GetTheme("dark");
     if (theme) {
@@ -181,20 +167,14 @@ void Tab5NativeApps::AnimateEnter(lv_obj_t* page) {
 void Tab5NativeApps::OpenApps() { Show(home_page_); }
 
 void Tab5NativeApps::OpenMuse() {
-    // Opening the inbox marks the current batch read. Render that state once
-    // before showing the page; the later persistence callback need not rebuild it.
-    if (muse_snapshot_.seen_id < muse_snapshot_.latest_id) {
-        muse_snapshot_.seen_id = muse_snapshot_.latest_id;
-        muse_list_dirty_ = true;
-        SetLabelTextIfChanged(muse_entry_label_, "打开推送");
-    }
-    if (muse_list_dirty_ || muse_rendered_font_ != MusicTextFont()) {
-        RenderMuseList(muse_snapshot_);
-        muse_list_dirty_ = false;
-    }
     Show(muse_page_);
-    Schedule(actions_.muse_refresh);
-    Schedule(actions_.muse_opened);
+    // Every label is rebuilt now, so the theme font may change underneath it here; the
+    // previous owner stays alive until the old labels are gone.
+    auto previous_font_owner = std::move(nabo_font_owner_);
+    nabo_font_owner_ = MusicTextFontOwner();
+    nabo_page_->SetData(tab5_nabo::Store::GetInstance().Get());
+    nabo_page_->Show();
+    UpdateNaboEntry();
 }
 
 void Tab5NativeApps::OpenSettings() {
@@ -321,11 +301,6 @@ void Tab5NativeApps::Tick() {
         podcast_page_->Tick();
     if (IsRadioVisible() && music_font_ != MusicTextFont())
         SyncRadioTextFont();
-    if (IsVisible() && muse_page_ && !lv_obj_has_flag(muse_page_, LV_OBJ_FLAG_HIDDEN) &&
-        muse_rendered_font_ != MusicTextFont()) {
-        RenderMuseList(muse_snapshot_);
-        muse_list_dirty_ = false;
-    }
     // If the emulator could not publish its first fallback frame while LVGL
     // was busy, the next UI tick still makes the failure visible.
     if (game_fallback_error_.load() && IsVisible() && game_page_ &&
@@ -492,100 +467,31 @@ void Tab5NativeApps::BuildHome() {
         static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenHomeHub();
     });
     muse_entry_label_ =
-        entry(672, 512, 0xa99bff, "NABO 每日推送", "Muse 整理 · NAS 推送", "打开推送", [](lv_event_t* event) {
+        entry(672, 512, 0xa99bff, "NABO 每日推送", "运势 · 学习 · 待办 · 回顾", "打开推送", [](lv_event_t* event) {
             static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenMuse();
         });
 }
 
 void Tab5NativeApps::BuildMuse() {
-    Label(muse_page_, "NABO 每日推送", &qd_font_lxgw_28, 0xf5f9fd, 52, 30, 440);
-    muse_status_ = Label(muse_page_, "正在连接 NAS…", &qd_font_cjk_28, 0x9bb7ca, 54, 76, 760);
-    lv_label_set_long_mode(muse_status_, LV_LABEL_LONG_DOT);
-    lv_obj_set_height(muse_status_, 34);
-    Button(muse_page_, "刷新", 800, 34, 180, 60, [](lv_event_t* event) {
-        auto* self = static_cast<Tab5NativeApps*>(lv_event_get_user_data(event));
-        lv_label_set_text(self->muse_status_, "正在刷新…");
-        Schedule(self->actions_.muse_refresh);
-    }, this);
-    Button(muse_page_, "返回应用", 1016, 34, 216, 60, [](lv_event_t* event) {
-        static_cast<Tab5NativeApps*>(lv_event_get_user_data(event))->OpenApps();
-    }, this);
-
-    muse_list_ = lv_obj_create(muse_page_);
-    lv_obj_set_pos(muse_list_, 54, 128);
-    lv_obj_set_size(muse_list_, 1172, 530);
-    lv_obj_set_style_bg_opa(muse_list_, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(muse_list_, 0, 0);
-    lv_obj_set_style_pad_all(muse_list_, 0, 0);
-    lv_obj_set_style_pad_row(muse_list_, 14, 0);
-    lv_obj_set_flex_flow(muse_list_, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_scroll_dir(muse_list_, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(muse_list_, LV_SCROLLBAR_MODE_AUTO);
-
-    muse_url_ = Label(muse_page_, "", &qd_font_cjk_28, 0x7f8fa3, 54, 670, 1172);
-    lv_label_set_long_mode(muse_url_, LV_LABEL_LONG_DOT);
-    lv_obj_set_height(muse_url_, 34);
-
-    RenderMuseList(muse_snapshot_);
+    lv_obj_set_style_bg_color(muse_page_, lv_color_hex(0x0E1117), 0);
+    Tab5NaboPushPage::Callbacks callbacks;
+    callbacks.back = [this] { OpenApps(); };
+    callbacks.refresh = [this] { Schedule(actions_.muse_refresh); };
+    callbacks.text_font = [this]() -> const lv_font_t* {
+        return nabo_font_owner_ ? nabo_font_owner_->font() : nullptr;
+    };
+    nabo_page_ = std::make_unique<Tab5NaboPushPage>(muse_page_, std::move(callbacks));
 }
 
-void Tab5NativeApps::RenderMuseList(const tab5_muse::Snapshot& snapshot) {
-    // LVGL styles hold raw font pointers. Keep the old owner through lv_obj_clean,
-    // then pin the new owner until this list is rebuilt or destroyed.
-    auto previous_font_owner = std::move(muse_font_owner_);
-    muse_font_owner_ = MusicTextFontOwner();
-    muse_rendered_font_ = muse_font_owner_ ? muse_font_owner_->font() : &qd_font_cjk_28;
-    lv_obj_clean(muse_list_);
-    if (snapshot.messages.empty()) {
-        auto* hint = Card(muse_list_, 0, 0, 1150, 190, 0x142d43, 0x35627d, 24);
-        lv_obj_remove_flag(hint, LV_OBJ_FLAG_SCROLLABLE);
-        Label(hint, "还没有推送", &qd_font_cjk_28, 0xf5f9fd, 30, 26, 1080);
-        auto* text = Label(hint,
-                           "在 Muse 里添加本 NAS 的 MCP 地址 (见页面底部或 NAS 容器日志)，"
-                           "然后让 Muse 用 tab5_push 把整理好的内容推送过来。",
-                           &qd_font_cjk_28, 0xa8c4d3, 30, 80, 1080);
-        lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
+void Tab5NativeApps::UpdateNaboEntry() {
+    if (!muse_entry_label_)
         return;
-    }
-    for (const auto& m : snapshot.messages) {
-        const bool unread = m.id > snapshot.seen_id;
-        auto* card = lv_obj_create(muse_list_);
-        lv_obj_set_width(card, 1150);
-        lv_obj_set_height(card, LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_color(card, lv_color_hex(unread ? 0x1f2a4d : 0x142d43), 0);
-        lv_obj_set_style_border_color(card, lv_color_hex(unread ? 0x8a7cf0 : 0x35627d), 0);
-        lv_obj_set_style_border_width(card, unread ? 2 : 1, 0);
-        lv_obj_set_style_radius(card, 22, 0);
-        lv_obj_set_style_pad_all(card, 22, 0);
-        lv_obj_set_style_pad_row(card, 8, 0);
-        lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-        lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-
-        auto* title = lv_label_create(card);
-        lv_label_set_text(title, m.title.c_str());
-        lv_obj_set_width(title, 1100);
-        lv_obj_set_style_text_font(title, muse_rendered_font_, 0);
-        lv_obj_set_style_text_color(title, lv_color_hex(0xf5f9fd), 0);
-
-        std::string meta = m.time;
-        if (!m.from.empty())
-            meta += "  ·  " + m.from;
-        if (unread)
-            meta += "  ·  新";
-        auto* meta_label = lv_label_create(card);
-        lv_label_set_text(meta_label, meta.c_str());
-        lv_obj_set_style_text_font(meta_label, &qd_font_cjk_28, 0);
-        lv_obj_set_style_text_color(meta_label, lv_color_hex(unread ? 0xb9adff : 0x7f9bb0), 0);
-
-        auto* body = lv_label_create(card);
-        lv_label_set_text(body, m.body.c_str());
-        lv_obj_set_width(body, 1100);
-        lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
-        lv_obj_set_style_text_font(body, muse_rendered_font_, 0);
-        lv_obj_set_style_text_color(body, lv_color_hex(0xd6e4ee), 0);
-        lv_obj_set_style_text_line_space(body, 6, 0);
-    }
-    lv_obj_scroll_to_y(muse_list_, 0, LV_ANIM_OFF);
+    const auto data = tab5_nabo::Store::GetInstance().Get();
+    const int unread = data ? data->Unread(tab5_nabo::Today()) : 0;
+    char text[64] = "打开推送";
+    if (unread > 0)
+        std::snprintf(text, sizeof(text), "打开推送 · %d 条新内容", unread);
+    SetLabelTextIfChanged(muse_entry_label_, text);
 }
 
 void Tab5NativeApps::SetMuseInbox(const tab5_muse::Snapshot& snapshot) {
@@ -595,44 +501,10 @@ void Tab5NativeApps::SetMuseInbox(const tab5_muse::Snapshot& snapshot) {
         podcast_page_->SetEpisodes(podcast_episodes_);
         podcast_page_->SetRefreshResult(snapshot.podcast_ok, snapshot.poll_count);
     }
-    const int unread = snapshot.Unread();
-    if (muse_entry_label_) {
-        char text[64];
-        if (unread > 0)
-            std::snprintf(text, sizeof(text), "打开推送 · %d 条新消息", unread);
-        else
-            std::snprintf(text, sizeof(text), "打开推送");
-        SetLabelTextIfChanged(muse_entry_label_, text);
-    }
-    if (muse_status_) {
-        char text[160];
-        if (!snapshot.ok && !snapshot.ever_ok)
-            std::snprintf(text, sizeof(text), "%s",
-                          snapshot.url.empty() ? "还没有设置 Muse 中转站地址"
-                                               : "无法连接 Muse 中转站，稍后自动重试");
-        else if (!snapshot.ok)
-            std::snprintf(text, sizeof(text), "NAS 暂时无响应，显示的是上次内容");
-        else
-            std::snprintf(text, sizeof(text), "共 %u 条 · 未读 %d · 每分钟自动刷新",
-                          unsigned(snapshot.messages.size()), unread);
-        SetLabelTextIfChanged(muse_status_, text);
-    }
-    if (muse_url_) {
-        const std::string url = snapshot.mcp_url.empty()
-                                    ? std::string("Muse 接入地址：公网隧道未就绪")
-                                    : "Muse 接入地址：" + snapshot.mcp_url;
-        SetLabelTextIfChanged(muse_url_, url.c_str());
-    }
-    // Keep the newest data while the inbox is hidden. Building up to 12 cards
-    // here would otherwise block the LVGL task for a page nobody can see.
-    if (!SameMuseList(snapshot, muse_snapshot_)) {
-        muse_snapshot_ = snapshot;
-        muse_list_dirty_ = true;
-    }
-    if (muse_list_dirty_ && IsVisible() && !lv_obj_has_flag(muse_page_, LV_OBJ_FLAG_HIDDEN)) {
-        RenderMuseList(muse_snapshot_);
-        muse_list_dirty_ = false;
-    }
+    // The inbox task has just synced the NABO pushes too; hidden pages defer their rebuild.
+    UpdateNaboEntry();
+    if (nabo_page_)
+        nabo_page_->SetData(tab5_nabo::Store::GetInstance().Get());
 }
 
 void Tab5NativeApps::BuildSettings() {
