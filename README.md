@@ -1,6 +1,8 @@
 # 小智桌面固件：QDTech S3 → M5Stack Tab5 移植
 
-这是面向 M5Stack Tab5 的开发中固件。`qdtech-tab5-native` 变体直接按 1280 × 720 绘制 Nabo 主界面、时分秒翻页时钟与应用页；支持配网、亮度、音量、网络电台、音乐歌词、ICU 计算器和人体感应。原 `qdtech-tab5` 变体保留旧桌面。当前公开版本为 [v1.0.17](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.17)；各功能的实机验证程度见 [移植状态](PORTING_STATUS.md) 和 [交接本](HANDOFF.md)。
+这是面向 M5Stack Tab5 的开发中固件。`qdtech-tab5-native` 变体直接按 1280 × 720 绘制 Nabo 主界面、时分秒翻页时钟与应用页；支持配网、亮度、音量、网络电台、音乐歌词、ICU 计算器和人体感应。原 `qdtech-tab5` 变体保留旧桌面。当前公开版本为 [v1.0.18](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.18)；各功能的实机验证程度见 [移植状态](PORTING_STATUS.md) 和 [交接本](HANDOFF.md)。
+
+v1.0.18 新增 NABO 每日推送：今日运势的九个模块、今日学习、今日待办和本地往日回顾；主页每日卡片可显示提醒并跳到对应板块。推送页左下角播放真实 SD 人物动画，用户已确认提醒、跳转、动画及返回正常。沿用现有 SD 动作库，无需重复拷卡；需要部署中转站推送接口，见[推送约定](docs/nabo-daily-push.md)。白天主页动作插播、早间运势等未完成的实机验收范围见 [v1.0.18 验证记录](docs/tab5-v1.0.18-validation.json)。
 
 v1.0.15 修复 3.5mm 耳机口只有一侧出声，以及插入耳机后扬声器仍播放的问题。已用绿联 CM403 和蓝牙耳机实测双耳出声、插入关闭外放、拔出恢复外放。左右耳播放相同内容；原有音乐解码中的单声道混音保持不变。已有兼容设备只需更新主程序，SD 动画与升级程序无需重装。
 
@@ -13,13 +15,15 @@ v1.0.16 重排 NABO 网络电台与每日节目页，复用同一套录音室动
 
 设置页的 **固件升级** 会检查 GitHub 最新 Release，把主固件下载到 SD 卡并校验 SHA-256，然后由 `ota_0` 里的升级程序改写主固件；Wi‑Fi 等 NVS 设置不会被在线升级覆盖。原理与限制见 [HANDOFF.md](HANDOFF.md#v1002026-09-30与在线升级-ota)。
 
+v1.0.18 已把升级检查地址修正到本 Tab5 仓库。v1.0.17 及更早版仍指向 S3 仓库，此次请通过 USB 仅写 `factory` 的 `0x20000`；安装 v1.0.18 后，设置页才会从正确的 Tab5 Release 检查后续更新。串口与其他设备共用时须先核对 MAC，使用 `--after hard-reset`。
+
 首次从旧分区布局升级需要一次 USB 刷写（分区表、主固件和升级程序）；已有兼容分区布局的设备可在设置页升级。NAS 网易云点歌路径还要求 NAS 上的 Muse relay 和网易云 MCP 容器按 [板级说明](main/boards/qdtech/tab5/README.md) 配置；单独刷固件不会建立 NAS 服务。
 
 ## NABO 动作库
 
 v1.0.17 的 `lively-v1` 库包含 26 个已选半身动作与原待机、工作、入睡和睡眠片段，共 30 个文件，沿用统一 B 宽框与音频/交互优先规则。原 18 个文件内容保留，新增动作不改变原动作索引；原片边缘截断的 E02R1 继续暂缓接入。
 
-配套完整 SD 包见 [v1.0.17 发布页](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.17)，将 ZIP 中的 `tab5/` 合并复制到卡根目录，保留私人文件与收藏。已安装 2026-10-21-v2 的设备无需再次复制动作；只有旧版库的设备需更新 SD 才能显示新增动作。在线升级只更新主程序。动作列表、格式和编排见[动作库说明](docs/nabo-action-library.md)。
+配套完整 SD 包见 [v1.0.18 发布页](https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.18)，将 ZIP 中的 `tab5/` 合并复制到卡根目录，保留私人文件与收藏。已安装 2026-10-21-v2 的设备无需再次复制动作；只有旧版库的设备需更新 SD 才能显示新增动作。在线升级只更新主程序。动作列表、格式和编排见[动作库说明](docs/nabo-action-library.md)。
 
 ## MD 世嘉与 NES 游戏
 

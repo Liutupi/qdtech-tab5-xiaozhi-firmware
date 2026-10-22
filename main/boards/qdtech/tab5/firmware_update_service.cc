@@ -27,7 +27,7 @@
 
 static const char* TAG = "FirmwareUpdate";
 static constexpr char kLatestReleaseUrl[] =
-    "https://api.github.com/repos/Liutupi/qdtech-s3-touch-lcd-3.5-xiaozhi-firmware/releases/latest";
+    "https://api.github.com/repos/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/latest";
 // Never select an S3 image for the P4 Tab5. The release endpoint may contain
 // only S3 assets until a Tab5-specific firmware is published.
 static constexpr char kBoardAssetPrefix[] = "qdtech-tab5-";
