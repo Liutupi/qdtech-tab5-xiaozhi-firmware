@@ -42,8 +42,10 @@ public:
         slots_[2].base = slots_[2].pixels = c;
     }
     static constexpr int kSlots = 3;
+    // Five clip bits encode clip + 1; zero is reserved for cancellation.
+    static constexpr unsigned kMaxClips = 31;
     void Request(unsigned clip, unsigned frame, uint32_t generation) {
-        if (clip >= 18 || frame >= 256) {
+        if (clip >= kMaxClips || frame >= 256) {
             CancelAll();
             return;
         }

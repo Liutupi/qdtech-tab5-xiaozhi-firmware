@@ -6,19 +6,21 @@ using namespace nabo_scene;
 int main() {
     SceneInput input{};
     ActionLibrary library;
-    unsigned seen = 0, starts = 0;
+    unsigned seen = 0, starts = 0, shorter_waits = 0;
     int previous = -1;
     uint64_t ended = 0;
-    std::array<uint64_t, 14> last{};
-    for (uint64_t t = 0; t < 7200000; t += 20) {
+    std::array<uint64_t, kActions.size()> last{};
+    for (uint64_t t = 0; t < 14400000; t += 20) {
         const auto s = library.Apply(t, {0, 0}, input, 0, true);
         if (s.clip >= 4) {
             assert(s.clip < int(kClipCount));
             assert(s.frame < kActions[s.clip - 4].frames);
             if (s.clip != previous) {
                 assert(s.frame == 0);
-                if (starts)
-                    assert(t - ended >= 20000);
+                if (starts) {
+                    assert(t - ended >= 15000 && t - ended <= 30000 + 4520);
+                    shorter_waits += t - ended < 20000;
+                }
                 if (last[s.clip - 4])
                     assert(t - last[s.clip - 4] >= 600000);
                 last[s.clip - 4] = t;
@@ -31,7 +33,8 @@ int main() {
         }
         previous = s.clip;
     }
-    assert(seen == (1u << 14) - 1 && starts > 100);
+    assert(seen == (1u << kActions.size()) - 1 && starts > 100);
+    assert(shorter_waits > 0);
     ActionLibrary events;
     input.listening = true;
     assert(events.Apply(100, {-1, 0}, input, 0, true).clip == 6);
@@ -75,11 +78,11 @@ int main() {
     }
     ActionLibrary unavailable;
     for (uint64_t t = 0; t < 1000000; t += 20)
-        assert(unavailable.Apply(t, {0, 0}, input, 0x3fff0, true).clip == 0);
+        assert(unavailable.Apply(t, {0, 0}, input, ~uint32_t(0), true).clip == 0);
     ActionLibrary legacy;
     for (uint64_t t = 0; t < 1000000; t += 20)
         assert(legacy.Apply(t, {0, 7}, input, 0, false).frame == 7);
     std::puts(
-        "PASS 14-action coverage, idle spacing/cooldowns, exact neutral restart, audio and sleep "
+        "PASS all-action coverage, idle spacing/cooldowns, exact neutral restart, audio and sleep "
         "preemption, missing-assets fallback");
 }

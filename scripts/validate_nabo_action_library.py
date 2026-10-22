@@ -4,6 +4,7 @@ import argparse
 import ctypes
 import hashlib
 import json
+import math
 import struct
 import subprocess
 import tempfile
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from prepare_nabo_action_library import Codec, IDS, preview_page
+from prepare_nabo_action_library import Codec, preview_page
 
 
 def frames(path, codec):
@@ -52,6 +53,12 @@ def main():
     p.add_argument('--lz4-library')
     args = p.parse_args()
     manifest = json.loads((args.directory/'manifest.json').read_text())
+    base_ids = {'idle', 'transition', 'sleep', 'work'}
+    ids = [entry['id'] for entry in manifest['actions']]
+    assert len(ids) == len(set(ids)), 'Duplicate clip ID'
+    assert base_ids <= set(ids) and ids[0] == 'idle'
+    action_ids = set(ids) - base_ids
+    assert manifest['selected_action_count'] == len(action_ids)
     root = Path(__file__).resolve().parents[1]
     paths = [args.directory/x['file'] for x in manifest['actions']]
     with tempfile.TemporaryDirectory() as directory:
@@ -68,7 +75,7 @@ def main():
                                 '-s', '512x608', '-r', '25', '-i', 'pipe:0', '-an', '-c:v', 'libx264',
                                 '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(video)], stdin=subprocess.PIPE)
     reports, idle = [], []
-    sheet = Image.new('RGB', (1536, 1005), '#0b1725')
+    sheet = Image.new('RGB', (1536, math.ceil(len(action_ids)/6)*335), '#0b1725')
     thumb_index = 0
     neutral_crc = manifest['actions'][0]['first_decoded_crc']
     for entry, path in zip(manifest['actions'], paths):
@@ -83,11 +90,11 @@ def main():
             yy, xx = np.where(a[:, :, 3] > 160)
             # Before the sill hides the lower torso, all hands/head remain
             # within the accepted B side posts. Never crop an arm to pass.
-            if entry['id'] in IDS and (xx.min() < 13 or xx.max() >= 490): outside.append(n)
+            if entry['id'] in action_ids and (xx.min() < 13 or xx.max() >= 490): outside.append(n)
             images.append(art)
         assert crc == runtime_crc[str(path)], f"Firmware/liblz4 mismatch: {path}"
         if entry['id'] == 'idle': idle = images
-        if entry['id'] in IDS:
+        if entry['id'] in action_ids:
             assert first == last == neutral_crc
             assert not outside, f"B side-post collision in {path}: {outside}"
             for art in idle + images:
@@ -105,7 +112,7 @@ def main():
     subprocess.run(['ffmpeg', '-v', 'error', '-i', str(video), '-f', 'null', '-'], check=True)
     overview = args.directory.parent/'NABO-SD-pixels-overview.jpg'
     sheet.save(overview, quality=93)
-    report = dict(frames=sum(x['frames'] for x in reports), clips=reports, selected_actions=14,
+    report = dict(frames=sum(x['frames'] for x in reports), clips=reports, selected_actions=len(action_ids),
                   exact_neutral_endpoints=True, all_B_bounds_pass=True, preview=str(video),
                   overview=str(overview), audio_tracks=0, hardware_validated=False)
     (args.directory.parent/'asset-validation.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))

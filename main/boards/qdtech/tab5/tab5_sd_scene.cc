@@ -28,6 +28,8 @@ constexpr size_t kBytes = 320 * 412 * 3;
 constexpr size_t kDmaAlign = 128;
 constexpr size_t kSlotBytes = kBytes + kDmaAlign;  // DMA staging for one raw frame
 using Layout = nabo_sd::WideLayout;
+static_assert(nabo_scene::kClipCount <= nabo_sd::SceneMailbox::kMaxClips,
+              "Scene clips must fit mailbox tokens");
 static_assert(Layout::kSrcBytes <= kBytes, "wide frames fit the existing staging buffer");
 constexpr size_t kOutBytes = Layout::kOutBytes;  // composed opaque RGB565 slot
 constexpr int kVideoX = nabo_sky::kVideoLeft;    // window/image inside the wider sky
@@ -500,7 +502,8 @@ nabo_sky::Sky Tab5SdScene::CurrentSky() {
     struct tm local;
     localtime_r(&now, &local);
     // Until SNTP has synced, the RTC may hold a stale time: show the day sky meanwhile.
-    const bool trusted = tab5_sky::WeatherService::GetInstance().ClockSynced() && local.tm_year + 1900 >= 2025;
+    const bool trusted =
+        tab5_sky::WeatherService::GetInstance().ClockSynced() && local.tm_year + 1900 >= 2025;
     const int minutes = trusted ? local.tm_hour * 60 + local.tm_min : 12 * 60;
     const int sunrise = weather.sunrise_min > 0 ? weather.sunrise_min : 6 * 60;
     const int sunset = weather.sunset_min > 0 ? weather.sunset_min : 18 * 60 + 15;
@@ -563,7 +566,9 @@ bool Tab5SdScene::BuildSkyLayers() {
 }
 // background = K + t * sky, in place. The reader may compose one frame that mixes old
 // and new sky rows while this runs; that is a single 1/8 s frame a few times a day.
-void Tab5SdScene::ApplySkyToBackground(const uint16_t* panel) { ApplySkyToBackground(nullptr, panel, 255); }
+void Tab5SdScene::ApplySkyToBackground(const uint16_t* panel) {
+    ApplySkyToBackground(nullptr, panel, 255);
+}
 
 // background = K + t * mix(from, to, alpha); alpha 255 (or no `from`) is plain `to`.
 void Tab5SdScene::ApplySkyToBackground(const uint16_t* from, const uint16_t* to, unsigned alpha) {

@@ -9,23 +9,16 @@ struct ActionClip {
     unsigned frames;
     unsigned weight;
 };
-inline constexpr std::array<ActionClip, 14> kActions{{
-    {"A06", 125, 1},
-    {"A09", 125, 1},
-    {"A16", 125, 2},
-    {"E04", 100, 1},
-    {"E05", 100, 4},
-    {"E06", 100, 5},
-    {"E09", 100, 3},
-    {"E14", 100, 2},
-    {"P01", 125, 1},
-    {"P02", 125, 1},
-    {"A03R1", 125, 1},
-    {"A05R1", 125, 3},
-    {"E12R1", 100, 2},
-    {"E03R2", 100, 3},
+inline constexpr std::array<ActionClip, 26> kActions{{
+    {"A06", 125, 1},   {"A09", 125, 1},   {"A16", 125, 2},   {"E04", 100, 1},   {"E05", 100, 4},
+    {"E06", 100, 5},   {"E09", 100, 3},   {"E14", 100, 2},   {"P01", 125, 1},   {"P02", 125, 1},
+    {"A03R1", 125, 1}, {"A05R1", 125, 3}, {"E12R1", 100, 2}, {"E03R2", 100, 3}, {"A07", 126, 1},
+    {"A08", 126, 2},   {"A10", 126, 2},   {"E10", 125, 2},   {"A03", 125, 1},   {"A05", 125, 2},
+    {"A12", 126, 1},   {"E13", 125, 1},   {"A13", 125, 1},   {"P04", 125, 1},   {"A14", 125, 1},
+    {"E15", 125, 2},
 }};
 inline constexpr unsigned kClipCount = 4 + kActions.size();
+static_assert(kClipCount <= 32, "Clip failure masks have 32 bits");
 
 // Visual-only, allocation-free. One action at a time, real audio always wins.
 // Decorative clips cannot delay a reply or change the application's state.
@@ -101,7 +94,7 @@ private:
         random_ = random_ * 1664525u + 1013904223u;
         return random_;
     }
-    void Schedule(uint64_t now) { next_ = now + 20000 + Random() % 25001; }
+    void Schedule(uint64_t now) { next_ = now + 15000 + Random() % 15001; }
     bool Eligible(unsigned i, uint64_t now, uint32_t failed) const {
         return !(failed & (1u << (i + 4))) && int(i) != last_ &&
                (!used_[i] || now - used_[i] >= 600000);

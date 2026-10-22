@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <functional>
 #include <vector>
+#include "nabo_action_library.h"
 #include "nabo_scene_mailbox.h"
 #include "nabo_sd_host_source.h"
 using namespace nabo_sd;
@@ -90,11 +91,22 @@ int main(int argc, char** argv) {
     box.Pump(pack, box.Requested());
     box.CancelAll();
     assert(box.TakeReady().slot < 0);
-    // Extended library: clip 17 and the full epoch survive token encoding.
-    box.Request(17, 255, 0x7ffff);
-    assert(SceneMailbox::Clip(box.Requested()) == 17);
+    // Every registered state/action must reach the reader, including clips 18+.
+    static_assert(nabo_scene::kClipCount <= SceneMailbox::kMaxClips);
+    for (unsigned clip = 0; clip < nabo_scene::kClipCount; ++clip) {
+        box.Request(clip, 0, 0x7ffff);
+        assert(box.Requested() && SceneMailbox::Clip(box.Requested()) == clip);
+        assert(box.Pump(pack, box.Requested()) == Error::Ok);
+        auto action = box.TakeReady();
+        assert(action.slot >= 0 && SceneMailbox::Clip(action.token) == clip);
+        assert(Crc(action.pixels, bytes) == pack.At(0).crc);
+        box.Release(action);
+    }
+    // Highest encodable clip and full epoch survive; the next clip is rejected.
+    box.Request(SceneMailbox::kMaxClips - 1, 255, 0x7ffff);
+    assert(SceneMailbox::Clip(box.Requested()) == SceneMailbox::kMaxClips - 1);
     assert((box.Requested() & 255) == 255);
-    box.Request(18, 0, 1);
+    box.Request(SceneMailbox::kMaxClips, 0, 1);
     assert(box.Requested() == 0);
     box.Request(0, 256, 1);
     assert(box.Requested() == 0);
@@ -172,5 +184,5 @@ int main(int argc, char** argv) {
         "PASS held-buffer immutability; slow-read frame skipping; epoch cancellation; newest "
         "completion selection; stale discard; invalid request bounds; 8192-byte reads; "
         "DMA-aligned frame placement; 64KiB firmware reads; verify-once CRC; "
-        "third slot");
+        "third slot; all registered clips reach reader; full token bounds");
 }
