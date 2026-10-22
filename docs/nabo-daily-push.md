@@ -112,9 +112,15 @@ token 放在路径里，写法和现有的 `/push/<token>`、`/home/<token>/…`
 | 方法 | 路径 | 谁用 | 作用 |
 |---|---|---|---|
 | POST | `/nabo/<token>/push` | 服务端（Nabo） | 推送一条；用同一个 `id` 再推会覆盖原内容 |
-| GET | `/nabo/<token>/inbox?since=<ts>` | Tab5 | 每 60 秒拉取 `since` 之后新增或修改的推送 |
+| GET | `/nabo/<token>/inbox?since=<rev>` | Tab5 | 每 60 秒拉取 `since` 之后新增或修改的推送 |
 
 Tab5 上的状态都存在本地，不回写，所以没有状态接口。
+
+- `push` 成功返回 `{"ok":true,"id":"…","rev":12,"deleted":false,"changed":true}`；出错返回 HTTP 400/413 和 `{"ok":false,"error":"bad_source"}` 这类错误码，错误码直接指出是哪个字段不对。
+- 每次推送（包括覆盖和撤回）中转站都会把全局 `rev` 加 1。`since` 推荐传上次拿到的 `rev`（整数）；也可以传 ISO 时间，按中转站收到的时间过滤。只按推送里的 `ts` 拉会漏掉“同一个 `id` 改了内容但 `ts` 没变”的更新，所以 Tab5 用 `rev`。
+- `inbox` 返回 `{"ok":true,"rev":<本页最后一条的 rev>,"latest_rev":…,"more":false,"items":[…]}`，按 `rev` 从小到大排；每页最多 100 条（`limit` 最大 200），`more=true` 时用返回的 `rev` 接着拉。
+- 撤回的条目以 `{"id":"…","deleted":true,"rev":…}` 出现在 `items` 里，Tab5 收到后删除本地这条。
+- 待办如果标题以 `HH:MM ` 开头，返回里会多一个规整好的 `time` 字段（如 `"09:30"`）。
 
 ### 4.2 公共字段
 
@@ -235,8 +241,8 @@ curl -sS -X POST "$NABO_RELAY/nabo/$NABO_TOKEN/push" \
   -H 'Content-Type: application/json' \
   -d '{"id":"nabo-test-word-1","ts":"2026-10-22T08:05:00+08:00","source":"nabo/study/word","priority":"normal","title":"今日 2 个词","body":"sepsis  脓毒症\nlactate  乳酸"}'
 
-# 看收件箱
-curl -sS "$NABO_RELAY/nabo/$NABO_TOKEN/inbox?since=2026-10-22T00:00:00+08:00"
+# 看收件箱（从头拉；之后用返回的 rev 增量拉）
+curl -sS "$NABO_RELAY/nabo/$NABO_TOKEN/inbox?since=0"
 
 # 撤回
 curl -sS -X POST "$NABO_RELAY/nabo/$NABO_TOKEN/push" \
@@ -247,8 +253,14 @@ curl -sS -X POST "$NABO_RELAY/nabo/$NABO_TOKEN/push" \
 
 - 改动前先完整备份 `/data`（包括 `relay.js`、`inbox.json`、`podcasts.json`、`music.json`）。
 - 不得删除或修改 Muse 已有的节目和收件箱数据；新数据单独存到 `/data/nabo_inbox.json`。
-- 按现有扩展方式挂载：新模块 `nabo_routes.js` 加安装脚本 `enable_nabo.js`（参照 `home_routes.js` / `enable_home.js` 的写法），只在 `http.createServer` 入口处插入一行，原文件留备份。
-- 输入要校验：长度上限；`source`、`priority`、`mood` 只接受上面列出的值；运势的 `body` 必须能解析成 JSON 对象；单个请求不超过 16 KB；服务端最多保留 30 天或 500 条。
+- 模块已写好：`tools/muse-relay/nabo_routes.js`，安装脚本 `tools/muse-relay/enable_nabo.js`，测试 `tools/muse-relay/nabo_routes.test.js`（`node --test` 运行）。
+- 部署步骤：
+  1. 备份 `/data`。
+  2. 把 `nabo_routes.js`、`enable_nabo.js` 放到 `/data`（和 `relay.js` 同一目录）。
+  3. 运行 `node /data/enable_nabo.js`。它会先做语法检查，再在 `http.createServer` 入口插入一行，原文件另存为 `relay.js.bak-nabo-<时间>`；已经装过就不会再改。
+  4. 只重启 `node /data/relay.js`（由原有 supervisor 拉起），不要动 cloudflared。
+  5. 用第 5 节的 curl 验证。
+- 中转站已经校验：长度上限；`source`、`priority`、`mood` 只接受上面列出的值；运势的 `body` 必须能解析成 JSON 对象；单个请求不超过 16 KB；最多保留 30 天或 500 条。日志只记 `id`、`source`、`rev` 和字节数，不记正文和 token。
 - 经公网隧道访问时同样要求 token。
 
 ## 7. 每天的推送节奏（建议）
