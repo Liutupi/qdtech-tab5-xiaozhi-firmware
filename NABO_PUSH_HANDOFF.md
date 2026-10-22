@@ -33,3 +33,21 @@
 4. 实机验证：推送页左下小 NABO 的浮动和文字；让 Grok 推一条 15 分钟后开始、`priority=high` 的待办，看主页卡片和 NABO 插播（日志 `nabo reminder … action A07`）；点卡片跳到待办板块；高优先级推送；早上运势。
 5. 文档未覆盖的小项：高优先级提示音没做（设计里有，可选）；`/tab5/nabo/inbox` 局域网无 token 路由没做；没插 SD 卡时推送历史不保存。
 6. 全部通过后按惯例发版（更新 `PROJECT_VER`、Release 产物、`HANDOFF.md`、验证记录）。
+
+## Codex 接续记录（2026-10-22 23:26，上海时间）
+
+以上待办 1–3 已完成；实屏及白天动作验收仍待用户反馈，尚未发版。
+
+- 开发位置仍为 `/Users/tupi/tab5-nabo-push`。外接卷当前检出的是旧 `main`；没有切换它，也没有改动用户未提交的 `HANDOFF.md` 和 `scripts/push_tab5_daily.mjs`。
+- 修复 `test_tab5_daily_mirror.py`：截取范围排除新的提醒实现，补假提醒成员和空的显示方法，以及 `<cstring>`；新增提醒有效时不覆盖标题/正文、不排队镜像、不改对话面板的断言。没有改运行时代码。
+- ESP-IDF 6.1 环境完整宿主测试：202 项，199 通过、3 项因 IDF Python 环境缺少 numpy 跳过。使用隔离环境读取本机已有 numpy 后，`test_nabo_radio.py` 的 4 项全部通过（其中 3 项正是前述跳过项），**合计 202 个不同测试全部通过，无未验证跳过项**。SDK CRC 测试已在设置 `IDF_PATH` 的完整运行中通过。中转站 `nabo_routes.test.js` 10/10 通过，`git diff --check` 通过。
+- ESP-IDF `v6.1-dirty` 下规范构建 `python3 scripts/build.py qdtech/tab5 --name qdtech-tab5-native` 成功。镜像仍为 12,282,592 B，factory 剩余 300,320 B。应用版本保持 `1.0.17`，功能源码仍为 `df21a4e`。
+- 刷前再次核对 MAC `e8:f6:0a:e2:d7:e0`，整片 16 MiB Flash、factory、NVS 均已私有备份；刷前 factory 的有效镜像与 `1840c8a` 备份逐字节一致。新备份目录：`/Volumes/liutupi/tab5-private-backups/nabo-reminder-codex-20261022/`。内含 `backup-manifest.json`、新 BIN/ELF、构建/测试/刷机日志和 `device-validation.json`；不得上传。
+- 只写 `factory` 的 `0x20000`，使用 `--after hard-reset`，写后哈希校验通过。新 BIN SHA-256：`d15065c09a0fac1d3b3227b29b63a206827b792b36bd571b0d023665cfbb19e1`；ELF SHA-256：`7f3e308870c05ec0236b3075586b88e7ae801e8fdc0536f9d0c17ccc9294eec9`。150.3 秒串口观察确认应用版本和 ELF 标识、进入 idle，未见 panic、断言、看门狗或 brownout。
+- 已通过 Grok Bot 的现有「Nabo 推送」对话请求真实验收待办。Grok 返回 `ok:true`、`rev:11`：`nabo-codex-reminder-test-20261022232530`，标题 `23:40 主页提醒验收（测试）`，`ts=2026-10-22T23:25:30+08:00`，`source=nabo/todo`、`priority=high`、`mood=alert`。设备运行约 140 秒时串口确认同步到 `rev 11`。未撤回这条验收待办，原有推送保留。
+
+剩余验收与发版条件：
+
+1. 用户目视确认主页提醒卡片、点卡片进入待办板块、小 NABO 上下浮动及 mood 小字。若先显示原有 `23:00 夜班交接查房`，点开再回主页即可让下一条待办提醒出现，不必勾选完成真实待办。
+2. 本次验收在 23:00–7:00 夜间窗口，按约定不插播；A07 实际播放、同条一次/10 分钟间隔和对话/音乐/睡眠抑制仍需白天实机验收。高优先级推送和早间运势的实屏验收也待补，宿主选择逻辑测试已通过。
+3. 上述通过后再更新版本、制作 Release 产物及正式验证记录。当前没有创建 tag 或 Release，版本未递增。不要把本次启动和同步成功当作 UI/动作已经通过验收。

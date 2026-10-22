@@ -23,10 +23,13 @@ class DailyMirrorTests(unittest.TestCase):
         gate = source[source.index("    class DailyMirrorGate {"):
                       source.index("    } daily_mirror_gate_;") + len("    } daily_mirror_gate_;")]
         methods = source[source.index("    bool DailyPageValid(unsigned page) const {"):
-                         source.index("    // Fill builtin trio")]
+                         source.index("    // The card keeps one reminder")]
+        methods += source[source.index("    void ApplyDailyMirrorAfterCardRender() {"):
+                          source.index("    // Fill builtin trio")]
         harness = r'''
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 struct lv_obj_t {
@@ -74,6 +77,8 @@ public:
     CauseGate frame_cause_gate_;
     FakeApps apps;
     FakeApps* apps_ = &apps;
+    struct { bool active = false; } nabo_reminder_;
+    void ShowNaboReminderCard() {}
 
     QdtechTab5Display() {
         for (unsigned i = 0; i < kDailyPages; ++i) daily_dots_[i] = &dots[i];
@@ -99,6 +104,17 @@ int main() {
     }
     ui.daily_titles_[3] = "每日一句";
     ui.daily_bodies_[3] = "一句话";
+
+    ui.nabo_reminder_.active = true;
+    ui.title.text = "待办提醒";
+    ui.body.text = "15 分钟后开始";
+    ui.ShowDailyPage(6);
+    assert(ui.title.text == "待办提醒" && ui.body.text == "15 分钟后开始");
+    assert(!ui.daily_mirror_gate_.HasPending());
+    ui.OnDailyRenderReady();
+    ui.ApplyDailyMirrorAfterCardRender();
+    assert(ui.prompt.text == "随时倾听" && ui.message.text == "轻触下方按钮，开始对话。");
+    ui.nabo_reminder_.active = false;
 
     ui.ShowDailyPage(6);
     assert(ui.title.text == "临床6" && ui.body.text == "正文6");
