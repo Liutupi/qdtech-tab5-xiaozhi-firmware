@@ -1,5 +1,6 @@
 #include "tab5_muse_inbox.h"
 #include "tab5_nabo_push.h"
+#include "tab5_playback_buffer.h"
 #include "nabo_song_favorites.h"
 #include "tab5_net_gate.h"
 #include "tab5_podcast_transcript.h"
@@ -33,6 +34,11 @@ constexpr int kPodcastLimit = 6;
 constexpr int kTimeoutMs = 4000;
 constexpr int kPollSeconds = 60;
 constexpr int kMusicPollMs = 4000;
+// LAN probe of the relay's /tab5 endpoints. Office and home are different networks;
+// a miss must fall back to the tunnel instead of disabling WAN.
+constexpr int kLanTimeoutMs = 1500;
+constexpr int64_t kLanValidUs = 10LL * 60 * 1000000;
+constexpr int64_t kLanRetryUs = 5LL * 60 * 1000000;
 constexpr int kFirstPollDelayMs = 20000;  // let Wi-Fi and the XiaoZhi session settle first
 
 // A second episode snapshot overlaps the response, cJSON tree and cached snapshot.
@@ -535,6 +541,26 @@ bool Inbox::Discover() {
     return true;
 }
 
+bool Inbox::LanRelayUsable() const {
+    return esp_timer_get_time() < lan_ok_until_us_.load(std::memory_order_relaxed);
+}
+
+void Inbox::MarkLanOk() {
+    const int64_t previous = lan_ok_until_us_.exchange(esp_timer_get_time() + kLanValidUs,
+                                                       std::memory_order_relaxed);
+    if (esp_timer_get_time() >= previous)
+        ESP_LOGI(TAG, "LAN relay reachable; audio and music commands skip the tunnel");
+}
+
+void Inbox::ReportLanFailure() {
+    const int64_t now = esp_timer_get_time();
+    const int64_t previous = lan_ok_until_us_.exchange(0, std::memory_order_relaxed);
+    lan_retry_us_.store(now + kLanRetryUs, std::memory_order_relaxed);
+    if (now < previous)
+        ESP_LOGW(TAG, "LAN relay failed; using the tunnel, retry in %d s",
+                 int(kLanRetryUs / 1000000));
+}
+
 void Inbox::TaskEntry(void* arg) { static_cast<Inbox*>(arg)->Run(); }
 
 void Inbox::Run() {
@@ -565,7 +591,14 @@ void Inbox::Run() {
             poll_due = false;
         }
         PollMusic();
-        refresh = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kMusicPollMs)) > 0;
+        const bool audio_active = Application::GetInstance().IsExternalAudioActive();
+        const int music_wait_ms =
+            audio_active
+                ? tab5_playback::BackgroundPollWaitMs(
+                      tab5_playback::PublishedOutputStarted().load(std::memory_order_relaxed),
+                      tab5_playback::PublishedBufferedBytes().load(std::memory_order_relaxed))
+                : kMusicPollMs;
+        refresh = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(music_wait_ms)) > 0;
     }
 }
 
@@ -587,8 +620,52 @@ bool Inbox::PollMusic() {
         endpoint = url;
         endpoint.replace(path, 7, "/music/");
     }
+    const bool audio_active = Application::GetInstance().IsExternalAudioActive();
+    const bool allow_poll = tab5_playback::AllowBackgroundTunnelPoll(
+        audio_active, tab5_playback::PublishedOutputStarted().load(std::memory_order_relaxed) != 0,
+        tab5_playback::PublishedBufferedBytes().load(std::memory_order_relaxed));
+    const auto route = tab5_playback::ChooseMusicPoll(
+        audio_active, allow_poll, LanRelayUsable(),
+        esp_timer_get_time() >= lan_retry_us_.load(std::memory_order_relaxed), !url.empty(),
+        !host.empty());
+    if (route == tab5_playback::MusicPollRoute::Skip) {
+        if (!music_poll_deferred_) {
+            music_poll_deferred_ = true;
+            ESP_LOGI(TAG, "music poll deferred during playback buffered=%u",
+                     static_cast<unsigned>(tab5_playback::PublishedBufferedBytes().load(
+                         std::memory_order_relaxed)));
+        }
+        return true;
+    }
+    if (music_poll_deferred_) {
+        music_poll_deferred_ = false;
+        ESP_LOGI(TAG, "music poll resumed");
+    }
     int status = 0;
-    const std::string body = HttpGet(endpoint, &status);
+    std::string body;
+    auto take_lan = [&]() {
+        body = HttpGet("http://" + host + "/tab5/music", &status, kMaxJsonBytes, kLanTimeoutMs);
+        const bool ok = status == 200 && !body.empty() && body.front() == '{';
+        if (ok) {
+            MarkLanOk();
+        } else {
+            ReportLanFailure();
+            body.clear();
+            status = 0;
+        }
+        return ok;
+    };
+    bool got = false;
+    if (route == tab5_playback::MusicPollRoute::LanOnly ||
+        route == tab5_playback::MusicPollRoute::ProbeLanThenTunnel)
+        got = take_lan();
+    // LAN-only misses stay off the tunnel so a playback poll cannot open a second TLS
+    // session. Idle probes still fall back, and a tunnel-only route never disables WAN.
+    if (!got && route == tab5_playback::MusicPollRoute::LanOnly)
+        return false;
+    if (!got) {
+        body = HttpGet(endpoint, &status);
+    }
     std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
         body.empty() ? nullptr : cJSON_ParseWithLength(body.data(), body.size()), cJSON_Delete);
     if (status != 200 || !cJSON_IsObject(root.get())) {

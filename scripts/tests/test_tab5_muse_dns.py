@@ -42,6 +42,7 @@ class MuseDnsTests(unittest.TestCase):
 #include <vector>
 #include <cJSON.h>
 #include "tab5_audio_stream.h"
+#include "tab5_playback_buffer.h"
 constexpr size_t kMaxJsonBytes=32768;
 constexpr int kTimeoutMs=4000,ESP_OK=0;
 struct RelayConnection {std::string url;std::string server_name;};

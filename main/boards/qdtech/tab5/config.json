@@ -41,6 +41,8 @@
         {
             "name": "qdtech-tab5-native",
             "sdkconfig_append": [
+                "CONFIG_LWIP_TCP_WND_DEFAULT=32768",
+                "CONFIG_LWIP_TCP_RECVMBOX_SIZE=32",
                 "CONFIG_BOARD_TYPE_QDTECH_TAB5=y",
                 "CONFIG_QDTECH_TAB5_NATIVE_UI=y",
                 "CONFIG_LV_USE_CLIB_MALLOC=n",

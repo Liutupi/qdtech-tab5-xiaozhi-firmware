@@ -1,4 +1,5 @@
 #pragma once
+#include "nabo_clip_limits.h"
 #include "nabo_framepack.h"
 
 namespace nabo_sd {
@@ -42,14 +43,16 @@ public:
         slots_[2].base = slots_[2].pixels = c;
     }
     static constexpr int kSlots = 3;
-    // Five clip bits encode clip + 1; zero is reserved for cancellation.
-    static constexpr unsigned kMaxClips = 31;
+    // Six clip bits encode clip + 1; zero is reserved for cancellation.
+    // Keep the 32-bit request, eight frame bits and the existing slot count.
+    static constexpr unsigned kMaxClips = kClipCapacity;
+    static constexpr uint32_t kGenerationMask = (1u << (24 - kClipBits)) - 1;
     void Request(unsigned clip, unsigned frame, uint32_t generation) {
         if (clip >= kMaxClips || frame >= 256) {
             CancelAll();
             return;
         }
-        const uint32_t epoch = ((generation & 0x7ffffu) << 5) | (clip + 1);
+        const uint32_t epoch = ((generation & kGenerationMask) << kClipBits) | (clip + 1);
         epoch_.store(epoch, std::memory_order_release);
         request_.store((epoch << 8) | frame, std::memory_order_release);
     }
@@ -89,7 +92,7 @@ public:
             digits = digits * 10 + unsigned(s.base ? s.state.load() : 9);
         return digits;
     }
-    static unsigned Clip(uint32_t token) { return ((token >> 8) & 31) - 1; }
+    static unsigned Clip(uint32_t token) { return ((token >> 8) & kMaxClips) - 1; }
     Error Pump(Pack& pack, uint32_t token, PumpTrace* trace = nullptr) {
         if (trace)
             trace->Reset();

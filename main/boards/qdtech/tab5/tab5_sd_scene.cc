@@ -187,8 +187,8 @@ public:
         return instance;
     }
     nabo_sd::SceneMailbox mailbox;
-    bool Failed(unsigned clip) const { return failures_.load() & (1u << clip); }
-    uint32_t Failures() const { return failures_.load(); }
+    bool Failed(unsigned clip) const { return failures_.Contains(clip); }
+    nabo_sd::FailedClips Failures() const { return failures_.Snapshot(); }
     bool LivelyReady() const { return lively_.load(std::memory_order_acquire); }
 
 private:
@@ -376,7 +376,7 @@ private:
                         ESP_LOGW("NaboSD", "clip=%u frame=%u CRC failed twice; skipping bad frame",
                                  clip, unsigned(token & 255));
                     } else if (recovery[clip].Failed()) {
-                        failures_.fetch_or(1u << clip);
+                        failures_.Mark(clip);
                         source_.Close();
                         open_clip = -1;
                         ESP_LOGW("NaboSD", "clip=%u error=%u; static fallback until reboot", clip,
@@ -410,7 +410,7 @@ private:
     std::atomic<bool> lively_{false};
     std::atomic<const nabo_sky::SkyFx*> fx_{nullptr};
     uint32_t composed_ = 0, compose_us_ = 0, fx_us_ = 0;
-    std::atomic<uint32_t> failures_{0};
+    nabo_sd::ClipFailures failures_;
 };
 
 bool Tab5SdSceneBorrowPool(Tab5SdPoolLease* lease, bool log_refusal) {

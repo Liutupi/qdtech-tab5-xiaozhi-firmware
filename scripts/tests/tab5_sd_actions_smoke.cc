@@ -6,7 +6,11 @@ using namespace nabo_scene;
 int main() {
     SceneInput input{};
     ActionLibrary library;
-    unsigned seen = 0, starts = 0, shorter_waits = 0;
+    uint64_t seen = 0, expected = 0;
+    unsigned starts = 0, shorter_waits = 0;
+    for (unsigned i = 0; i < kActions.size(); ++i)
+        if (kActions[i].weight)
+            expected |= uint64_t{1} << i;
     int previous = -1;
     uint64_t ended = 0;
     std::array<uint64_t, kActions.size()> last{};
@@ -25,7 +29,7 @@ int main() {
                     assert(t - last[s.clip - 4] >= 600000);
                 last[s.clip - 4] = t;
                 ++starts;
-                seen |= 1u << (s.clip - 4);
+                seen |= uint64_t{1} << (s.clip - 4);
             }
         } else if (previous >= 4) {
             assert(s.clip == 0 && s.frame == 0);
@@ -33,7 +37,7 @@ int main() {
         }
         previous = s.clip;
     }
-    assert(seen == (1u << kActions.size()) - 1 && starts > 100);
+    assert(seen == expected && starts > 100);
     assert(shorter_waits > 0);
     ActionLibrary events;
     input.listening = true;
@@ -78,7 +82,35 @@ int main() {
     }
     ActionLibrary unavailable;
     for (uint64_t t = 0; t < 1000000; t += 20)
-        assert(unavailable.Apply(t, {0, 0}, input, ~uint32_t(0), true).clip == 0);
+        assert(unavailable.Apply(t, {0, 0}, input, ~nabo_sd::FailedClips{0}, true).clip == 0);
+    // A failed high index must not alias a low clip or disappear at bit 32.
+    for (unsigned clip = 32; clip < kClipCount; ++clip) {
+        if (!kActions[clip - 4].weight)
+            continue;
+        ActionLibrary high_only;
+        bool started = false;
+        const auto failed = ~nabo_sd::ClipBit(clip);
+        for (uint64_t t = 0; t < 40000; t += 20) {
+            auto selection = high_only.Apply(t, {0, 0}, input, failed, true);
+            if (selection.clip >= 4) {
+                assert(selection.clip == int(clip));
+                started = true;
+            }
+        }
+        assert(started);
+    }
+    // Keep v1.0.18 reminder requests, including high-index failure isolation.
+    ActionLibrary requested;
+    assert(!requested.Request(nullptr, 0));
+    assert(!requested.Request("A18", 0));
+    assert(requested.Request("E18", 0));
+    assert(requested.Apply(0, {0, 0}, input, nabo_sd::ClipBit(5), true).clip == 37);
+    ActionLibrary requested_failed;
+    assert(requested_failed.Request("E18", 0));
+    assert(requested_failed.Apply(0, {0, 0}, input, nabo_sd::ClipBit(37), true).clip == 0);
+    ActionLibrary original_reminder;
+    assert(original_reminder.Request("A07", 0));
+    assert(original_reminder.Apply(0, {0, 0}, input, 0, true).clip == 18);
     ActionLibrary legacy;
     for (uint64_t t = 0; t < 1000000; t += 20)
         assert(legacy.Apply(t, {0, 7}, input, 0, false).frame == 7);

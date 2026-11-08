@@ -38,6 +38,7 @@
 #include "settings.h"
 #include "tab5_audio_codec.h"
 #include "tab5_muse_inbox.h"
+#include "tab5_playback_buffer.h"
 #include "tab5_sd.h"
 #include "wifi_manager.h"
 
@@ -1856,9 +1857,21 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     const uint64_t skip_until = resuming ? resume_.byte : 0;
     const uint32_t base_ms = resuming ? resume_.milliseconds : 0;
     std::string playback_url = url;
+    bool via_lan_relay = false;
+    bool using_lan = false;
+    int audio_rcvbuf = -1;
 #if CONFIG_QDTECH_TAB5_NATIVE_UI
-    const auto inbox = tab5_muse::Inbox::GetInstance().Current();
-    playback_url = tab5_audio_stream::RelayUrl(inbox.url, inbox.host, url, !playing_custom_url_);
+    auto& muse = tab5_muse::Inbox::GetInstance();
+    const auto inbox = muse.Current();
+    const bool have_tunnel = !inbox.url.empty();
+    const bool have_host = !inbox.host.empty();
+    const bool lan_known = muse.LanRelayUsable();
+    using_lan = tab5_playback::UseLanRelay(have_tunnel, have_host, lan_known);
+    via_lan_relay = tab5_playback::LanFailureFallsBackToTunnel(have_tunnel, have_host, lan_known);
+    playback_url = tab5_audio_stream::RelayUrl(using_lan ? std::string() : inbox.url, inbox.host,
+                                               url, !playing_custom_url_);
+    if (using_lan)
+        ESP_LOGI(TAG, "audio route=%s", tab5_playback::RequestMode(!playing_custom_url_, true));
     if (playback_url.empty()) {
         SetUi("Error", "96k audio service is not configured");
         return false;
@@ -1907,14 +1920,15 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     esp_http_client_set_header(client, "User-Agent", "Mozilla/5.0 ESP32 Radio");
     esp_http_client_set_header(client, "Accept", "audio/mpeg,*/*");
     esp_http_client_set_header(client, "Icy-MetaData", "0");
-    // Live streams through qtfm/qingting drop the connection after a few
-    // minutes; close each response so reconnect starts clean.
-    esp_http_client_set_header(client, "Connection", "close");
+    // Direct qtfm/qingting sockets still close each response. stream96 is one
+    // long relay body; advertising close there only forces the next handshake.
+    esp_http_client_set_header(client, "Connection",
+                               tab5_playback::AudioConnectionHeader(playback_url));
     if (resuming) {
         const std::string range = "bytes=" + std::to_string(range_start) + "-";
         esp_http_client_set_header(client, "Range", range.c_str());
     }
-    if (IsNetEaseMusicUrl(url)) {
+    if (IsNetEaseMusicUrl(url) && !tab5_playback::IsRelayStreamRequest(playback_url)) {
         esp_http_client_set_header(client, "User-Agent",
                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
@@ -1929,9 +1943,26 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     ESP_LOGI(TAG, "timing: http open %s in %d ms", err == ESP_OK ? "ok" : "FAILED",
              static_cast<int>((esp_timer_get_time() - t_start_us) / 1000));
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "open failed station=%s url_index=%d err=%s url=%s", station_name.c_str(), url_index, esp_err_to_name(err), url.c_str());
+        ESP_LOGW(TAG, "open failed station=%s url_index=%d err=%s mode=%s", station_name.c_str(),
+                 url_index, esp_err_to_name(err),
+                 tab5_playback::RequestMode(!playing_custom_url_, using_lan));
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+        if (via_lan_relay)
+            tab5_muse::Inbox::GetInstance().ReportLanFailure();
+#endif
         esp_http_client_cleanup(client);
         return false;
+    }
+    {
+        const int sock = esp_http_client_get_socket(client);
+        if (sock >= 0) {
+            const int want = 32 * 1024;
+            if (setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &want, sizeof(want)) == 0) {
+                socklen_t len = sizeof(audio_rcvbuf);
+                if (getsockopt(sock, SOL_SOCKET, SO_RCVBUF, &audio_rcvbuf, &len) != 0)
+                    audio_rcvbuf = want;
+            }
+        }
     }
 
     if (!g_stream_stall_timer) {
@@ -1999,8 +2030,17 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
 #endif
     preparation_started_us_ = 0;
     if (status < 200 || status >= 400) {
-        ESP_LOGW(TAG, "bad stream status station=%s url_index=%d status=%d len=%d url=%s",
-                 station_name.c_str(), url_index, status, content_length, url.c_str());
+        ESP_LOGW(TAG, "bad stream status station=%s url_index=%d status=%d len=%d mode=%s",
+                 station_name.c_str(), url_index, status, content_length,
+                 tab5_playback::RequestMode(!playing_custom_url_, using_lan));
+#if CONFIG_QDTECH_TAB5_NATIVE_UI
+        if (via_lan_relay) {
+            // The LAN hop failed. Do not mark the song itself bad; the retry uses the tunnel.
+            tab5_muse::Inbox::GetInstance().ReportLanFailure();
+            release_client();
+            return false;
+        }
+#endif
         last_url_permanent_error_ = status == 400 || status == 401 || status == 403 ||
                                     status == 404 || status == 410;
         if (playing_custom_url_ && last_url_permanent_error_) {
@@ -2040,10 +2080,13 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
 
 #endif
 
-    ESP_LOGI(TAG, "stream open station=%s url_index=%d status=%d len=%d url=%s",
-             station_name.c_str(), url_index, status, content_length, url.c_str());
+    ESP_LOGI(TAG, "stream open station=%s url_index=%d status=%d len=%d mode=%s patch=%s rcvbuf=%d",
+             station_name.c_str(), url_index, status, content_length,
+             tab5_playback::RequestMode(!playing_custom_url_, using_lan),
+             tab5_playback::kPlaybackPatchId, audio_rcvbuf);
     if (playing_custom_url_) {
-        ESP_LOGI(TAG, "music url open ok len=%d url=%s", content_length, url.c_str());
+        ESP_LOGI(TAG, "music url open ok len=%d mode=%s", content_length,
+                 tab5_playback::RequestMode(false, using_lan));
     }
     ESP_LOGI(TAG, "timing: headers received %d ms after connect start",
              static_cast<int>((esp_timer_get_time() - t_start_us) / 1000));
@@ -2103,8 +2146,13 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     bool reader_running = false;
     TaskHandle_t reader_task = nullptr;
     if (reader && reader->done && reader->ring) {
-        reader_running = xTaskCreatePinnedToCoreWithCaps(StreamReaderTask, "radio_reader", 6144, reader, 5,
-                                                         &reader_task, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS;
+        // Priority 11 sits above the main task (10) and below Wi-Fi/lwIP. The
+        // reader blocks in recv, so it does not spin the core; it only stops a
+        // display or schedule slice from holding the socket unread.
+        reader_running = xTaskCreatePinnedToCoreWithCaps(
+                             StreamReaderTask, "radio_reader", 6144, reader,
+                             tab5_playback::kPlaybackReaderPriority, &reader_task, 0,
+                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS;
     }
     auto stop_reader = [&]() -> bool {
         // Returns true when the reader no longer touches `client`.
@@ -2174,6 +2222,14 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
     size_t total_bytes = 0;
     bool stream_failed = false;
     bool stream_completed = false;
+    const bool live_stream = !playing_custom_url_;
+    const tab5_playback::StreamBufferPlan buffer_plan = tab5_playback::BufferPlan(live_stream);
+    bool filling = true;
+    tab5_playback::FillKind fill_kind = tab5_playback::FillKind::Start;
+    int64_t fill_started_us = esp_timer_get_time();
+    int underruns = 0;
+    size_t diag_bytes_mark = reader->total.load();
+    int64_t diag_mark_us = fill_started_us;
     SetExternalAudioActiveSerialized(true);
     // Reopen TX only when output is missing. Reopening on every URL while the
     // mic is still active parks I2S in "Pending out channel" and mutes us.
@@ -2203,6 +2259,69 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
             SetUi("Paused", "XiaoZhi is using audio");
             ESP_LOGI(TAG, "radio yielded audio focus station=%s", station_name.c_str());
             break;
+        }
+
+        auto log_playback = [&](const char* event, int consumer_ms) {
+            const int64_t now_us = esp_timer_get_time();
+            const size_t total_now = reader->total.load();
+            const size_t ring_now = xStreamBufferBytesAvailable(reader->ring);
+            const size_t buffered_now = ring_now + static_cast<size_t>(std::max(bytes_left, 0));
+            tab5_playback::PlaybackDiag diag;
+            diag.buffered = buffered_now;
+            diag.ring = ring_now;
+            diag.local = bytes_left;
+            diag.received_bytes = total_now >= diag_bytes_mark ? total_now - diag_bytes_mark : 0;
+            diag.interval_us = now_us - diag_mark_us;
+            diag.consumer_ms = consumer_ms;
+            diag.underruns = underruns;
+            diag.internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            diag.psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+            diag.psram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+            diag.rcvbuf = audio_rcvbuf;
+            diag.live = live_stream;
+            diag.lan = using_lan;
+            diag.event = event;
+            char line[384];
+            if (tab5_playback::FormatPlaybackDiag(line, sizeof(line), diag) > 0)
+                ESP_LOGI(TAG, "%s station=%s", line, station_name.c_str());
+            diag_bytes_mark = total_now;
+            diag_mark_us = now_us;
+        };
+        const size_t ring_now = xStreamBufferBytesAvailable(reader->ring);
+        const size_t capacity = ring_now + xStreamBufferSpacesAvailable(reader->ring);
+        const size_t have = ring_now + static_cast<size_t>(std::max(bytes_left, 0));
+        tab5_playback::PublishPlaybackBuffer(have, true, decoded_frames > 0);
+        const bool reader_alive = reader->state.load() == 0;
+        if (filling) {
+            const tab5_playback::FillConfig cfg =
+                tab5_playback::FillConfigFor(buffer_plan, fill_kind, capacity);
+            const auto action = tab5_playback::DecideFill(
+                cfg, {have, esp_timer_get_time() - fill_started_us, reader_alive, false});
+            if (action == tab5_playback::FillAction::Wait) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
+            if (action == tab5_playback::FillAction::Cancelled)
+                break;
+            const int64_t waited_ms = (esp_timer_get_time() - fill_started_us) / 1000;
+            log_playback(fill_kind == tab5_playback::FillKind::Start ? "start" : "rebuffer",
+                         static_cast<int>(waited_ms));
+            ESP_LOGI(TAG, "%s cushion %u/%u bytes in %lld ms station=%s",
+                     fill_kind == tab5_playback::FillKind::Start ? "start" : "rebuffer",
+                     static_cast<unsigned>(have), static_cast<unsigned>(cfg.target),
+                     static_cast<long long>(waited_ms), station_name.c_str());
+            filling = false;
+        } else if (tab5_playback::ShouldRebuffer(have, buffer_plan.low_water, decoded_frames > 0,
+                                                 reader_alive)) {
+            ++underruns;
+            log_playback("underrun", 0);
+            ESP_LOGW(TAG, "audio underrun #%d station=%s total=%u KB; rebuffering", underruns,
+                     station_name.c_str(), static_cast<unsigned>(reader->total.load() / 1024));
+            SetUi("Buffering", "Network slow");
+            filling = true;
+            fill_kind = tab5_playback::FillKind::Rebuffer;
+            fill_started_us = esp_timer_get_time();
+            continue;
         }
 
         if (read_ptr != read_buffer && bytes_left > 0) {
@@ -2335,7 +2454,10 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
         if (resuming && decoder_received - uint64_t(bytes_left) <= skip_until)
             continue;  // refill MP3 bit reservoir without replaying already heard frames
 #if CONFIG_QDTECH_TAB5_NATIVE_UI
-        if (frame_info.bitrate != 96000 || frame_info.samprate != 44100 || frame_info.nChans != 2) {
+        // The relay sends 96 kbps for songs and podcasts; live radio may come at 64 kbps,
+        // which already matches the qtfm sources. Both stay 44.1 kHz stereo.
+        if ((frame_info.bitrate != 96000 && frame_info.bitrate != 64000) ||
+            frame_info.samprate != 44100 || frame_info.nChans != 2) {
             custom_url_fatal_error_ = playing_custom_url_;
             stream_failed = true;
             SetUi("Error", "Audio service format mismatch");
@@ -2355,7 +2477,7 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
 #if CONFIG_QDTECH_TAB5_NATIVE_UI
             {
                 std::lock_guard<std::mutex> lock(status_mutex_);
-                published_station_bitrate_ = 96;
+                published_station_bitrate_ = frame_info.bitrate / 1000;
                 published_station_codec_ = "MP3";
             }
 #endif
@@ -2378,18 +2500,20 @@ bool RadioService::PlayUrl(const std::string& url, int url_index, uint32_t strea
                          static_cast<int>((esp_timer_get_time() - t_start_us) / 1000));
             }
             const int64_t progress_now = esp_timer_get_time();
+            const int consumer_ms = static_cast<int>(
+                last_progress_log_us ? (progress_now - last_progress_log_us) / 1000 : 0);
             ESP_LOGI(TAG,
                      "playing station=%s frames=%d rate=%d channels=%d total=%u KB "
-                     "buffered=%d ring=%u interval_ms=%lld",
+                     "buffered=%d ring=%u interval_ms=%d",
                      station_name.c_str(), decoded_frames, frame_info.samprate, frame_info.nChans,
                      static_cast<unsigned>(total_bytes / 1024), bytes_left,
-                     static_cast<unsigned>(xStreamBufferBytesAvailable(reader->ring)),
-                     static_cast<long long>(
-                         last_progress_log_us ? (progress_now - last_progress_log_us) / 1000 : 0));
+                     static_cast<unsigned>(xStreamBufferBytesAvailable(reader->ring)), consumer_ms);
+            log_playback("play", consumer_ms);
             last_progress_log_us = progress_now;
         }
     }
 
+    tab5_playback::PublishPlaybackBuffer(0, false, false);
     const bool reader_stopped = stop_reader();
     if (decoder) {
         MP3FreeDecoder(decoder);

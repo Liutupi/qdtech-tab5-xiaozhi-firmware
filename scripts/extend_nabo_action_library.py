@@ -64,6 +64,7 @@ def main():
     parser.add_argument('--base-library', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--lz4-library')
+    parser.add_argument('--revision', default='selected-actions-increment')
     args = parser.parse_args()
     requested = json.loads(args.selection.read_text())['selected']
     assert requested and all(x['decision'] == 'keep' for x in requested)
@@ -123,8 +124,8 @@ def main():
         added.append(key)
         ids.add(key)
         print(json.dumps({'id': key, 'frames': report['frames'], 'bytes': report['bytes']}, ensure_ascii=False), flush=True)
-    assert len(entries) <= 32, 'Runtime failure mask supports 32 clips'
-    manifest = {**base, 'version': 'lively-v1', 'revision': '2026-10-21-v2',
+    assert len(entries) <= 63, 'Runtime request tokens support 63 clips'
+    manifest = {**base, 'version': 'lively-v1', 'revision': args.revision,
                 'base_manifest': str(args.base_library/'manifest.json'),
                 'selection': str(args.selection), 'actions': entries,
                 'selected_action_count': len(entries)-4, 'added_action_ids': added,

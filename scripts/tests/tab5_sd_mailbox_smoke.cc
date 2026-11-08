@@ -91,10 +91,10 @@ int main(int argc, char** argv) {
     box.Pump(pack, box.Requested());
     box.CancelAll();
     assert(box.TakeReady().slot < 0);
-    // Every registered state/action must reach the reader, including clips 18+.
+    // Every registered state/action must reach the reader, including clips 32+.
     static_assert(nabo_scene::kClipCount <= SceneMailbox::kMaxClips);
     for (unsigned clip = 0; clip < nabo_scene::kClipCount; ++clip) {
-        box.Request(clip, 0, 0x7ffff);
+        box.Request(clip, 0, SceneMailbox::kGenerationMask);
         assert(box.Requested() && SceneMailbox::Clip(box.Requested()) == clip);
         assert(box.Pump(pack, box.Requested()) == Error::Ok);
         auto action = box.TakeReady();
@@ -103,11 +103,26 @@ int main(int argc, char** argv) {
         box.Release(action);
     }
     // Highest encodable clip and full epoch survive; the next clip is rejected.
-    box.Request(SceneMailbox::kMaxClips - 1, 255, 0x7ffff);
+    box.Request(SceneMailbox::kMaxClips - 1, 255, SceneMailbox::kGenerationMask);
     assert(SceneMailbox::Clip(box.Requested()) == SceneMailbox::kMaxClips - 1);
     assert((box.Requested() & 255) == 255);
+    assert((box.Requested() >> (8 + kClipBits)) == SceneMailbox::kGenerationMask);
+    box.Request(32, 0, SceneMailbox::kGenerationMask + 1);
+    assert(SceneMailbox::Clip(box.Requested()) == 32);
+    assert((box.Requested() >> (8 + kClipBits)) == 0);
     box.Request(SceneMailbox::kMaxClips, 0, 1);
     assert(box.Requested() == 0);
+    ClipFailures failures;
+    assert(failures.Snapshot() == 0);
+    for (unsigned clip : {0u, 31u, 32u, 62u})
+        failures.Mark(clip);
+    const auto expected_failures = ClipBit(0) | ClipBit(31) | ClipBit(32) | ClipBit(62);
+    assert(failures.Snapshot() == expected_failures);
+    failures.Mark(kClipCapacity);
+    failures.Mark(64);
+    assert(failures.Snapshot() == expected_failures);
+    for (unsigned clip = 0; clip < 64; ++clip)
+        assert(failures.Contains(clip) == bool(expected_failures & ClipBit(clip)));
     box.Request(0, 256, 1);
     assert(box.Requested() == 0);
     assert(source.source.max_request <= 8192);

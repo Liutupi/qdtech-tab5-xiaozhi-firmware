@@ -3,6 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -96,6 +97,10 @@ public:
     void SetHost(const std::string& host);
     // Accepts the Muse MCP URL (.../mcp/<token>) or the inbox URL (.../inbox/<token>).
     bool SetUrl(const std::string& url);
+    // True while a recent request reached the NAS relay directly on the LAN.
+    // Audio and music commands then skip the public tunnel. A failure falls back.
+    bool LanRelayUsable() const;
+    void ReportLanFailure();
 
 private:
     Inbox() = default;
@@ -112,6 +117,10 @@ private:
     std::string topic_;
     std::string last_music_id_;
     int music_failures_ = 0;
+    void MarkLanOk();
+    std::atomic<int64_t> lan_ok_until_us_{0};
+    std::atomic<int64_t> lan_retry_us_{0};
+    bool music_poll_deferred_ = false;
     bool refresh_requested_ = false;
     bool track_pending_ = false;
     int track_episode_ = 0;

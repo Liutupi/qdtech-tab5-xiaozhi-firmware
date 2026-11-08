@@ -452,3 +452,9 @@ NABO FM 与每日节目页统一录音室，1,079 台 SD 台表、歌曲收藏�
 按用户要求先发布。主页白天插播、去重/10 分钟间隔、对话/音乐/睡眠抑制、早间运势及独立非定时高优先级推送仍待实机补验；高优先级提示音、LAN-only 无 token 推送未实现，无 SD 不持久保存历史。完整边界见 docs/tab5-v1.0.18-validation.json。发布页：https://github.com/Liutupi/qdtech-tab5-xiaozhi-firmware/releases/tag/v1.0.18。
 
 开发副本 /Users/tupi/tab5-nabo-push。刷前完整 Flash、NVS、BIN/ELF 和日志私有保存于 /Volumes/liutupi/tab5-private-backups/release-v1.0.18-20261022/，不得上传；外接卷的未提交 HANDOFF.md 和 scripts/push_tab5_daily.mjs 未改动。
+
+## v1.0.19（2026-11-08）：电台与歌曲卡顿修复
+
+根因：lwIP TCP 窗口 5760 B，经 Cloudflare 隧道（RTT 约 0.6 s）单连接上限约 78 kbps，低于 96k 立体声。原生变体 config.json 改为 `CONFIG_LWIP_TCP_WND_DEFAULT=32768`、`CONFIG_LWIP_TCP_RECVMBOX_SIZE=32`；同时合入 playback-20261108a 缓冲修复（含 RISC-V 上 `%u`/type-limits 编译修正）、电台接受 64k/96k，以及 10/30 的 8 条 NABO 动作（需 SD 素材，缺失时自动跳过）。实机：电台与歌曲各约 2 分钟零断音。USB 电脑联动未包含。
+
+构建注意：组件仓库元数据现会引入未定义的 `ESP_HOSTED_HOST_USB_*_MANIFEST`，配置阶段失败。可在已有完整 managed_components 的目录里，让组件管理器离线运行（设一个不可达的 HTTPS_PROXY），并让 dependencies.lock 与本地组件版本一致。详见 docs/tab5-v1.0.19-validation.json。

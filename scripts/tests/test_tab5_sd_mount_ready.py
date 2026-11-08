@@ -79,9 +79,9 @@ public:
     nabo_sd::Pack pack_;
     nabo_sd::WideComposer composer_{nullptr, nullptr};
     std::atomic<bool> lively_{false};
-    std::atomic<uint32_t> failures_{0};
+    nabo_sd::ClipFailures failures_;
     Reader() : a(kBytes), b(kBytes), mailbox(a.data(), b.data(), kBytes) {}
-    bool Failed(unsigned clip) { return failures_.load() & (1u << clip); }
+    bool Failed(unsigned clip) { return failures_.Contains(clip); }
 ''' + loop + r'''
 };
 static Reader* reader;

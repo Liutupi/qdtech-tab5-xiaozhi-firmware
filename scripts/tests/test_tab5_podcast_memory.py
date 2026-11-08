@@ -30,6 +30,7 @@ class PodcastMemoryTests(unittest.TestCase):
 #include <string>
 #include <vector>
 #include <cJSON.h>
+#include "tab5_playback_buffer.h"
 #include "tab5_podcast_transcript.h"
 #define ESP_LOGW(...) ((void)0)
 constexpr size_t kMaxPodcastBytes=192*1024;

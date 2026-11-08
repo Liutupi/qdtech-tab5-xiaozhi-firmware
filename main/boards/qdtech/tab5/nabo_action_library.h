@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include "nabo_clip_limits.h"
 #include "nabo_scene_policy.h"
 
 namespace nabo_scene {
@@ -9,16 +10,46 @@ struct ActionClip {
     unsigned frames;
     unsigned weight;
 };
-inline constexpr std::array<ActionClip, 26> kActions{{
-    {"A06", 125, 1},   {"A09", 125, 1},   {"A16", 125, 2},   {"E04", 100, 1},   {"E05", 100, 4},
-    {"E06", 100, 5},   {"E09", 100, 3},   {"E14", 100, 2},   {"P01", 125, 1},   {"P02", 125, 1},
-    {"A03R1", 125, 1}, {"A05R1", 125, 3}, {"E12R1", 100, 2}, {"E03R2", 100, 3}, {"A07", 126, 1},
-    {"A08", 126, 2},   {"A10", 126, 2},   {"E10", 125, 2},   {"A03", 125, 1},   {"A05", 125, 2},
-    {"A12", 126, 1},   {"E13", 125, 1},   {"A13", 125, 1},   {"P04", 125, 1},   {"A14", 125, 1},
+inline constexpr std::array<ActionClip, 34> kActions{{
+    {"A06", 125, 1},
+    {"A09", 125, 1},
+    {"A16", 125, 2},
+    {"E04", 100, 1},
+    {"E05", 100, 4},
+    {"E06", 100, 5},
+    {"E09", 100, 3},
+    {"E14", 100, 2},
+    {"P01", 125, 1},
+    {"P02", 125, 1},
+    {"A03R1", 125, 1},
+    {"A05R1", 125, 3},
+    {"E12R1", 100, 2},
+    {"E03R2", 100, 3},
+    {"A07", 126, 1},
+    {"A08", 126, 2},
+    {"A10", 126, 2},
+    {"E10", 125, 2},
+    {"A03", 125, 1},
+    {"A05", 125, 2},
+    {"A12", 126, 1},
+    {"E13", 125, 1},
+    {"A13", 125, 1},
+    {"P04", 125, 1},
+    {"A14", 125, 1},
     {"E15", 125, 2},
+    {"A15", 125, 2},
+    {"P05", 125, 1},
+    {"A17", 125, 2},
+    {"E16", 125, 2},
+    // Retain A18's stable index, but do not schedule it until its low hand
+    // clears the B window sill. Its complete source pixels remain in the pack.
+    {"A18", 126, 0},
+    {"E17", 126, 2},
+    {"A19", 125, 2},
+    {"E18", 125, 1},
 }};
 inline constexpr unsigned kClipCount = 4 + kActions.size();
-static_assert(kClipCount <= 32, "Clip failure masks have 32 bits");
+static_assert(kClipCount <= nabo_sd::kClipCapacity, "Clips must fit request tokens and failures");
 
 // Visual-only, allocation-free. One action at a time, real audio always wins.
 // Decorative clips cannot delay a reply or change the application's state.
@@ -27,22 +58,27 @@ public:
     // Asks for one clip by id (e.g. a 每日推送 reminder). It starts at the next neutral
     // idle boundary, ahead of the random pick and its cooldowns; whatever blocks idle
     // actions (voice, music, sleep, apps) also holds it, and it lapses after a minute.
-    bool Request(const char* id, uint64_t now) {
+    bool Request(const char* id, uint64_t now, uint64_t lifetime_ms = 60000) {
+        if (!id)
+            return false;
         for (unsigned i = 0; i < kActions.size(); ++i) {
+            if (!kActions[i].weight)
+                continue;
             const char* a = kActions[i].id;
             const char* b = id;
             while (*a && *a == *b)
                 ++a, ++b;
             if (*a == 0 && *b == 0) {
                 requested_ = int(i);
-                requested_until_ = now + 60000;
+                requested_until_ = now + (lifetime_ms < 60000 ? lifetime_ms : 60000);
                 return true;
             }
         }
         return false;
     }
 
-    Selection Apply(uint64_t now, Selection base, SceneInput input, uint32_t failed, bool enabled) {
+    Selection Apply(uint64_t now, Selection base, SceneInput input, nabo_sd::FailedClips failed,
+                    bool enabled) {
         const bool entered_listening = input.listening && !listening_;
         const bool entered_work = input.working && !working_;
         listening_ = input.listening;
@@ -64,7 +100,7 @@ public:
             const unsigned clip = unsigned(active_) + 4;
             const bool context_changed =
                 (context_ == 1 && !input.listening) || (context_ == 2 && !input.working);
-            if (context_changed || (failed & (1u << clip)) ||
+            if (context_changed || (failed & nabo_sd::ClipBit(clip)) ||
                 now - since_ >= kActions[active_].frames * 40) {
                 Stop(now);
                 idle_since_ = now;
@@ -89,7 +125,7 @@ public:
         if (requested_ >= 0 && frame == 0) {
             const int wanted = requested_;
             requested_ = -1;
-            if (now <= requested_until_ && !(failed & (1u << (wanted + 4)))) {
+            if (now <= requested_until_ && !(failed & nabo_sd::ClipBit(unsigned(wanted) + 4))) {
                 active_ = last_ = wanted;
                 context_ = 0;
                 since_ = now;
@@ -124,11 +160,11 @@ private:
         return random_;
     }
     void Schedule(uint64_t now) { next_ = now + 15000 + Random() % 15001; }
-    bool Eligible(unsigned i, uint64_t now, uint32_t failed) const {
-        return !(failed & (1u << (i + 4))) && int(i) != last_ &&
+    bool Eligible(unsigned i, uint64_t now, nabo_sd::FailedClips failed) const {
+        return kActions[i].weight && !(failed & nabo_sd::ClipBit(i + 4)) && int(i) != last_ &&
                (!used_[i] || now - used_[i] >= 600000);
     }
-    bool Start(unsigned i, uint64_t now, uint32_t failed, unsigned context) {
+    bool Start(unsigned i, uint64_t now, nabo_sd::FailedClips failed, unsigned context) {
         if (!Eligible(i, now, failed))
             return false;
         active_ = int(i);

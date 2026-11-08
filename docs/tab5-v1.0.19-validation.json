@@ -1,0 +1,34 @@
+{
+  "release": "v1.0.19",
+  "date": "2026-11-08",
+  "variant": "qdtech-tab5-native",
+  "target": "esp32p4",
+  "hardware": "ESP32-P4 rev 1.3, 16 MiB Flash",
+  "sdk": "ESP-IDF v6.1",
+  "base": "v1.0.18 (ef10924) + 2026-10-30 action library + playback-20261108a",
+  "app": {
+    "bytes": 12291328,
+    "sha256": "f6fb2167577a2ba6f3aa3e9b58de6cb9ebdebaa1afb106ac9c8e71f7b525a682",
+    "factory_free_bytes": 291584
+  },
+  "changes": [
+    "LWIP TCP window 5760 -> 32768, recvmbox 6 -> 32 (lwIP buffers in PSRAM)",
+    "playback-20261108a start/rebuffer cushions and fewer tunnel polls during playback",
+    "radio accepts 64 or 96 kbps MP3, 44.1 kHz stereo",
+    "8 more NABO idle actions (A18 weight 0); need SD assets, skipped when missing"
+  ],
+  "device_test": {
+    "radio_tunnel_live": "about 2 min, 0 underruns, start 1416 kbps",
+    "song_tunnel_file": "about 2 min, 0 underruns, 150-310 kbps, buffer up to 430 KB",
+    "boot": "release image flashed to factory 0x20000, hash verified, boot log checked"
+  },
+  "unchanged": [
+    "partition table layout",
+    "updater 1.2.2",
+    "SD animation package (same as v1.0.18)"
+  ],
+  "not_included": [
+    "USB desktop companion (stopped project)"
+  ],
+  "build_note": "component manager run offline against the existing lock: registry metadata now names ESP_HOSTED_HOST_USB_*_MANIFEST Kconfig symbols that abort configuration"
+}
