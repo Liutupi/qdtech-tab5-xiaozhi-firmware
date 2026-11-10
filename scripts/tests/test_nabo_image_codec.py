@@ -5,6 +5,11 @@ import subprocess
 import tempfile
 import unittest
 
+try:
+    import PIL  # noqa: F401
+except ImportError:
+    raise unittest.SkipTest("Pillow is required for the NABO asset scripts")
+
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]

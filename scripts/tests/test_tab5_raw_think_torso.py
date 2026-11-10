@@ -10,6 +10,11 @@ import sys
 import tempfile
 import unittest
 
+try:
+    import PIL  # noqa: F401
+except ImportError:
+    raise unittest.SkipTest("Pillow is required for the NABO asset scripts")
+
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))

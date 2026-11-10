@@ -85,6 +85,8 @@ int main() {
 class WeatherObsTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("c++") and shutil.which("cc"), "C/C++ compiler required")
     def test_weather_obs(self):
+        if not (CJSON / "cJSON.c").exists():
+            self.skipTest("cJSON component must be installed (managed_components)")
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             subprocess.run(["cc", "-c", str(CJSON / "cJSON.c"), "-o", str(temp / "cjson.o")], check=True)

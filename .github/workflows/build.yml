@@ -27,7 +27,10 @@ jobs:
           fetch-depth: 0
 
       - name: Test build tooling
-        run: python -m unittest discover -s scripts/tests -v
+        run: |
+          # The NABO asset tests need Pillow; without it they are skipped.
+          python -m pip install --quiet pillow || echo "::warning::Pillow not installed; asset tests will be skipped"
+          python -m unittest discover -s scripts/tests -v
 
       - id: select
         name: Select variants based on changes

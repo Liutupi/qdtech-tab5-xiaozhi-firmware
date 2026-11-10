@@ -23,6 +23,7 @@ def harness(scene_source, mount_source):
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <vector>
 #include "nabo_scene_mailbox.h"
 #include "nabo_scene_stream.h"
