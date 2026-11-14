@@ -52,7 +52,9 @@ int main(int argc, char** argv) {
     }
     for (const char* needle : {"交通", "JAZZ", "xgdt", "不存在"}) {
         std::string name;
-        std::printf("find %s %d %s\n", needle, catalog.Find(needle, &name), name.c_str());
+        // Find() fills `name`; call it before the arguments are evaluated, in any order.
+        const int found = catalog.Find(needle, &name);
+        std::printf("find %s %d %s\n", needle, found, name.c_str());
     }
     return 0;
 }
