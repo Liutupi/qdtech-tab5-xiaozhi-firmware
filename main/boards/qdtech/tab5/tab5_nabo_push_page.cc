@@ -37,7 +37,7 @@ KindStyle StyleOf(Kind kind) {
     }
 }
 
-std::string Clock(const std::string& ts) { return ts.size() >= 16 ? ts.substr(11, 5) : ""; }
+std::string Clock(std::string_view ts) { return ts.size() >= 16 ? std::string(ts.substr(11, 5)) : ""; }
 
 }  // namespace
 
@@ -127,7 +127,7 @@ void Tab5NaboPushPage::MarkVisibleRead() {
         mark(data_->TodayFortune(today_));
     if (board_ == kStudy)
         for (const auto* item : data_->TodayStudy(today_))
-            if (item->id == study_id_)
+            if (item->id == std::string_view(study_id_))
                 mark(item);
     if (board_ == kTodo)
         for (const auto* item : data_->TodayTodos(today_))
@@ -224,12 +224,12 @@ void Tab5NaboPushPage::RenderStudy(lv_obj_t* area) {
     lv_obj_set_style_pad_row(list, 8, 0);
     const Item* current = study.front();
     for (const auto* item : study) {
-        if (item->id == study_id_)
+        if (item->id == std::string_view(study_id_))
             current = item;
-        const bool selected = item->id == study_id_;
+        const bool selected = item->id == std::string_view(study_id_);
         const bool read = data_->marks.read.count(item->id) > 0;
         const KindStyle style = StyleOf(item->kind());
-        keys_.push_back(item->id);
+        keys_.emplace_back(item->id);
         auto* row = Panel(list, 0, 0, 388, LV_SIZE_CONTENT, selected ? kSelected : kRow, 18);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_style_pad_all(row, 16, 0);
@@ -241,7 +241,7 @@ void Tab5NaboPushPage::RenderStudy(lv_obj_t* area) {
         if (data_->marks.learned.count(item->id))
             meta += " · 已学会";
         Txt(head, meta, kMuted, 0, 0, LV_SIZE_CONTENT);
-        auto* title = Txt(row, item->title, selected ? kOrange : (read ? kSoft : kText), 0, 0, 356);
+        auto* title = Txt(row, std::string(item->title), selected ? kOrange : (read ? kSoft : kText), 0, 0, 356);
         lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
         lv_obj_set_height(title, 72);
     }
@@ -250,10 +250,10 @@ void Tab5NaboPushPage::RenderStudy(lv_obj_t* area) {
     auto* card = Panel(area, 424, 0, 588, 600, kCard, 22);
     Tag(card, style.label, style.color, 30, 26);
     Txt(card, "来自 Nabo · 今天 " + Clock(current->ts), kMuted, 150, 26, 400);
-    Txt(card, current->title, kText, 30, 76, 528);
+    Txt(card, std::string(current->title), kText, 30, 76, 528);
     auto* body = Scroller(card, 30, 160, 528, 330);
-    Txt(body, current->body.empty() ? "暂无正文" : current->body, kBody, 0, 0, 512);
-    keys_.push_back(current->id);
+    Txt(body, current->body.empty() ? "暂无正文" : std::string(current->body), kBody, 0, 0, 512);
+    keys_.emplace_back(current->id);
     const int tag = int(keys_.size() - 1);
     const bool learned = data_->marks.learned.count(current->id) > 0;
     const bool fav = data_->marks.fav.count(current->id) > 0;
@@ -282,7 +282,7 @@ void Tab5NaboPushPage::RenderTodo(lv_obj_t* area) {
     lv_obj_set_style_pad_row(list, 8, 0);
     for (const auto* item : todos) {
         const bool finished = data_->marks.done.count(item->id) > 0;
-        keys_.push_back(item->id);
+        keys_.emplace_back(item->id);
         auto* row = Panel(list, 0, 0, 1000, 80, kCard, 16);
         if (item->high() && !finished)
             Panel(row, 0, 14, 5, 52, kOrange, 3);
@@ -375,7 +375,7 @@ void Tab5NaboPushPage::UpdateAvatar() {
         if (!data_->marks.read.count(item.id) && (!newest || item.rev > newest->rev))
             newest = &item;
     }
-    const std::string mood = newest ? newest->mood : "";
+    const std::string mood = newest ? std::string(newest->mood) : "";
     const char* text = !any                 ? "等 Nabo 推送"
                        : !newest            ? "今天都看完了"
                        : mood == "alert"    ? "有一条要紧的"

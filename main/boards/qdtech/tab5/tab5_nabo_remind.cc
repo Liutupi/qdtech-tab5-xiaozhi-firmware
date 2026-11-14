@@ -23,7 +23,7 @@ std::string Clock(int minutes) {
 
 }  // namespace
 
-const char* MoodAction(const std::string& mood) {
+const char* MoodAction(std::string_view mood) {
     if (mood == "alert") return "A07";     // 指向右侧
     if (mood == "rain") return "E10";      // 摇头轻叹
     if (mood == "happy") return "E06";     // 闭眼满足笑
@@ -43,7 +43,7 @@ Reminder PickReminder(const Data& data, const LocalClock& clock, const KeySet& d
         if (at >= 24 * 60 || data.marks.done.count(item->id))
             continue;
         const int delta = at - clock.minutes;
-        const std::string key = "todo:" + item->id;
+        const std::string key = "todo:" + std::string(item->id);
         if (delta > 15 || delta < -60 || !offer(key))
             continue;
         r.active = true;
@@ -61,15 +61,15 @@ Reminder PickReminder(const Data& data, const LocalClock& clock, const KeySet& d
     const Item* high = nullptr;
     for (const auto& item : data.items)
         if (item.high() && item.Day() == clock.today && !data.marks.read.count(item.id) &&
-            item.kind() != Kind::Other && offer("high:" + item.id) && (!high || item.rev > high->rev))
+            item.kind() != Kind::Other && offer("high:" + std::string(item.id)) && (!high || item.rev > high->rev))
             high = &item;
     if (high) {
         r.active = true;
         r.board = BoardOf(high->kind());
         r.title = "重要推送";
-        r.body = high->kind() == Kind::Todo ? TodoLabel(*high) : high->title;
-        r.key = "high:" + high->id;
-        r.action = MoodAction(high->mood.empty() ? "alert" : high->mood);
+        r.body = high->kind() == Kind::Todo ? TodoLabel(*high) : std::string(high->title);
+        r.key = "high:" + std::string(high->id);
+        r.action = MoodAction(high->mood.empty() ? "alert" : std::string_view(high->mood));
         return r;
     }
 
@@ -81,7 +81,7 @@ Reminder PickReminder(const Data& data, const LocalClock& clock, const KeySet& d
         r.active = true;
         r.board = kFortune;
         r.title = f.score ? "今日运势 · " + std::to_string(f.score) + "/5" : std::string("今日运势");
-        r.body = f.summary.empty() ? fortune->title : f.summary;
+        r.body = f.summary.empty() ? std::string(fortune->title) : f.summary;
         if (!f.yi.empty())
             r.body += " · 宜" + f.yi.front();
         r.key = "fortune:" + clock.today;

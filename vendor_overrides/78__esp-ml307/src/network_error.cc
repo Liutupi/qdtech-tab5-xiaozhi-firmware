@@ -217,16 +217,24 @@ const char* NetworkError::Message() const {
     }
 }
 
-std::string NetworkError::ToString() const {
-    char buf[96];
+const char* NetworkError::Format(char* buf, size_t len) const noexcept {
+    if (buf == nullptr || len == 0) {
+        return "";
+    }
     if (code == NetworkErrc::HttpFailed && native > 0) {
-        snprintf(buf, sizeof(buf), "%s %d (%s)", Message(), native, Name());
+        snprintf(buf, len, "%s %d (%s)", Message(), native, Name());
     } else if (native != 0) {
-        snprintf(buf, sizeof(buf), "%s (%s, native=%d)", Message(), Name(), native);
+        snprintf(buf, len, "%s (%s, native=%d)", Message(), Name(), native);
     } else {
-        snprintf(buf, sizeof(buf), "%s (%s)", Message(), Name());
+        snprintf(buf, len, "%s (%s)", Message(), Name());
     }
     return buf;
+}
+
+std::string NetworkError::ToString() const {
+    char buf[96];
+    // Failure logs should call Format(). This still allocates for older callers.
+    return Format(buf, sizeof(buf));
 }
 
 NetworkError AtError::ToNetworkError() const {

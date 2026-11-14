@@ -69,7 +69,7 @@ void Tab5NaboPushPage::RenderFortune(lv_obj_t* area) {
     lv_obj_set_style_pad_all(left, 28, 0);
     std::string meta = "来自 Nabo";
     if (item->ts.size() >= 16)
-        meta += " · " + item->ts.substr(11, 5);
+        meta += " · " + std::string(item->ts, 11, 5);
     Txt(left, meta, kMuted, 0, 0, 540);
     if (f.score) {
         auto* score = Row(left, 540);

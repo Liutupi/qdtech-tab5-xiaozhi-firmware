@@ -64,6 +64,8 @@ public:
 
     const char* Name() const;
     const char* Message() const;
+    // Caller-provided buffer. Does not allocate, so a low-memory log cannot throw.
+    const char* Format(char* buf, size_t len) const noexcept;
     std::string ToString() const;
 };
 
