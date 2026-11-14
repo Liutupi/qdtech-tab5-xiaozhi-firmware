@@ -217,7 +217,9 @@ NetworkResult<> HttpClient::Open(const std::string& method, const std::string& u
         // 重置所有状态（不会清空 content_）
         ResetRequestState();
 
-        // 建立新的 TCP 连接
+        // 建立新的 TCP 连接. Host lifecycle tests stub only part of esp_heap_caps;
+        // the gate runs on device, where internal DMA memory is real.
+#if defined(ESP_PLATFORM)
         const size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         const size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
         if (!HeapAllowsNewConnection(free_internal, largest_internal)) {
@@ -225,6 +227,7 @@ NetworkResult<> HttpClient::Open(const std::string& method, const std::string& u
                      static_cast<unsigned>(free_internal), static_cast<unsigned>(largest_internal));
             return Fail(NetworkError::NetworkUnavailable());
         }
+#endif
         if (protocol_ == "https") {
             tcp_ = network_->CreateSsl(connect_id_);
         } else {
