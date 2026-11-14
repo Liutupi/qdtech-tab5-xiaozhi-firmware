@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "tab5_memdiag.h"
 #include "tab5_sd.h"
 #endif
 
@@ -68,24 +69,28 @@ void Lines(const cJSON* object, const char* key, int (&out)[6]) {
     }
 }
 
-bool Known(const std::string& source) {
+bool Known(std::string_view source) {
     return source == "nabo/fortune" || source == "nabo/todo" || source == "nabo/study/paper" ||
            source == "nabo/study/word" || source == "nabo/study/point";
 }
 
 bool ParseItem(const cJSON* object, Item* out) {
+    const auto read = [object](const char* key) -> std::string_view {
+        const auto* value = cJSON_GetObjectItemCaseSensitive(object, key);
+        return cJSON_IsString(value) && value->valuestring ? value->valuestring : "";
+    };
     Item item;
-    item.id = Str(object, "id");
-    item.source = Str(object, "source");
-    item.ts = Str(object, "ts");
-    item.title = Str(object, "title");
+    item.id = read("id");
+    item.source = read("source");
+    item.ts = read("ts");
+    item.title = read("title");
     if (item.id.empty() || item.id.size() > 80 || !Known(item.source) || item.ts.size() < 10 ||
         item.title.empty())
         return false;
-    item.priority = Str(object, "priority");
-    item.mood = Str(object, "mood");
-    item.body = Str(object, "body");
-    item.time = Str(object, "time");
+    item.priority = read("priority");
+    item.mood = read("mood");
+    item.body = read("body");
+    item.time = read("time");
     item.rev = Int(object, "rev");
     *out = std::move(item);
     return true;
@@ -121,19 +126,19 @@ KeySet* MarkSet(Marks* marks, Mark mark) {
 
 }  // namespace
 
-bool KeySet::count(const std::string& key) const {
+bool KeySet::count(std::string_view key) const {
     return std::binary_search(keys_.begin(), keys_.end(), key);
 }
 
-bool KeySet::insert(const std::string& key) {
+bool KeySet::insert(std::string_view key) {
     const auto at = std::lower_bound(keys_.begin(), keys_.end(), key);
     if (at != keys_.end() && *at == key)
         return false;
-    keys_.insert(at, key);
+    keys_.emplace(at, key);
     return true;
 }
 
-bool KeySet::erase(const std::string& key) {
+bool KeySet::erase(std::string_view key) {
     const auto at = std::lower_bound(keys_.begin(), keys_.end(), key);
     if (at == keys_.end() || *at != key)
         return false;
@@ -150,7 +155,7 @@ Kind Item::kind() const {
     return Kind::Other;
 }
 
-Fortune ParseFortune(const std::string& body) {
+Fortune ParseFortune(std::string_view body) {
     Fortune f;
     Json root(cJSON_ParseWithLength(body.data(), body.size()), cJSON_Delete);
     if (!cJSON_IsObject(root.get()))
@@ -218,7 +223,7 @@ Fortune ParseFortune(const std::string& body) {
 }
 
 int TodoMinutes(const Item& item) {
-    const std::string& t = item.time.empty() ? item.title : item.time;
+    const auto& t = item.time.empty() ? item.title : item.time;
     int h = 0, m = 0, used = 0;
     if (std::sscanf(t.c_str(), "%2d:%2d%n", &h, &m, &used) == 2 && used >= 4 && h >= 0 && h < 24 &&
         m >= 0 && m < 60 && (item.time.size() || (t.size() > size_t(used) && t[used] == ' ')))
@@ -228,9 +233,10 @@ int TodoMinutes(const Item& item) {
 
 std::string TodoLabel(const Item& item) {
     if (TodoMinutes(item) >= 24 * 60)
-        return item.title;
+        return std::string(item.title);
     const auto space = item.title.find(' ');
-    return space == std::string::npos || space > 5 ? item.title : item.title.substr(space + 1);
+    return std::string(space == StoredString::npos || space > 5 ? std::string_view(item.title)
+                                                                : std::string_view(item.title).substr(space + 1));
 }
 
 namespace {
@@ -294,7 +300,7 @@ std::vector<DaySummary> Data::Review(const std::string& today) const {
                 fortune_rev[at] = item.rev;
                 const Fortune f = ParseFortune(item.body);
                 d.score = f.score;
-                d.fortune = f.summary.empty() ? item.title : f.summary;
+                d.fortune = f.summary.empty() ? std::string(item.title) : f.summary;
             }
             break;
         case Kind::Todo:
@@ -309,7 +315,7 @@ std::vector<DaySummary> Data::Review(const std::string& today) const {
         case Kind::Point:
             ++d.study_total;
             d.learned += marks.learned.count(item.id) ? 1 : 0;
-            d.study.push_back(item.title);
+            d.study.emplace_back(item.title);
             break;
         case Kind::Other:
             break;
@@ -349,13 +355,14 @@ void Store::Load() {
         return;
     loaded_ = true;
 #ifdef ESP_PLATFORM
+    Tab5MemDiag::Stage("before NABO history");
     if (Tab5SdReady()) {
         FILE* file = std::fopen(kFile, "rb");
         if (file) {
             std::fseek(file, 0, SEEK_END);
             const long size = std::ftell(file);
             std::fseek(file, 0, SEEK_SET);
-            std::string text(size > 0 && size <= kMaxFileBytes ? size_t(size) : 0, '\0');
+            StoredString text(size > 0 && size <= kMaxFileBytes ? size_t(size) : 0, '\0');
             const size_t got = std::fread(text.data(), 1, text.size(), file);
             std::fclose(file);
             Json root(cJSON_ParseWithLength(text.data(), got), cJSON_Delete);
@@ -375,8 +382,11 @@ void Store::Load() {
             ESP_LOGI(TAG, "history: %u item(s), since=%d", unsigned(items_.size()), since_);
         }
     }
-#endif
     PublishLocked();
+    Tab5MemDiag::Stage("after NABO history");
+#else
+    PublishLocked();
+#endif
 }
 
 bool Store::ApplyInbox(const std::string& body, bool* more) {
@@ -400,7 +410,7 @@ bool Store::ApplyInbox(const std::string& body, bool* more) {
     cJSON_ArrayForEach(object, list) {
         const std::string id = Str(object, "id");
         const auto at = std::find_if(items_.begin(), items_.end(),
-                                     [&](const Item& item) { return item.id == id; });
+                                     [&](const Item& item) { return item.id == std::string_view(id); });
         if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(object, "deleted"))) {
             if (at != items_.end()) {
                 items_.erase(at);
@@ -450,7 +460,7 @@ SharedData Store::Get() {
     return shared_;
 }
 
-void Store::SetMark(Mark mark, const std::string& key, bool value) {
+void Store::SetMark(Mark mark, std::string_view key, bool value) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto* set = MarkSet(&marks_, mark);
     if (!(value ? set->insert(key) : set->erase(key)))
@@ -485,8 +495,8 @@ void Store::Prune(const std::string& today) {
         ids.insert(item.id);
     size_t marks = 0;
     for (int i = 0; i < 4; ++i)
-        marks += MarkSet(&marks_, Mark(i))->KeepIf([&](const std::string& key) { return ids.count(key); });
-    marks += marks_.fav_days.KeepIf([&](const std::string& day) { return day >= first; });
+        marks += MarkSet(&marks_, Mark(i))->KeepIf([&](std::string_view key) { return ids.count(key); });
+    marks += marks_.fav_days.KeepIf([&](std::string_view day) { return day >= first; });
     if (items_.size() == before && marks == 0)
         return;
     SaveLocked();

@@ -29,7 +29,7 @@ struct Reminder {
 Reminder PickReminder(const Data& data, const LocalClock& clock, const KeySet& dismissed);
 
 // The window-scene clip for a pushed mood.
-const char* MoodAction(const std::string& mood);
+const char* MoodAction(std::string_view mood);
 
 // No inserted animation in the night; the card still changes.
 inline bool QuietHours(int minutes) { return minutes >= 23 * 60 || minutes < 7 * 60; }

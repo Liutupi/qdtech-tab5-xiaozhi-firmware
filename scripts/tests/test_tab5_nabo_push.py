@@ -92,6 +92,14 @@ int main() {
     store.MarkAllRead(today);
     assert(store.Get()->Unread(today) == 0);
 
+    // Pruning in place must preserve a retained ID longer than the small-string buffer.
+    KeySet keys;
+    const std::string retained(80, 'a');
+    keys.insert(retained);
+    keys.insert("discard");
+    assert(keys.KeepIf([&](std::string_view id) { return id == retained; }) == 1);
+    assert(keys.count(retained));
+
     // A relay that started over makes the next poll begin from zero.
     assert(store.ApplyInbox(Page(0, 0, false, ""), &more) == false);
     assert(more && store.Since() == 0);
