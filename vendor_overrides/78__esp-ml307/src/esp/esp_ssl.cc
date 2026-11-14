@@ -50,8 +50,9 @@ NetworkResult<> EspSsl::Connect(const std::string& host, int port) {
             esp_err_t esp_err =
                 esp_tls_get_and_clear_last_error(tls_error, &error_code, &error_flags);
             err = NetworkError::FromEsp(esp_err);
+            char error_text[96];
             ESP_LOGE(TAG, "Failed to connect to %s:%d: %s", host.c_str(), port,
-                     err.ToString().c_str());
+                     err.Format(error_text, sizeof(error_text)));
         } else {
             ESP_LOGE(TAG, "Failed to get error handle");
         }

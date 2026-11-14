@@ -1,5 +1,8 @@
 #include "http_client.h"
 #include "network_interface.h"
+#include "heap_policy.h"
+#include "nothrow_lock.h"
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <cstring>
 #include <cstdlib>
@@ -214,7 +217,17 @@ NetworkResult<> HttpClient::Open(const std::string& method, const std::string& u
         // 重置所有状态（不会清空 content_）
         ResetRequestState();
 
-        // 建立新的 TCP 连接
+        // 建立新的 TCP 连接. Host lifecycle tests stub only part of esp_heap_caps;
+        // the gate runs on device, where internal DMA memory is real.
+#if defined(ESP_PLATFORM)
+        const size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        const size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        if (!HeapAllowsNewConnection(free_internal, largest_internal)) {
+            ESP_LOGW(TAG, "defer connect; internal free=%u largest=%u",
+                     static_cast<unsigned>(free_internal), static_cast<unsigned>(largest_internal));
+            return Fail(NetworkError::NetworkUnavailable());
+        }
+#endif
         if (protocol_ == "https") {
             tcp_ = network_->CreateSsl(connect_id_);
         } else {
@@ -240,12 +253,18 @@ NetworkResult<> HttpClient::Open(const std::string& method, const std::string& u
         connected_ = true;
         if (auto result = tcp_->Connect(host_, port_); !result) {
             {
-                std::lock_guard<std::mutex> read_lock(read_mutex_);
-                connected_ = false;
+                NothrowLock read_lock(read_mutex_);
+                if (read_lock) {
+                    connected_ = false;
+                } else {
+                    connected_.store(false);
+                }
             }
             write_cv_.notify_all();
             cv_.notify_all();
-            ESP_LOGE(TAG, "TCP connection failed: %s", result.error().ToString().c_str());
+            char error_text[96];
+            ESP_LOGE(TAG, "TCP connection failed: %s",
+                     result.error().Format(error_text, sizeof(error_text)));
             return Fail(result.error());
         }
         uint32_t t_connected = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -260,8 +279,12 @@ NetworkResult<> HttpClient::Open(const std::string& method, const std::string& u
     if (tcp_->Send(http_request) <= 0) {
         ESP_LOGE(TAG, "Send HTTP request failed");
         {
-            std::lock_guard<std::mutex> read_lock(read_mutex_);
-            connected_ = false;
+            NothrowLock read_lock(read_mutex_);
+            if (read_lock) {
+                connected_ = false;
+            } else {
+                connected_.store(false);
+            }
         }
         write_cv_.notify_all();
         cv_.notify_all();
@@ -283,15 +306,22 @@ void HttpClient::Close() {
 
     // The writer of the backpressure predicate must hold read_mutex_. This
     // pairs with wait(read_mutex_) and prevents a lost wake before TCP join.
+    // Do not throw if the mutex cannot be locked. Exceptions are disabled and
+    // the throw aborts the task while the TLS client is still owned.
     {
-        std::lock_guard<std::mutex> read_lock(read_mutex_);
-        connected_ = false;
+        NothrowLock read_lock(read_mutex_);
+        if (read_lock) {
+            connected_ = false;
+        } else {
+            connected_.store(false);
+            ESP_LOGE(TAG, "HTTP close could not lock the read mutex");
+        }
     }
     server_keep_alive_ = false;  // 重置 Keep-Alive 标志
     write_cv_.notify_all();
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!headers_received_) {
+        NothrowLock lock(mutex_);
+        if (lock && !headers_received_ && event_group_handle_) {
             last_error_ = NetworkError::ServerDisconnected();
             xEventGroupSetBits(event_group_handle_, EC801E_HTTP_EVENT_ERROR);
         }
@@ -823,7 +853,9 @@ std::string HttpClient::ReadAll() {
     while (true) {
         auto bytes_read = Read(buffer.data(), buffer.size());
         if (!bytes_read) {
-            ESP_LOGE(TAG, "Cannot read all data: %s", bytes_read.error().ToString().c_str());
+            char error_text[96];
+            ESP_LOGE(TAG, "Cannot read all data: %s",
+                     bytes_read.error().Format(error_text, sizeof(error_text)));
             return "";
         }
         if (*bytes_read == 0) {

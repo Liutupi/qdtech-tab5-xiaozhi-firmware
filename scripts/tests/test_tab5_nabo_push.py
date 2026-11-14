@@ -185,6 +185,77 @@ int main() {
 }
 '''
 
+# Same count as the captured SD history. Fields are longer than SSO and shorter
+# than SPIRAM_MALLOC_ALWAYSINTERNAL, the range that previously stayed internal.
+HISTORY = r'''
+#include "tab5_nabo_push.h"
+#include "tab5_podcast_model.h"
+
+#include <cassert>
+#include <cstdio>
+#include <cstdlib>
+#include <new>
+#include <string>
+#include <type_traits>
+
+static bool count_new = false;
+static size_t small_new_bytes = 0;
+
+void* operator new(size_t n) {
+    if (count_new && n <= 1024)
+        small_new_bytes += n;
+    if (void* p = std::malloc(n))
+        return p;
+    throw std::bad_alloc();
+}
+void* operator new(size_t n, const std::nothrow_t&) noexcept { return std::malloc(n); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, size_t) noexcept { std::free(p); }
+void* operator new[](size_t n) { return operator new(n); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete[](void* p, size_t) noexcept { std::free(p); }
+
+int main() {
+    using namespace tab5_nabo;
+    using Alloc = typename StoredString::allocator_type;
+    static_assert(std::is_same_v<Alloc, tab5_podcast::PsramAllocator<char>>);
+
+    std::string page = "{\"ok\":true,\"rev\":226,\"latest_rev\":226,\"more\":false,\"items\":[";
+    for (int i = 0; i < 226; ++i) {
+        if (i)
+            page += ',';
+        char item[320];
+        std::snprintf(item, sizeof(item),
+                      "{\"id\":\"id-%03d-0123456789abcdef\",\"ts\":\"2026-11-14T08:%02d:00+08:00\","
+                      "\"source\":\"nabo/study/point\",\"priority\":\"normal\","
+                      "\"title\":\"title-%03d-0123456789abcdef0123456789abcdef\","
+                      "\"body\":\"body-%03d-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ\","
+                      "\"rev\":%d}",
+                      i, i % 60, i, i, i + 1);
+        page += item;
+    }
+    page += "]}";
+
+    auto& store = Store::GetInstance();
+    store.ResetForTest();
+    tab5_podcast::PsramAllocBytes() = 0;
+    small_new_bytes = 0;
+    count_new = true;
+    bool more = true;
+    assert(store.ApplyInbox(page, &more));
+    count_new = false;
+    auto data = store.Get();
+    assert(!more && data && data->items.size() == 226);
+    assert(std::string(data->items.back().title).find("title-225-") == 0);
+    assert(std::string(data->items.back().body).find("body-225-") == 0);
+    assert(tab5_podcast::PsramAllocBytes() > 60 * 1024);
+    assert(small_new_bytes < 8 * 1024);
+    std::printf("history psram ok bytes=%zu small_new=%zu\n", tab5_podcast::PsramAllocBytes(),
+                small_new_bytes);
+    return 0;
+}
+'''
+
 
 @unittest.skipUnless(shutil.which("c++") and shutil.which("cc") and (CJSON / "cJSON.c").exists(),
                      "Host compilers and cJSON required")
@@ -210,6 +281,17 @@ class NaboPushStoreTests(unittest.TestCase):
                             str(temp / "remind.cc"), str(temp / "cjson.o"), "-o", str(temp / "remind")], check=True)
             result = subprocess.run([str(temp / "remind")], check=True, capture_output=True, text=True)
             self.assertIn("remind ok", result.stdout)
+
+    def test_history_payload_uses_psram_allocator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temp = Path(tmp)
+            (temp / "history.cc").write_text(HISTORY)
+            subprocess.run(["cc", "-c", str(CJSON / "cJSON.c"), "-o", str(temp / "cjson.o")], check=True)
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-I", str(BOARD),
+                            "-I", str(CJSON), str(BOARD / "tab5_nabo_push.cc"), str(temp / "history.cc"),
+                            str(temp / "cjson.o"), "-o", str(temp / "history")], check=True)
+            result = subprocess.run([str(temp / "history")], check=True, capture_output=True, text=True)
+            self.assertIn("history psram ok", result.stdout)
 
 
 if __name__ == "__main__":

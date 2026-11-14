@@ -374,9 +374,18 @@ void Store::Load() {
                     if (ParseItem(object, &item))
                         items_.push_back(std::move(item));
                 }
-                for (int i = 0; i < 5; ++i)
-                    for (auto& key : Strings(root.get(), kMarkKeys[i], 4000))
-                        MarkSet(&marks_, Mark(i))->insert(std::move(key));
+                for (int i = 0; i < 5; ++i) {
+                    const cJSON* mark = nullptr;
+                    size_t marks = 0;
+                    cJSON_ArrayForEach(mark, cJSON_GetObjectItemCaseSensitive(root.get(), kMarkKeys[i])) {
+                        if (marks >= 4000)
+                            break;
+                        if (cJSON_IsString(mark) && mark->valuestring) {
+                            MarkSet(&marks_, Mark(i))->insert(mark->valuestring);
+                            ++marks;
+                        }
+                    }
+                }
                 ever_synced_ = !items_.empty();
             }
             ESP_LOGI(TAG, "history: %u item(s), since=%d", unsigned(items_.size()), since_);

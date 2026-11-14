@@ -18,6 +18,14 @@
 // Header-only and free of ESP/LVGL so it is host-tested.
 namespace tab5_podcast {
 
+#ifndef ESP_PLATFORM
+// Host tests use this to show payloads did not go through operator new.
+inline std::size_t& PsramAllocBytes() {
+    static std::size_t bytes = 0;
+    return bytes;
+}
+#endif
+
 // Episode text is many small strings; under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL they
 // would all land in scarce internal RAM. Keep every byte of it in PSRAM.
 template <typename T>
@@ -27,10 +35,12 @@ struct PsramAllocator {
     template <typename U>
     PsramAllocator(const PsramAllocator<U>&) noexcept {}
     T* allocate(std::size_t n) {
+        const std::size_t bytes = n * sizeof(T);
 #ifdef ESP_PLATFORM
-        void* p = heap_caps_malloc(n * sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        void* p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 #else
-        void* p = std::malloc(n * sizeof(T));
+        PsramAllocBytes() += bytes;
+        void* p = std::malloc(bytes);
 #endif
         if (!p)
             std::abort();  // built with -fno-exceptions
